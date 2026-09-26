@@ -55,6 +55,10 @@ common_prompt = '''
 The status board is {{STATUS}} (format in {{SCHEMA}}); only globex-lead writes it.
 '''
 
+# Optional: the first message of each new conversation. Without one, a role nobody has written
+# to yet has no saved conversation and a herdr restart cannot resume it.
+start_message = '''Confirm your role in one line and wait for instructions from globex-lead.'''
+
 [workspace]
 label = "globex"                  # the herdr workspace label
 
@@ -89,6 +93,7 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
 | ------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `version`          | yes              | Always `1`.                                                                                                                                                                                         |
 | `common_prompt`    | no               | Text appended to every role's prompt.                                                                                                                                                               |
+| `start_message`    | no               | The first message of each new conversation, one line of at most 200 bytes. Sent only when a tab is created (`up`, the startup hook's first bring-up, `add`), never on a resume or a repair. It costs one request per role on every fresh start, so it should not ask for changes to the tree. |
 | `workspace.label`  | yes              | The workspace label; `up` only touches the workspace with this label.                                                                                                                              |
 | `board.tab`        | yes              | The board tab's label; must differ from every role name.                                                                                                                                           |
 | `board.file`       | no               | The board file, relative to the root. Default `.herdr/status.json`.                                                                                                                                 |
@@ -99,6 +104,7 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
 | `roles[].prompt`   | yes              | The role's prompt.                                                                                                                                                                                 |
 | `roles[].worktree` | no               | `true` to work in `<worktrees.dir>/<name>`.                                                                                                                                                         |
 | `roles[].extra`    | no               | `true` to allow `add` and `close` of `<name>-N` instances.                                                                                                                                          |
+| `roles[].start_message` | no          | Replaces `start_message` for this role; `""` means none.                                                                                                                                            |
 
 **Prompts.**
 

@@ -6,8 +6,8 @@
 //!
 //! Starts `herdr --session <name> server` with `XDG_CONFIG_HOME` and `XDG_STATE_HOME` in a
 //! temporary directory and without the caller's `HERDR_*` and `CLAUDE*` variables, over a
-//! temporary git repository. A fake `claude` comes first in the `PATH`, so a real one is never
-//! started. When it ends, also on failure, it stops the session and deletes the temporary
+//! temporary git repository. A fake `claude` comes first in the `PATH` and panes run `/bin/sh`,
+//! whose startup files do not change it, so a real one is never started. When it ends, also on failure, it stops the session and deletes the temporary
 //! directory. A second session checks the `[[startup]]` hook (design §4.4).
 
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ impl Isolated {
     fn command(&self, program: &str) -> Command {
         let mut cmd = Command::new(program);
         cmd.env_clear();
-        for key in ["HOME", "USER", "LOGNAME", "LANG", "SHELL", "TMPDIR"] {
+        for key in ["HOME", "USER", "LOGNAME", "LANG", "TMPDIR"] {
             if let Some(v) = std::env::var_os(key) {
                 cmd.env(key, v);
             }
@@ -46,7 +46,9 @@ impl Isolated {
             path.push(":");
             path.push(p);
         }
+        // Panes run `/bin/sh`: the user's shell may put the real `claude` back first in its rc.
         cmd.env("PATH", path)
+            .env("SHELL", "/bin/sh")
             .env("TERM", "xterm-256color")
             .env("XDG_CONFIG_HOME", self.dir.join("c"))
             .env("XDG_STATE_HOME", self.dir.join("s"))
@@ -74,12 +76,17 @@ impl Isolated {
     }
 
     fn crew(&self, args: &[&str]) -> Output {
-        let out = self
-            .command(BIN)
-            .env("CREW_AGENT_CMD", "cat")
-            .args(args)
-            .output()
-            .expect("crew");
+        self.run_crew(args, true)
+    }
+
+    /// `herdr-crew` with `CREW_AGENT_CMD=cat` (`cat` stands for the agent) or without it, when
+    /// `agent start` launches the fake `claude`.
+    fn run_crew(&self, args: &[&str], cat: bool) -> Output {
+        let mut cmd = self.command(BIN);
+        if cat {
+            cmd.env("CREW_AGENT_CMD", "cat");
+        }
+        let out = cmd.args(args).output().expect("crew");
         println!(
             "$ herdr-crew {}\n{}{}",
             args.join(" "),
@@ -266,7 +273,12 @@ fn write(path: PathBuf, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+/// The `start_message` of the test project, with non-ASCII text and quotes.
+const START_MESSAGE: &str = "Confirma tu rol «ahora» en una línea; it's fine.";
+
 const CREW_TOML: &str = r#"version = 1
+
+start_message = "Confirma tu rol «ahora» en una línea; it's fine."
 
 common_prompt = '''
 Board: {{STATUS}} ({{SCHEMA}}).
@@ -316,9 +328,15 @@ fn prepare(prefix: &str, session: &'static str) -> Isolated {
     );
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // The fake `claude`: waits like an agent without being one.
+    // The fake `claude`: writes its arguments, one per line, and waits like an agent.
     let fake = dir.join("bin/claude");
-    write(fake.clone(), "#!/bin/sh\nwhile :; do sleep 1; done\n");
+    write(
+        fake.clone(),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nwhile :; do sleep 1; done\n",
+            dir.join("claude-args").display()
+        ),
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -512,6 +530,17 @@ fn scenario(iso: &Isolated) {
         "{stdout}"
     );
     assert!(iso.crew(&["close", "ct-dev-2"]).status.success());
+
+    // start_message reaches claude as its last argument, whole, through herdr's quoting.
+    let out = iso.run_crew(&["add", "ct-dev"], false);
+    assert!(out.status.success());
+    let args = std::fs::read_to_string(iso.dir.join("claude-args")).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    println!("fake claude arguments: {args:?}");
+    assert_eq!(args.last(), Some(&START_MESSAGE));
+    assert_eq!(args[..2], ["-n", "ct-dev-2"]);
+    assert!(iso.crew(&["close", "ct-dev-2"]).status.success());
+
     let out = iso.crew(&["close", "ct-dev"]);
     assert_eq!(out.status.code(), Some(1));
 

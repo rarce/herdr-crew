@@ -267,10 +267,13 @@ pub enum Step {
         path: PathBuf,
         content: String,
     },
+    /// Starts the role's agent in a tab the plan has just created; `message` is the first
+    /// message of the new conversation (`start_message`).
     StartAgent {
         name: String,
         pane: PaneRef,
         prompt: PathBuf,
+        message: Option<String>,
     },
     /// Types `command` in the pane; `new_tab` waits 1 s for the shell to reach its prompt.
     RunInPane {
@@ -469,10 +472,12 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                         "tab {} has no agent; restart it there with `claude -r {v} -n {}`",
                         r.name, r.name
                     ),
-                    // Roles start with `-n <role>`, so the picker finds the conversation by name.
+                    // Roles start with `-n <role>`: the picker lists the conversations with that
+                    // name, possibly older ones, and the user picks one.
                     None => format!(
                         "tab {} has no agent and herdr knows no session; restart it there with \
-                         `claude -r {}`",
+                         `claude -r {}` and pick its conversation, or, if it never had one, close \
+                         the tab and run `herdr-crew up`",
                         r.name, r.name
                     ),
                 }));
@@ -654,6 +659,7 @@ fn agent_steps(c: &Config, e: &Env, steps: &mut Vec<Step>, name: &str) {
             name: name.to_string(),
             pane,
             prompt: path,
+            message: c.start_message(name).map(str::to_string),
         },
     });
 }
@@ -1207,7 +1213,8 @@ mod tests {
         assert_eq!(
             p.warnings().next().unwrap(),
             "tab acme-lead has no agent and herdr knows no session; restart it there with \
-             `claude -r acme-lead`"
+             `claude -r acme-lead` and pick its conversation, or, if it never had one, close the \
+             tab and run `herdr-crew up`"
         );
         s.workspace.as_mut().unwrap().panes[0].agent_session = Some("0f3c".into());
         let p = plan(&c, &s, &e);
@@ -1666,5 +1673,65 @@ mod tests {
              acme-status    repair\n"
         );
         assert!(p.dry_run().starts_with(&lines));
+    }
+
+    /// The messages of the `StartAgent` steps, by session.
+    fn messages(p: &Plan) -> Vec<(String, Option<String>)> {
+        p.steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::StartAgent { name, message, .. } => Some((name.clone(), message.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn start_message_only_for_new_tabs() {
+        let mut c = worktrees();
+        c.start_message = Some("Confirma tu rol «en una línea».".into());
+        let hello = Some("Confirma tu rol «en una línea».".to_string());
+        // up over an empty herdr: every new tab gets it.
+        let p = plan(&c, &HerdrState::default(), &env());
+        assert!(!messages(&p).is_empty());
+        assert!(messages(&p).iter().all(|(_, m)| *m == hello));
+        // Adoption: the same.
+        let initial = Initial {
+            workspace: "w1".into(),
+            tab: "w1:t1".into(),
+            pane: "w1:p1".into(),
+            label: "globex".into(),
+        };
+        let s = startup_state(HerdrState::default(), Ok(initial)).unwrap();
+        assert!(
+            messages(&plan(&c, &s, &env()))
+                .iter()
+                .all(|(_, m)| *m == hello)
+        );
+        // add of an extra instance: its base role's.
+        let s = state(&["globex-lead", "globex-dev", "globex-reviewer"], &[]);
+        let (_, p) = plan_add(&c, &s, &env(), "globex-dev").unwrap();
+        assert_eq!(messages(&p), [("globex-dev-2".to_string(), hello.clone())]);
+        // up over tabs without an agent (a resume that did not happen) and startup's repair after
+        // a restore start nothing, so they send nothing.
+        let e = settled(&c, Foreground::Shell);
+        let full = state(
+            &[
+                "globex-lead",
+                "globex-dev",
+                "globex-reviewer",
+                "globex-status",
+            ],
+            &[],
+        );
+        assert!(messages(&plan(&c, &full, &e)).is_empty());
+        let restored = startup_state(full, Err(Refusal::NotAlone(2))).unwrap();
+        assert!(messages(&plan(&c, &restored, &e)).is_empty());
+        // Without start_message the step carries none.
+        assert!(
+            messages(&plan(&worktrees(), &HerdrState::default(), &env()))
+                .iter()
+                .all(|(_, m)| m.is_none())
+        );
     }
 }

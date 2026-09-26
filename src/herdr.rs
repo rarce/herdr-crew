@@ -327,9 +327,14 @@ pub fn execute(
                 panes.insert(label.clone(), str_at(&r, &["root_pane", "pane_id"])?);
             }
             Step::WritePrompt { path, content, .. } => write_file(path, content, false)?,
-            Step::StartAgent { name, pane, prompt } => {
+            Step::StartAgent {
+                name,
+                pane,
+                prompt,
+                message,
+            } => {
                 let pane = pane_of(pane, &panes)?;
-                start_agent(herdr, name, &pane, prompt, out)?;
+                start_agent(herdr, name, &pane, prompt, message.as_deref(), out)?;
             }
             Step::RunInPane {
                 pane,
@@ -361,10 +366,11 @@ fn start_agent(
     name: &str,
     pane: &str,
     prompt: &Path,
+    message: Option<&str>,
     out: &mut Output,
 ) -> Result<(), String> {
     let prompt = prompt.to_string_lossy();
-    let args = [
+    let mut args = vec![
         "agent",
         "start",
         name,
@@ -380,6 +386,8 @@ fn start_agent(
         "--append-system-prompt-file",
         &prompt,
     ];
+    // The initial prompt, a positional argument that herdr quotes like the others.
+    args.extend(message);
     let start = Instant::now();
     loop {
         match herdr.call(&args) {

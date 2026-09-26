@@ -110,6 +110,23 @@ A project without worktrees uses the same schema without `[worktrees]`, `worktre
 - The result is written to `.herdr/prompts/<name>.txt` (ignored) and passed as a file, not inline. herdr starts the agent by typing the command into the pane's shell: an inline prompt of about 1.7 KB was cut mid-quote there, and herdr rejects newlines outright [verified].
 - An extra instance uses its base role's prompt.
 
+**First message: `start_message`.** Optional, at the top level and per role; a role's value replaces the top-level one, and an empty role value means none for that role. Extra instances use their base role's.
+
+- It is passed to `claude` as its positional initial prompt, after the other arguments. herdr quotes it like them: a message with accents, «» and an apostrophe reached `claude` whole [verified in the real test, §7.2].
+- It is sent only when a tab is created and its agent started: `up` over a missing role, adoption (§4.4) and `add`. Never on a resume, a repair, or an `up` over a tab without an agent.
+- **Why.** Claude records a conversation only on its first request; a role nobody wrote to has no transcript and is lost on a herdr restart (§10). The first message gives it one.
+- **Cost.** One request per role on every fresh start. The message must not ask for anything that changes the tree (files, git): the agent runs it with no human looking yet.
+- **Validation.** One line (herdr types the command into the shell and rejects newlines [verified]), at most 200 bytes, and not starting with `-`, which `claude` would read as an option. No placeholders.
+- **The folder-trust dialog.** In a folder `claude` does not trust yet, `agent start` returns `agent_not_ready` (§4.2 step 8). That the positional prompt is still sent once the user accepts the dialog is [H]: the real test stops at the dialog without answering it, so as not to trust a temporary folder in the user's `claude` configuration.
+
+```toml
+start_message = '''Confirm your role in one line and wait for instructions from globex-lead.'''
+
+[[roles]]
+name = "globex-lead"
+start_message = ""                       # none for this role
+```
+
 Placeholders:
 
 | Placeholder    | Value                                                                                             |
@@ -120,7 +137,7 @@ Placeholders:
 | `{{SCHEMA}}`   | `.herdr/status.schema.json` (§5.1)                                                                |
 | `{{LAUNCHER}}` | the binary's absolute path, so that a coordinating role can run `{{LAUNCHER}} add <role>` itself |
 
-**Agent invocation, fixed in the code:** `herdr agent start <name> --kind claude --pane <P> --timeout 60000 -- -n <name> --append-system-prompt-file <file>`. There are no `kind` or `args` keys; they come when a project has a role that is not Claude Code (§11).
+**Agent invocation, fixed in the code:** `herdr agent start <name> --kind claude --pane <P> --timeout 60000 -- -n <name> --append-system-prompt-file <file> [<start_message>]`. There are no `kind` or `args` keys; they come when a project has a role that is not Claude Code (§11).
 
 ### 2.3 Validation and messages
 
@@ -134,6 +151,7 @@ Every table is parsed with `toml` and `serde` with `deny_unknown_fields`, so an 
 | Unique names; none of the form `<extra role>-N`; `board.tab` differs from every role name                                                     | `roles[3].name "globex-dev-2" clashes with the extra instances of globex-dev` |
 | At least one role; `board.writer` is a role                                                                                                   | `board.writer "boss" is not a role in roles[]`                               |
 | `worktree = true` requires `[worktrees]`; `base` looks like `remote/branch`                                                                   | `roles[1] globex-dev asks for a worktree but [worktrees] is missing`         |
+| `start_message` (top level and per role): one line, at most 200 bytes, not starting with `-`                                                  | `.herdr/crew.toml:3:17: start_message: must be one line, without newlines`   |
 | Every `{{…}}` in `common_prompt` and each `roles[i].prompt` is a known placeholder                                                            | `.herdr/crew.toml:22:9: roles[0].prompt: unknown placeholder {{LAUNCH}}`     |
 
 - **Format.** Every message starts with `herdr-crew:` and the absolute path of `crew.toml`, with line and column when they are known.
@@ -218,7 +236,7 @@ herdr is invoked as `$HERDR_BIN_PATH` when set (herdr actions), else as `herdr` 
    - **Each base role, in order:**
      - if a live agent carries its name in any workspace, nothing happens (names are global [vendor]);
      - if a tab with its label exists and is occupied, nothing happens;
-     - if a tab with its label exists without an agent, nothing is relaunched, because relaunching blindly would open a new conversation. It warns "tab X has no agent; restart it there with `claude -r <agent_session.value> -n X`" when `pane list` still reports that value for its pane, and "tab X has no agent and herdr knows no session; restart it there with `claude -r X`" when it does not. Roles start with `-n <role>`, so `claude -r <role>` opens the picker on the conversations with that name;
+     - if a tab with its label exists without an agent, nothing is relaunched, because relaunching blindly would open a new conversation. It warns "tab X has no agent; restart it there with `claude -r <agent_session.value> -n X`" when `pane list` still reports that value for its pane, and, when it does not, "tab X has no agent and herdr knows no session; restart it there with `claude -r X` and pick its conversation, or, if it never had one, close the tab and run `herdr-crew up`". Roles start with `-n <role>`, so `claude -r <role>` opens the picker searching for that name: it lists every conversation with that name, older ones included, and the user picks one. That the search term matches the `-n` name is [H]: `claude --help` only says "open interactive picker with optional search term", and it was not tried, because trying it runs a real `claude` over the user's conversations;
      - otherwise the tab is created and the agent started.
    - **Board.** Without a `board.tab` tab it is created; with one, it is repaired (step 9). Extra instances are left alone.
 4. **Workspace**, when missing: `herdr workspace create --cwd <root> --label <label> --no-focus` → `.result.workspace.workspace_id`, `.result.tab.tab_id`, `.result.root_pane.pane_id` [verified].
@@ -440,7 +458,8 @@ All fixtures are synthetic: a project `acme` with four roles in the main checkou
   - the default of `board.file`;
   - `kind` and `args` are unknown keys;
   - a prompt given as a file list is rejected;
-  - basic strings are accepted too.
+  - basic strings are accepted too;
+  - `start_message` at the top level and per role (an empty role value means none), with accents and «»; a newline, more than 200 bytes of accented text and a leading `-` are errors with their line and column.
 - **Prompts:** the order (role, then common), every placeholder, and unknown placeholders with their offsets.
 - **Plan:**
   - an empty state creates workspace, rename, tabs, agents and board, in that order; a complete workspace has no steps (idempotency); a missing role tab gives only that tab and its agent;
@@ -493,7 +512,7 @@ On a temporary git repository with its own test `crew.toml`:
 5. **Startup (§4.4)**, in a second session `crewstart`: it links the plugin, starts the server with `HERDR_STARTUP_CWD` in the repository (like a client launched there) and checks that startup leaves one workspace, `crewtest`, with the role tabs and the board and no tab «1». Then it stops the session, starts the server again and checks that the restored workspace gets its board back while `ct-lead` stays a bare shell.
 6. `herdr session stop` and `session delete` of each session, reaping the server process. It checks that `~/.config/herdr/plugins.json` did not change. `server stop` is never run without `--session`.
 
-A fake `claude` comes first in the `PATH` of every process the test starts, so a real one never runs even if `CREW_AGENT_CMD` were lost. The plain `herdr` client in a terminal was checked by hand in the same isolation (a pty from a directory not called like the label, with zsh): startup adopted and renamed the workspace, and left the roles and the board [verified].
+A fake `claude` comes first in the `PATH` of every process the test starts, and panes run `/bin/sh`. The user's own shell must not be used: a zsh whose startup files put `~/.local/bin` first again launched the real `claude`, which stopped at its folder-trust dialog (`agent_not_ready`) until the tab was closed [verified]. The fake `claude` writes its arguments; one `add` without `CREW_AGENT_CMD` checks that `start_message` arrives as the last argument, whole. The plain `herdr` client in a terminal was checked by hand in the same isolation (a pty from a directory not called like the label, with zsh): startup adopted and renamed the workspace, and left the roles and the board [verified].
 
 It is both the integration test of step 1 and the check of the [H] (§11). It passed on 2026-09-26 on macOS with herdr 0.9.1 [verified]:
 
@@ -551,7 +570,7 @@ A project that runs role sessions with its own scripts migrates in one change:
 - **Schema drift.** The generated schema and the viewer's validator may diverge (§5.2); that is fixed when a real divergence affects the writer.
 - **Restore before resume.** With `resume_agents_on_restore`, herdr relaunches a restored agent pane with `claude --resume <id>` about 0.7 s after startup begins. `pane list` already reports that pane's `agent_session` when startup runs, so adoption refuses it [verified with a fake `claude` and the session reported through `pane report-agent-session`, the call the Claude hook makes].
   - herdr also persists an agent started with `agent start` by its name (`agent_name` and `managed_agent_kind` in `session.json`) and lists it in `agent list` from the restore on, before its process runs again. So `startup` reads the role as `occupied` by its own name and says nothing, even when the resume then fails [verified in an isolated XDG: `agent list` at startup showed the restored `ex-designer` before herdr typed `claude --resume`]. The verdict lines in the log show it; a later `herdr-crew up --dry-run` gives the real state.
-  - **A session without a transcript is not resumable.** Claude records a conversation only on its first request. A role started by `up` that nobody wrote to yet has a session id, reported by the hook, but no transcript, so herdr's `claude --resume <id>` after a restart fails with "No conversation found with session ID" and the tab is left as a bare shell [verified on 2026-09-26 on a real restore: a role started by `up` received no message before the server stopped]. Its previous conversation is found by name: `claude -r <role>`.
+  - **A session without a transcript is not resumable.** Claude records a conversation only on its first request. A role started by `up` that nobody wrote to yet has a session id, reported by the hook, but no transcript, so herdr's `claude --resume <id>` after a restart fails with "No conversation found with session ID" and the tab is left as a bare shell [verified on 2026-09-26 on a real restore: a role started by `up` received no message before the server stopped]. There is nothing to resume: the name picker would only offer an **older** conversation of the same role. The remedy is to close the tab and run `herdr-crew up`, which creates it again with its prompt (and its `start_message`, which also makes this case rarer, §2.2).
   - What remains: a pane whose agent never reported a session, for example without herdr's Claude integration, carries nothing that tells it from a fresh shell. herdr does not resume such a pane either, so adopting it types into an idle shell, the same as a fresh one.
 - **The role prompt after a resume.** herdr resumes with a plain `claude --resume <id>`, without `--append-system-prompt-file`. The role prompt survives because claude 2.1.x records the system prompt on the conversation's first request, appended text included, and resends that record on every later request and resume until the conversation is compacted (`--system-prompt-snapshot`, on by default) [vendor: `claude --help`, 2.1.283]. After a compaction the appended role prompt is lost. For the same reason, a prompt edited in `crew.toml` does not reach a resumed conversation until it compacts; a new conversation (`up` over a tab without an agent, or `/clear`) takes it.
 - **Adopting a look-alike.** A restored session with one workspace, named like its directory, with a single tab «1» whose only pane is an idle shell in a project's root, is indistinguishable from a fresh one and is adopted. That is what the user would have got by typing `herdr-crew up` there.
@@ -568,6 +587,7 @@ A project that runs role sessions with its own scripts migrates in one change:
 - **The board as a plugin pane**: see §3.
 - **Socket instead of CLI**: it ties the binary to protocol 22; the CLI is the documented plugin API.
 - **Counting only agent names to tell whether a role is alive**: sessions started by hand have no name (§4.2 step 3).
+- **A fixed first message in the code** instead of `start_message`: its language and tone depend on the project (a project whose roles work in Spanish, a coordinating role with its own name), so it is configuration.
 - **Prompts in separate files** (`prompt = ["file", …]`): one file per project keeps roles and prompts reviewable together. Placeholder errors point into `crew.toml` with line and column.
 
 ## 11. Construction
@@ -576,6 +596,7 @@ A project that runs role sessions with its own scripts migrates in one change:
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
 | Built    | Step 1 (2026-09-26): the crate with its manifest, `up` (with `--dry-run`), `add`, `close`, `board` and `check`. The pure core (`config`, `prompt`, `plan`, `board`) is separate from the adapters (`herdr`, `git`, terminal loop). The §7.1 tests and the §7.2 real test pass. The step-1 [H] are verified except the Windows `.exe` (§3). | —                                                                    |
 | Built    | The startup hook (2026-09-26): `[[startup]]` runs `herdr-crew startup`, which adopts herdr's fresh initial workspace and otherwise only repairs existing project workspaces (§4.4). Unit tests for adoption and each refusal, and the real test's startup session. | —                                                                    |
+| Built    | `start_message` (2026-09-26): the first message of each new conversation, validated in §2.3 and sent only on `StartAgent` of a new tab (§2.2). | —                                                                    |
 | Built    | Own repository with CI running `cargo fmt --check`, `clippy -D warnings` and `cargo test` on Linux and macOS; prompts inline in `crew.toml`                                                                                                                              | —                                                                    |
 | Step 2   | Migrating the first project (§9)                                                                                                                                                                                                                                         | Step 1 green and linking approved by its user                        |
 | Step 3   | A fake herdr in Rust (feature `fake-herdr`, persistent state, a call log) to test the §4.2 sequence in CI without a real herdr; Windows in CI                                                                                                                             | The first migration done                                             |

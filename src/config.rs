@@ -12,6 +12,8 @@ use crate::prompt;
 pub const CONFIG_FILE: &str = ".herdr/crew.toml";
 pub const DEFAULT_BOARD_FILE: &str = ".herdr/status.json";
 pub const SUPPORTED_VERSION: i64 = 1;
+/// Longest `start_message`, in bytes.
+pub const MAX_START_MESSAGE: usize = 200;
 
 /// A configuration error, with the file it refers to and, when known, line and column.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +41,8 @@ pub struct Config {
     pub worktrees: Option<Worktrees>,
     /// Appended to every role's prompt.
     pub common_prompt: Option<String>,
+    /// First message of a new conversation, unless the role has its own.
+    pub start_message: Option<String>,
     pub roles: Vec<Role>,
 }
 
@@ -64,6 +68,8 @@ pub struct Role {
     pub prompt: String,
     pub worktree: bool,
     pub extra: bool,
+    /// Overrides the top-level `start_message`; empty means none for this role.
+    pub start_message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +80,7 @@ struct RawConfig {
     board: RawBoard,
     worktrees: Option<RawWorktrees>,
     common_prompt: Option<String>,
+    start_message: Option<String>,
     #[serde(default)]
     roles: Vec<RawRole>,
 }
@@ -108,6 +115,7 @@ struct RawRole {
     worktree: bool,
     #[serde(default)]
     extra: bool,
+    start_message: Option<String>,
 }
 
 /// Known keys per table; checked before `serde` so that all of them are reported at once.
@@ -117,6 +125,7 @@ const ROOT_KEYS: &[&str] = &[
     "board",
     "worktrees",
     "common_prompt",
+    "start_message",
     "roles",
 ];
 const TABLE_KEYS: &[(&str, &[&str])] = &[
@@ -124,7 +133,7 @@ const TABLE_KEYS: &[(&str, &[&str])] = &[
     ("board", &["tab", "file", "writer"]),
     ("worktrees", &["dir", "base"]),
 ];
-const ROLE_KEYS: &[&str] = &["name", "prompt", "worktree", "extra"];
+const ROLE_KEYS: &[&str] = &["name", "prompt", "worktree", "extra", "start_message"];
 
 impl Config {
     /// Parses and validates `text`, the content of `<root>/.herdr/crew.toml`.
@@ -239,6 +248,12 @@ impl Config {
             }
         }
 
+        for (place, span, value) in string_spans(table.get_ref(), "start_message") {
+            if let Some(why) = start_message_problem(&value) {
+                errors.push(at(Some(span), format!("{place}: {why}")));
+            }
+        }
+
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -255,6 +270,7 @@ impl Config {
             },
             worktrees,
             common_prompt: raw.common_prompt,
+            start_message: raw.start_message,
             roles: raw
                 .roles
                 .into_iter()
@@ -263,6 +279,7 @@ impl Config {
                     prompt: r.prompt,
                     worktree: r.worktree,
                     extra: r.extra,
+                    start_message: r.start_message,
                 })
                 .collect(),
         })
@@ -300,6 +317,16 @@ impl Config {
     /// Tabs that `up` recognizes as the project's own: roles, the board and extra instances.
     pub fn is_known_tab(&self, label: &str) -> bool {
         label == self.board.tab || self.session_order(label).is_some()
+    }
+
+    /// The first message of a new conversation of `session`: its role's, else the top-level
+    /// one. An empty role value means none.
+    pub fn start_message(&self, session: &str) -> Option<&str> {
+        let role = self.session_role(session)?;
+        role.start_message
+            .as_deref()
+            .or(self.start_message.as_deref())
+            .filter(|m| !m.is_empty())
     }
 
     pub fn board_path(&self) -> PathBuf {
@@ -358,6 +385,51 @@ fn unknown_keys(root: &DeTable<'_>) -> Vec<(Range<usize>, String)> {
             }
         }
     }
+    out
+}
+
+/// Why a `start_message` cannot be passed as `claude`'s initial prompt, if it cannot: herdr types
+/// the command into the pane's shell, which rejects newlines, and a leading `-` would read as an
+/// option. An empty value is allowed: in a role it means no message.
+fn start_message_problem(m: &str) -> Option<String> {
+    if m.contains(['\n', '\r']) {
+        Some("must be one line, without newlines".into())
+    } else if m.len() > MAX_START_MESSAGE {
+        Some(format!("{} bytes, at most {MAX_START_MESSAGE}", m.len()))
+    } else if m.starts_with('-') {
+        Some("must not start with \"-\", which claude would read as an option".into())
+    } else {
+        None
+    }
+}
+
+/// The top-level `key` and each `roles[i].<key>` that are strings: place, span of the value and
+/// value.
+fn string_spans(root: &DeTable<'_>, key: &str) -> Vec<(String, Range<usize>, String)> {
+    let mut out = Vec::new();
+    for (k, value) in root.iter() {
+        match (k.get_ref().as_ref(), value.get_ref()) {
+            (k, DeValue::String(v)) if k == key => {
+                out.push((key.to_string(), value.span(), v.to_string()))
+            }
+            ("roles", DeValue::Array(items)) => {
+                for (i, item) in items.iter().enumerate() {
+                    let DeValue::Table(t) = item.get_ref() else {
+                        continue;
+                    };
+                    for (rk, v) in t.iter() {
+                        if let (true, DeValue::String(text)) =
+                            (rk.get_ref().as_ref() == key, v.get_ref())
+                        {
+                            out.push((format!("roles[{i}].{key}"), v.span(), text.to_string()));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort_by_key(|(_, span, _)| span.start);
     out
 }
 
@@ -622,6 +694,51 @@ prompt = '''You are {{NAME}}.'''
             .replace("version = 1", "version = 3")
             .replace("writer = \"p-lead\"", "writer = \"x\"");
         assert_eq!(errors(&text).len(), 2);
+    }
+
+    #[test]
+    fn start_message_top_level_and_per_role() {
+        let text = MIN.replace(
+            "[workspace]",
+            "start_message = '''Confirma tu rol «ahora» y espera.'''\n[workspace]",
+        ) + "[[roles]]\nname = \"p-dev\"\nprompt = ''\nstart_message = 'Só tú'\n\
+              [[roles]]\nname = \"p-quiet\"\nprompt = ''\nstart_message = ''\n";
+        let c = Config::parse(&text, Path::new("/r/p")).unwrap();
+        assert_eq!(
+            c.start_message("p-lead"),
+            Some("Confirma tu rol «ahora» y espera.")
+        );
+        assert_eq!(c.start_message("p-dev"), Some("Só tú"));
+        assert_eq!(c.start_message("p-quiet"), None);
+        assert_eq!(
+            Config::parse(MIN, Path::new("/r/p"))
+                .unwrap()
+                .start_message("p-lead"),
+            None
+        );
+    }
+
+    #[test]
+    fn start_message_is_one_short_line() {
+        let text = MIN.replace(
+            "[workspace]",
+            "start_message = '''Línea «uno»\ny dos'''\n[workspace]",
+        ) + &format!("start_message = '{}'\n", "é".repeat(101));
+        assert_eq!(
+            errors(&text),
+            [
+                "herdr-crew: /r/p/.herdr/crew.toml:2:17: start_message: must be one line, without newlines",
+                "herdr-crew: /r/p/.herdr/crew.toml:12:17: roles[0].start_message: 202 bytes, at most 200",
+            ]
+        );
+        // 200 bytes of accented text is accepted; a leading dash is not.
+        let ok = format!("{MIN}start_message = '{}'\n", "é".repeat(100));
+        assert!(Config::parse(&ok, Path::new("/r/p")).is_ok());
+        let dash = format!("{MIN}start_message = '--help'\n");
+        assert!(
+            errors(&dash)[0]
+                .ends_with("must not start with \"-\", which claude would read as an option")
+        );
     }
 
     #[test]
