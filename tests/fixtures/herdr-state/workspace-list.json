@@ -1,0 +1,28 @@
+{
+  "id": "cli:workspace:list",
+  "result": {
+    "type": "workspace_list",
+    "workspaces": [
+      {
+        "workspace_id": "w1",
+        "number": 1,
+        "label": "other",
+        "focused": false,
+        "pane_count": 1,
+        "tab_count": 1,
+        "active_tab_id": "w1:t1",
+        "agent_status": "unknown"
+      },
+      {
+        "workspace_id": "w3",
+        "number": 2,
+        "label": "acme",
+        "focused": true,
+        "pane_count": 6,
+        "tab_count": 6,
+        "active_tab_id": "w3:t1",
+        "agent_status": "idle"
+      }
+    ]
+  }
+}

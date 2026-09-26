@@ -1,0 +1,46 @@
+{
+  "$schema": "status.schema.json",
+  "version": 1,
+  "updatedAt": "2026-09-25T09:10:00-03:00",
+  "updatedBy": "globex-lead",
+  "sessions": [
+    {
+      "role": "globex-lead",
+      "state": "working",
+      "now": "coordination",
+      "next": [],
+      "updatedAt": "2026-09-25T09:10:00-03:00"
+    },
+    {
+      "role": "globex-dev",
+      "state": "working",
+      "now": "#420 fix/420-rounding: integration tests",
+      "next": ["#422 crew export"],
+      "updatedAt": "2026-09-25T09:00:00-03:00"
+    },
+    {
+      "role": "globex-dev-2",
+      "state": "waiting",
+      "now": "#418 feat/418-signatures: waiting for globex-reviewer",
+      "next": [],
+      "note": "PR #430 open against main"
+    },
+    {
+      "role": "globex-reviewer",
+      "state": "idle",
+      "now": "idle",
+      "next": ["review of #420"]
+    }
+  ],
+  "owner": {
+    "urgent": [],
+    "beforeMain": ["run the backfill script on staging"],
+    "optional": ["close globex-dev-2 once #430 is merged"]
+  },
+  "recent": [
+    {
+      "at": "2026-09-25T09:05:00-03:00",
+      "text": "globex-dev-2 started after the user agreed"
+    }
+  ]
+}

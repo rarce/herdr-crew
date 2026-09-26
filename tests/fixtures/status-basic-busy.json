@@ -1,0 +1,47 @@
+{
+  "$schema": "status.schema.json",
+  "version": 1,
+  "updatedAt": "2026-09-25T09:30:00-03:00",
+  "updatedBy": "acme-lead",
+  "sessions": [
+    {
+      "role": "acme-lead",
+      "state": "waiting",
+      "now": "waiting for the user to approve the release plan",
+      "next": ["split #160 into tasks", "update the roadmap"],
+      "note": "blocked on a decision, see urgent",
+      "updatedAt": "2026-09-25T09:30:00-03:00"
+    },
+    {
+      "role": "acme-dev",
+      "state": "working",
+      "now": "#155 search filters",
+      "next": [],
+      "updatedAt": "2026-09-25T09:20:00-03:00"
+    },
+    {
+      "role": "acme-reviewer",
+      "state": "blocked",
+      "now": "review of #155",
+      "next": [],
+      "note": "out of quota until 14:00",
+      "updatedAt": "2026-09-25T08:15:00-03:00"
+    },
+    {
+      "role": "acme-designer",
+      "state": "idle",
+      "now": "idle",
+      "next": [],
+      "updatedAt": "2026-09-25T07:00:00-03:00"
+    }
+  ],
+  "owner": {
+    "urgent": ["approve the release plan"],
+    "beforeMain": [],
+    "optional": ["rotate the staging API key", "archive the old dashboards"]
+  },
+  "recent": [
+    { "at": "2026-09-25T09:25:00-03:00", "text": "#154 merged into main" },
+    { "at": "2026-09-25T08:50:00-03:00", "text": "review of #153 approved" }
+  ]
+}

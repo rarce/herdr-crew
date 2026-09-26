@@ -1,0 +1,40 @@
+Project acme
+╭ Status unavailable ──────────────────────────────────────────────────────────────────────────────╮
+│ Unreadable JSON in /r/acme/.herdr/status.json: EOF while parsing a string at line 1 column 20    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+/r/acme/.herdr/status.json  ·  checked 09:34:56
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

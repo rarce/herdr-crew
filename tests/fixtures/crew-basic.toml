@@ -1,0 +1,38 @@
+# A project with four roles, all in the main checkout.
+version = 1
+
+common_prompt = '''
+Only {{STATUS}} holds the shared status board (format in {{SCHEMA}}); only the lead writes it.
+The repository is {{REPO}}.
+'''
+
+[workspace]
+label = "acme"
+
+[board]
+tab = "acme-status"
+writer = "acme-lead"
+
+[[roles]]
+name = "acme-lead"
+prompt = '''
+You are {{NAME}}, the lead: you split the work and keep the board up to date.
+'''
+
+[[roles]]
+name = "acme-reviewer"
+prompt = '''
+You are {{NAME}}: you review changes and report findings to acme-lead.
+'''
+
+[[roles]]
+name = "acme-designer"
+prompt = '''
+You are {{NAME}}: you write the designs the others implement.
+'''
+
+[[roles]]
+name = "acme-dev"
+prompt = '''
+You are {{NAME}}: you implement what acme-lead assigns you.
+'''

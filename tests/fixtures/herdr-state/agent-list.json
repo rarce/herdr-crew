@@ -1,0 +1,56 @@
+{
+  "id": "cli:agent:list",
+  "result": {
+    "type": "agent_list",
+    "agents": [
+      {
+        "name": null,
+        "agent": "claude",
+        "agent_status": "idle",
+        "workspace_id": "w3",
+        "tab_id": "w3:t1",
+        "pane_id": "w3:p1",
+        "terminal_id": "term_0001",
+        "focused": true,
+        "revision": 1,
+        "cwd": "/home/user/acme"
+      },
+      {
+        "name": null,
+        "agent": "claude",
+        "agent_status": "idle",
+        "workspace_id": "w3",
+        "tab_id": "w3:t2",
+        "pane_id": "w3:p2",
+        "terminal_id": "term_0002",
+        "focused": false,
+        "revision": 1,
+        "cwd": "/home/user/acme"
+      },
+      {
+        "name": null,
+        "agent": "claude",
+        "agent_status": "idle",
+        "workspace_id": "w3",
+        "tab_id": "w3:t3",
+        "pane_id": "w3:p3",
+        "terminal_id": "term_0003",
+        "focused": false,
+        "revision": 1,
+        "cwd": "/home/user/acme"
+      },
+      {
+        "name": null,
+        "agent": "claude",
+        "agent_status": "idle",
+        "workspace_id": "w3",
+        "tab_id": "w3:t4",
+        "pane_id": "w3:p4",
+        "terminal_id": "term_0004",
+        "focused": false,
+        "revision": 1,
+        "cwd": "/home/user/acme"
+      }
+    ]
+  }
+}

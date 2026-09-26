@@ -1,0 +1,106 @@
+{
+  "id": "cli:pane:list",
+  "result": {
+    "type": "pane_list",
+    "panes": [
+      {
+        "pane_id": "w3:p1",
+        "tab_id": "w3:t1",
+        "workspace_id": "w3",
+        "terminal_id": "term_0001",
+        "focused": true,
+        "agent_status": "idle",
+        "revision": 1,
+        "cwd": "/home/user/acme",
+        "foreground_cwd": "/home/user/acme",
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "00000000-0000-4000-8000-000000000001"
+        }
+      },
+      {
+        "pane_id": "w3:p2",
+        "tab_id": "w3:t2",
+        "workspace_id": "w3",
+        "terminal_id": "term_0002",
+        "focused": false,
+        "agent_status": "idle",
+        "revision": 1,
+        "cwd": "/home/user/acme",
+        "foreground_cwd": "/home/user/acme",
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "00000000-0000-4000-8000-000000000002"
+        }
+      },
+      {
+        "pane_id": "w3:p3",
+        "tab_id": "w3:t3",
+        "workspace_id": "w3",
+        "terminal_id": "term_0003",
+        "focused": false,
+        "agent_status": "idle",
+        "revision": 1,
+        "cwd": "/home/user/acme",
+        "foreground_cwd": "/home/user/acme",
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "00000000-0000-4000-8000-000000000003"
+        }
+      },
+      {
+        "pane_id": "w3:p4",
+        "tab_id": "w3:t4",
+        "workspace_id": "w3",
+        "terminal_id": "term_0004",
+        "focused": false,
+        "agent_status": "idle",
+        "revision": 1,
+        "cwd": "/home/user/acme",
+        "foreground_cwd": "/home/user/acme",
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "00000000-0000-4000-8000-000000000004"
+        }
+      },
+      {
+        "pane_id": "w3:p5",
+        "tab_id": "w3:t5",
+        "workspace_id": "w3",
+        "terminal_id": "term_0005",
+        "focused": false,
+        "agent_status": "unknown",
+        "revision": 1,
+        "cwd": "/home/user/acme",
+        "foreground_cwd": "/home/user/acme",
+        "agent": null,
+        "agent_session": null
+      },
+      {
+        "pane_id": "w3:p6",
+        "tab_id": "w3:t6",
+        "workspace_id": "w3",
+        "terminal_id": "term_0006",
+        "focused": false,
+        "agent_status": "unknown",
+        "revision": 1,
+        "cwd": "/home/user/acme",
+        "foreground_cwd": "/home/user/acme",
+        "agent": null,
+        "agent_session": null
+      }
+    ]
+  }
+}

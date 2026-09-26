@@ -1,0 +1,37 @@
+{
+  "id": "cli:pane:process_info",
+  "result": {
+    "type": "pane_process_info",
+    "process_info": {
+      "pane_id": "w3:p5",
+      "shell_pid": 1200,
+      "foreground_process_group_id": 1300,
+      "tty": "/dev/ttys005",
+      "foreground_processes": [
+        {
+          "pid": 1301,
+          "name": "python3",
+          "argv0": "python3",
+          "argv": [
+            "python3",
+            "tools/viewer.py"
+          ],
+          "cmdline": "python3 tools/viewer.py",
+          "cwd": "/home/user/acme"
+        },
+        {
+          "pid": 1300,
+          "name": "uv",
+          "argv0": "uv",
+          "argv": [
+            "uv",
+            "run",
+            "tools/viewer.py"
+          ],
+          "cmdline": "uv run tools/viewer.py",
+          "cwd": "/home/user/acme"
+        }
+      ]
+    }
+  }
+}

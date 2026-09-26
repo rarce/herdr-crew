@@ -1,0 +1,39 @@
+{
+  "$schema": "status.schema.json",
+  "version": 1,
+  "updatedAt": "2026-09-25T09:10:00-03:00",
+  "updatedBy": "acme-lead",
+  "sessions": [
+    {
+      "role": "acme-lead",
+      "state": "working",
+      "now": "coordination",
+      "next": [],
+      "updatedAt": "2026-09-25T09:10:00-03:00"
+    },
+    {
+      "role": "acme-dev",
+      "state": "working",
+      "now": "#142 checkout: payment retries, task 3.2",
+      "next": ["#150 invoice export"],
+      "updatedAt": "2026-09-25T09:00:00-03:00"
+    },
+    {
+      "role": "acme-reviewer",
+      "state": "idle",
+      "now": "idle",
+      "next": ["review #142 once it is ready"]
+    }
+  ],
+  "owner": {
+    "urgent": [],
+    "beforeMain": ["run the database migration on staging"],
+    "optional": []
+  },
+  "recent": [
+    {
+      "at": "2026-09-25T09:05:00-03:00",
+      "text": "#141 merged into main"
+    }
+  ]
+}

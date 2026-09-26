@@ -1,0 +1,40 @@
+Project acme
+╭ Status unavailable ──────────────────────────────────────────────────────────────────────────────╮
+│ /r/acme/.herdr/status.json does not exist. acme-lead creates it when it updates the status.      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+/r/acme/.herdr/status.json  ·  checked 09:34:56
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

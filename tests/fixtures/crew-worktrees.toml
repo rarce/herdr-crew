@@ -1,0 +1,41 @@
+# A project whose developer and reviewer work in their own worktrees and can have extra instances.
+version = 1
+
+common_prompt = '''
+The status board is {{STATUS}} (format in {{SCHEMA}}); only globex-lead writes it.
+'''
+
+[workspace]
+label = "globex"
+
+[board]
+tab = "globex-status"
+file = ".herdr/status.json"
+writer = "globex-lead"
+
+[worktrees]
+dir = ".worktrees"
+base = "origin/main"
+
+[[roles]]
+name = "globex-lead"
+prompt = '''
+You are {{NAME}}, the lead, in {{REPO}}. When more hands are needed, and only after the user
+agrees, run: {{LAUNCHER}} add globex-dev
+'''
+
+[[roles]]
+name = "globex-dev"
+prompt = '''
+You are {{NAME}}, a developer working in your own worktree.
+'''
+worktree = true
+extra = true
+
+[[roles]]
+name = "globex-reviewer"
+prompt = '''
+You are {{NAME}}, a reviewer working in your own worktree.
+'''
+worktree = true
+extra = true
