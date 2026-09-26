@@ -41,12 +41,13 @@ impl Isolated {
                 cmd.env(key, v);
             }
         }
-        let mut path = std::ffi::OsString::from(self.dir.join("bin"));
-        if let Some(p) = std::env::var_os("PATH") {
-            path.push(":");
-            path.push(p);
-        }
-        // Panes run `/bin/sh`: the user's shell may put the real `claude` back first in its rc.
+        // A minimal PATH, not the caller's: the fake `claude`, links to `herdr` and `git`, and the
+        // system. Panes run `/bin/sh`; `guard_claude` checks what they really find.
+        let path = format!(
+            "{}:{}:/usr/bin:/bin",
+            self.dir.join("bin").display(),
+            self.dir.join("tools").display()
+        );
         cmd.env("PATH", path)
             .env("SHELL", "/bin/sh")
             .env("TERM", "xterm-256color")
@@ -217,6 +218,43 @@ impl Isolated {
         );
     }
 
+    /// Aborts unless a pane's shell finds the fake `claude`, whatever its startup files do to
+    /// the `PATH`. Runs before the first `agent start`.
+    fn guard_claude(&self) {
+        let ws = self.workspace();
+        let tab = self.result(&[
+            "tab",
+            "create",
+            "--workspace",
+            &ws,
+            "--cwd",
+            self.repo.to_str().unwrap(),
+            "--label",
+            "ct-guard",
+            "--no-focus",
+        ]);
+        let pane = tab["root_pane"]["pane_id"].as_str().unwrap().to_string();
+        let tab = tab["tab"]["tab_id"].as_str().unwrap().to_string();
+        let out = self.dir.join("which-claude");
+        wait_until("the guard pane's shell is idle", || {
+            shell_in_foreground(&self.process_info(&pane))
+        });
+        let run = format!("command -v claude > '{}'", out.display());
+        assert!(self.herdr(&["pane", "run", &pane, &run]).status.success());
+        let mut found = String::new();
+        wait_until("the guard writes which claude", || {
+            found = std::fs::read_to_string(&out).unwrap_or_default();
+            found.ends_with('\n')
+        });
+        let fake = self.dir.join("bin/claude");
+        assert_eq!(
+            found.trim(),
+            fake.to_str().unwrap(),
+            "a pane's shell does not find the fake claude; stopping before any agent start"
+        );
+        assert!(self.herdr(&["tab", "close", &tab]).status.success());
+    }
+
     fn workspaces(&self) -> Vec<String> {
         self.result(&["workspace", "list"])["workspaces"]
             .as_array()
@@ -274,11 +312,12 @@ fn write(path: PathBuf, text: &str) {
 }
 
 /// The `start_message` of the test project, with non-ASCII text and quotes.
-const START_MESSAGE: &str = "Confirma tu rol «ahora» en una línea; it's fine.";
+/// `$HOME` and the backtick prove that herdr's quoting expands nothing.
+const START_MESSAGE: &str = "Confirma tu rol «ahora» en una línea; it's fine, $HOME `id`.";
 
 const CREW_TOML: &str = r#"version = 1
 
-start_message = "Confirma tu rol «ahora» en una línea; it's fine."
+start_message = "Confirma tu rol «ahora» en una línea; it's fine, $HOME `id`."
 
 common_prompt = '''
 Board: {{STATUS}} ({{SCHEMA}}).
@@ -341,6 +380,18 @@ fn prepare(prefix: &str, session: &'static str) -> Isolated {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // Links to the caller's `herdr` and `git` (their directories may hold the real `claude`).
+    std::fs::create_dir_all(dir.join("tools")).unwrap();
+    for tool in ["herdr", "git"] {
+        let which = Command::new("which").arg(tool).output().unwrap();
+        let target = String::from_utf8_lossy(&which.stdout).trim().to_string();
+        assert!(
+            which.status.success() && !target.is_empty(),
+            "{tool} is not on the PATH"
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, dir.join("tools").join(tool)).unwrap();
     }
 
     let origin = dir.join("origin.git");
@@ -531,7 +582,9 @@ fn scenario(iso: &Isolated) {
     );
     assert!(iso.crew(&["close", "ct-dev-2"]).status.success());
 
-    // start_message reaches claude as its last argument, whole, through herdr's quoting.
+    // start_message reaches claude as its last argument, whole, through herdr's quoting. This is
+    // the first `agent start`: the guard goes first.
+    iso.guard_claude();
     let out = iso.run_crew(&["add", "ct-dev"], false);
     assert!(out.status.success());
     let args = std::fs::read_to_string(iso.dir.join("claude-args")).unwrap();

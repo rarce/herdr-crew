@@ -112,11 +112,11 @@ A project without worktrees uses the same schema without `[worktrees]`, `worktre
 
 **First message: `start_message`.** Optional, at the top level and per role; a role's value replaces the top-level one, and an empty role value means none for that role. Extra instances use their base role's.
 
-- It is passed to `claude` as its positional initial prompt, after the other arguments. herdr quotes it like them: a message with accents, «» and an apostrophe reached `claude` whole [verified in the real test, §7.2].
+- It is passed to `claude` as its positional initial prompt, after the other arguments. herdr quotes it like them: a message with accents, «», an apostrophe, `$HOME` and a backtick reached `claude` whole, with nothing expanded [verified in the real test, §7.2].
 - It is sent only when a tab is created and its agent started: `up` over a missing role, adoption (§4.4) and `add`. Never on a resume, a repair, or an `up` over a tab without an agent.
 - **Why.** Claude records a conversation only on its first request; a role nobody wrote to has no transcript and is lost on a herdr restart (§10). The first message gives it one.
 - **Cost.** One request per role on every fresh start. The message must not ask for anything that changes the tree (files, git): the agent runs it with no human looking yet.
-- **Validation.** One line (herdr types the command into the shell and rejects newlines [verified]), at most 200 bytes, and not starting with `-`, which `claude` would read as an option. No placeholders.
+- **Validation.** No control character (`char::is_control`: newlines, tabs, escapes), so one line; herdr types the command into the shell and rejects newlines [verified]. At most 200 bytes, and not starting with `-`, which `claude` would read as an option. No placeholders.
 - **The folder-trust dialog.** In a folder `claude` does not trust yet, `agent start` returns `agent_not_ready` (§4.2 step 8). That the positional prompt is still sent once the user accepts the dialog is [H]: the real test stops at the dialog without answering it, so as not to trust a temporary folder in the user's `claude` configuration.
 
 ```toml
@@ -151,7 +151,7 @@ Every table is parsed with `toml` and `serde` with `deny_unknown_fields`, so an 
 | Unique names; none of the form `<extra role>-N`; `board.tab` differs from every role name                                                     | `roles[3].name "globex-dev-2" clashes with the extra instances of globex-dev` |
 | At least one role; `board.writer` is a role                                                                                                   | `board.writer "boss" is not a role in roles[]`                               |
 | `worktree = true` requires `[worktrees]`; `base` looks like `remote/branch`                                                                   | `roles[1] globex-dev asks for a worktree but [worktrees] is missing`         |
-| `start_message` (top level and per role): one line, at most 200 bytes, not starting with `-`                                                  | `.herdr/crew.toml:3:17: start_message: must be one line, without newlines`   |
+| `start_message` (top level and per role): no control character (so one line), at most 200 bytes, not starting with `-`                        | `.herdr/crew.toml:3:17: start_message: must be one line, without control characters` |
 | Every `{{…}}` in `common_prompt` and each `roles[i].prompt` is a known placeholder                                                            | `.herdr/crew.toml:22:9: roles[0].prompt: unknown placeholder {{LAUNCH}}`     |
 
 - **Format.** Every message starts with `herdr-crew:` and the absolute path of `crew.toml`, with line and column when they are known.
@@ -459,7 +459,7 @@ All fixtures are synthetic: a project `acme` with four roles in the main checkou
   - `kind` and `args` are unknown keys;
   - a prompt given as a file list is rejected;
   - basic strings are accepted too;
-  - `start_message` at the top level and per role (an empty role value means none), with accents and «»; a newline, more than 200 bytes of accented text and a leading `-` are errors with their line and column.
+  - `start_message` at the top level and per role (an empty role value means none), with accents and «»; a newline, a tab, an escape or a DEL, more than 200 bytes of accented text and a leading `-` are errors with their line and column.
 - **Prompts:** the order (role, then common), every placeholder, and unknown placeholders with their offsets.
 - **Plan:**
   - an empty state creates workspace, rename, tabs, agents and board, in that order; a complete workspace has no steps (idempotency); a missing role tab gives only that tab and its agent;
@@ -512,7 +512,13 @@ On a temporary git repository with its own test `crew.toml`:
 5. **Startup (§4.4)**, in a second session `crewstart`: it links the plugin, starts the server with `HERDR_STARTUP_CWD` in the repository (like a client launched there) and checks that startup leaves one workspace, `crewtest`, with the role tabs and the board and no tab «1». Then it stops the session, starts the server again and checks that the restored workspace gets its board back while `ct-lead` stays a bare shell.
 6. `herdr session stop` and `session delete` of each session, reaping the server process. It checks that `~/.config/herdr/plugins.json` did not change. `server stop` is never run without `--session`.
 
-A fake `claude` comes first in the `PATH` of every process the test starts, and panes run `/bin/sh`. The user's own shell must not be used: a zsh whose startup files put `~/.local/bin` first again launched the real `claude`, which stopped at its folder-trust dialog (`agent_not_ready`) until the tab was closed [verified]. The fake `claude` writes its arguments; one `add` without `CREW_AGENT_CMD` checks that `start_message` arrives as the last argument, whole. The plain `herdr` client in a terminal was checked by hand in the same isolation (a pty from a directory not called like the label, with zsh): startup adopted and renamed the workspace, and left the roles and the board [verified].
+**Never a real `claude`, by construction.** Shadowing it in the `PATH` is not enough: a shell's startup files (`~/.zprofile`, `~/.profile`, `path_helper` through `/etc/profile`) can put it back first. Once a zsh whose startup files put `~/.local/bin` first launched the real `claude`, which stopped at its folder-trust dialog (`agent_not_ready`) until the tab was closed [verified]. So:
+
+- every process the test starts gets a minimal `PATH`, not the caller's: the fake `claude`'s directory, a directory with links to the `herdr` and `git` that `which` finds at setup, and `/usr/bin:/bin`. The links, instead of their directories, keep out a directory that also holds the real `claude` (`~/.local/bin` holds both `herdr` and `claude`);
+- `SHELL=/bin/sh` for the server and its panes;
+- before the first `agent start`, a guard opens a tab and runs `command -v claude > <dir>/which-claude` in its shell, and aborts the test unless it names the fake. It checks the shell that will really launch the agent, whatever its startup files do.
+
+The fake `claude` writes its arguments; one `add` without `CREW_AGENT_CMD` checks that `start_message` arrives as the last argument, whole. The plain `herdr` client in a terminal was checked by hand in the same isolation (a pty from a directory not called like the label, with zsh): startup adopted and renamed the workspace, and left the roles and the board [verified].
 
 It is both the integration test of step 1 and the check of the [H] (§11). It passed on 2026-09-26 on macOS with herdr 0.9.1 [verified]:
 

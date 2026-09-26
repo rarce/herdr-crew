@@ -389,11 +389,12 @@ fn unknown_keys(root: &DeTable<'_>) -> Vec<(Range<usize>, String)> {
 }
 
 /// Why a `start_message` cannot be passed as `claude`'s initial prompt, if it cannot: herdr types
-/// the command into the pane's shell, which rejects newlines, and a leading `-` would read as an
-/// option. An empty value is allowed: in a role it means no message.
+/// the command into the pane's shell, which rejects newlines, so no control character is
+/// accepted, and a leading `-` would read as an option. An empty value is allowed: in a role it
+/// means no message.
 fn start_message_problem(m: &str) -> Option<String> {
-    if m.contains(['\n', '\r']) {
-        Some("must be one line, without newlines".into())
+    if m.chars().any(char::is_control) {
+        Some("must be one line, without control characters".into())
     } else if m.len() > MAX_START_MESSAGE {
         Some(format!("{} bytes, at most {MAX_START_MESSAGE}", m.len()))
     } else if m.starts_with('-') {
@@ -727,13 +728,23 @@ prompt = '''You are {{NAME}}.'''
         assert_eq!(
             errors(&text),
             [
-                "herdr-crew: /r/p/.herdr/crew.toml:2:17: start_message: must be one line, without newlines",
+                "herdr-crew: /r/p/.herdr/crew.toml:2:17: start_message: must be one line, without control characters",
                 "herdr-crew: /r/p/.herdr/crew.toml:12:17: roles[0].start_message: 202 bytes, at most 200",
             ]
         );
         // 200 bytes of accented text is accepted; a leading dash is not.
         let ok = format!("{MIN}start_message = '{}'\n", "é".repeat(100));
         assert!(Config::parse(&ok, Path::new("/r/p")).is_ok());
+        for control in ["a\\tb", "a\\u001bb", "a\\u007fb"] {
+            let text = format!("{MIN}start_message = \"{control}\"\n");
+            assert_eq!(
+                errors(&text),
+                [
+                    "herdr-crew: /r/p/.herdr/crew.toml:10:17: roles[0].start_message: must be one line, without control characters"
+                ],
+                "{control}"
+            );
+        }
         let dash = format!("{MIN}start_message = '--help'\n");
         assert!(
             errors(&dash)[0]
