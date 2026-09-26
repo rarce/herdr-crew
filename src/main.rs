@@ -300,16 +300,33 @@ fn startup() -> Result<(), Fail> {
     }
 }
 
+/// One project for `startup`. On the adoption path the user is watching herdr open, so an error
+/// is also shown as a notification; warnings, and everything on a restore, stay in the log.
 fn startup_root(herdr: &Herdr, root: &Path, context: Option<&str>) -> Result<(), Fail> {
-    let c = load_config(root)?;
-    let mut out = Output;
     // Read again for every root: an earlier one may have renamed a workspace.
     let workspaces = herdr
         .call(&["workspace", "list"])
         .map_err(|e| Fail::run(e.to_string()))?;
-    let state = herdr.state(&workspaces, &c.label).map_err(Fail::run)?;
     let items = plan::workspace_items(&workspaces).map_err(Fail::run)?;
-    let state = match plan::startup_state(state, adoption(herdr, &c, &items, context)?) {
+    let adoption = adoption(herdr, root, &items, context)?;
+    let watching = adoption.is_ok();
+    let result = bring_up(herdr, root, &workspaces, adoption);
+    if let (true, Err(f)) = (watching, &result) {
+        herdr.show(&f.lines.join("\n"));
+    }
+    result
+}
+
+fn bring_up(
+    herdr: &Herdr,
+    root: &Path,
+    workspaces: &Value,
+    adoption: Result<Initial, Refusal>,
+) -> Result<(), Fail> {
+    let c = load_config(root)?;
+    let mut out = Output;
+    let state = herdr.state(workspaces, &c.label).map_err(Fail::run)?;
+    let state = match plan::startup_state(state, adoption) {
         Ok(s) => s,
         Err(why) => {
             out.step(&format!("{}: nothing to do ({why})", c.label));
@@ -332,7 +349,7 @@ fn startup_root(herdr: &Herdr, root: &Path, context: Option<&str>) -> Result<(),
 /// `SHELL_WAIT` for the pane's shell to come to the foreground.
 fn adoption(
     herdr: &Herdr,
-    c: &Config,
+    root: &Path,
     workspaces: &[WorkspaceItem],
     context: Option<&str>,
 ) -> Result<Result<Initial, Refusal>, Fail> {
@@ -350,25 +367,22 @@ fn adoption(
         .first()
         .and_then(|p| p.cwd.as_deref())
         .and_then(|d| d.canonicalize().ok());
-    let root = c.root.canonicalize().unwrap_or_else(|_| c.root.clone());
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let start = Instant::now();
     loop {
         let foreground = match panes.as_slice() {
             [p] => herdr.foreground(&p.id),
             _ => Foreground::Unknown("more than one pane".into()),
         };
-        let verdict = plan::adoption(
-            c,
-            &Candidate {
-                context: Some(id),
-                workspaces,
-                tabs: &tabs,
-                panes: &panes,
-                pane_dir: pane_dir.as_deref(),
-                root: &root,
-                foreground: &foreground,
-            },
-        );
+        let verdict = plan::adoption(&Candidate {
+            context: Some(id),
+            workspaces,
+            tabs: &tabs,
+            panes: &panes,
+            pane_dir: pane_dir.as_deref(),
+            root: &root,
+            foreground: &foreground,
+        });
         match verdict {
             Err(Refusal::Foreground(_)) if start.elapsed() < SHELL_WAIT => {
                 sleep(Duration::from_millis(200));

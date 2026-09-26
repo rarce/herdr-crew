@@ -151,8 +151,13 @@ impl Herdr {
     /// Shows a herdr notification when `notifies`.
     pub fn notify(&self, message: &str) {
         if self.notifies() {
-            let _ = self.call(&["notification", "show", "herdr-crew", "--body", message]);
+            self.show(message);
         }
+    }
+
+    /// Shows a herdr notification.
+    pub fn show(&self, message: &str) {
+        let _ = self.call(&["notification", "show", "herdr-crew", "--body", message]);
     }
 
     /// `workspace focus` and, from a plain terminal, opens the herdr UI (step 10).
@@ -263,7 +268,7 @@ pub fn execute(
                 workspace = Some(id);
             }
             Step::AdoptWorkspace { initial: i, label } => {
-                if i.rename {
+                if i.label != *label {
                     herdr
                         .call(&["workspace", "rename", &i.workspace, label])
                         .map_err(|e| format!("could not rename {}: {e}", i.workspace))?;

@@ -286,18 +286,17 @@ With the plugin linked, `cd repo && herdr` brings the project up with nothing el
 **Per root**, with its configuration and the state of §4.2 step 2:
 
 1. **Adoption**, the only path that creates a project from nothing. The context's workspace is adopted only if all of these hold:
-   - it is the context's workspace, and it is the only workspace in herdr;
-   - no other workspace carries the project's label;
+   - it is the context's workspace, and it is the only workspace in herdr, so no other one carries the project's label;
    - its label is its pane's directory name, and it has one tab, labelled «1», with one pane;
    - that pane has no `agent_session`;
    - the pane's `cwd` is the root, both with symbolic links resolved;
    - the pane's shell is in the foreground (§4.2 step 9), waiting up to 2 s while the shell sources its rc files.
 
-   Then the plan is `up`'s for a missing workspace, with `AdoptWorkspace` instead of `CreateWorkspace`: it renames the workspace to the project's label (unless the directory already has that name) and takes tab «1» as the initial tab, which `RenameTab` gives to the first role without a worktree (§4.2 step 4). The rest follows `up`: tabs, agents, board. A directory whose name is the project's label is adopted too; there the label the candidate carries is not "another workspace".
-2. **Repair**, when adoption does not hold and a workspace with the project's label exists: `up`'s plan over it. A role tab that exists is never relaunched, occupied or not (the `no agent` verdict only warns, §4.2 step 3), and the board is typed again only when its pane is a bare shell. Missing tabs are created as in `up`.
+   Then the plan is `up`'s for a missing workspace, with `AdoptWorkspace` instead of `CreateWorkspace`: it renames the workspace to the project's label (unless the directory already has that name) and takes tab «1» as the initial tab, which `RenameTab` gives to the first role without a worktree (§4.2 step 4). The rest follows `up`: tabs, agents, board. A directory whose name is the project's label is adopted too, without renaming.
+2. **Repair**, when adoption does not hold and a workspace with the project's label exists: only the board is repaired. It is typed again only when its pane is a bare shell (§4.2 step 9). A role tab that exists is never relaunched, occupied or not (the `no agent` verdict only warns, §4.2 step 3). A missing tab, of a role or of the board, is not created: it may have been closed on purpose, and recreating it on every restart would open a fresh conversation. Its verdict is `leave alone (missing after a restore)`, with the warning "tab X is missing; `herdr-crew up` creates it"; an explicit `herdr-crew up` creates it.
 3. **Nothing**, otherwise: a project whose workspace was closed is not brought back. The reason goes to the log.
 
-**Output.** Steps on stdout and warnings on stderr, both kept by herdr in `plugin log list`. `startup` never calls `notification show`, not even for an error. It focuses the adopted workspace and nothing else, and never attaches. It exits 0 when there is nothing to do and 1 when a root failed; the other roots still run.
+**Output.** Steps on stdout and warnings on stderr, both kept by herdr in `plugin log list`. Warnings never become notifications. On the adoption path the user is watching herdr open, so an error that makes `startup` exit 1 (an invalid `crew.toml`, an agent that fails to start) is also shown with `herdr notification show`. A restore stays fully silent, errors included. It focuses the adopted workspace and nothing else, and never attaches. It exits 0 when there is nothing to do and 1 when a root failed; the other roots still run.
 
 **Cold `up`.** When `up` starts the server itself, that server is headless and creates no workspace, so startup finds nothing to adopt and does nothing, and `up` plans as always. There is no race between the two and `up` does not wait for startup [verified: `up --no-attach` with the plugin linked left one workspace, and startup's log was empty with exit 0]. If herdr ever made a headless server create the initial workspace, `up` would stop planning when it has just started the server with the plugin linked and enabled, and leave the bring-up to startup; that is not built.
 
@@ -459,8 +458,8 @@ All fixtures are synthetic: a project `acme` with four roles in the main checkou
   - `close` rejects a base role.
 - **Startup (§4.4):**
   - herdr's fresh initial workspace is adopted (`AdoptWorkspace`, then `RenameTab` to the first role, the other tabs, agents and board), renamed when its directory is not called like the project and not renamed when it is;
-  - each refusal separately: two workspaces, a renamed workspace or tab, a pane with `agent_session`, a pane outside the root, a busy shell, the label on another workspace, no context;
-  - a restored workspace is only repaired: no `StartAgent`, no tab, the board typed in its bare shell; a project without its workspace is not recreated;
+  - each refusal separately: two workspaces (also when the other one carries the project's label), a renamed workspace or tab, a pane with `agent_session`, a pane outside the root, a busy shell, no context;
+  - a restored workspace is only repaired: no `StartAgent`, no tab, the board typed in its bare shell; a restored workspace missing a role tab gets no `CreateTab` or `StartAgent` for it, only a warning, while an explicit `up` creates it; a project without its workspace is not recreated;
   - `startup` warnings never become notifications.
 - **Board drawing:** `TestBackend` at 100×40, comparing the buffer's text (no colours) with snapshots in `tests/snapshots/`. Cases:
   - each project's example;
