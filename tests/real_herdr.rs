@@ -4,10 +4,11 @@
 //! CREW_REAL_HERDR=1 cargo test --test real_herdr -- --ignored --nocapture
 //! ```
 //!
-//! Starts `herdr --session crewtest server` with `XDG_CONFIG_HOME` and `XDG_STATE_HOME` in a
+//! Starts `herdr --session <name> server` with `XDG_CONFIG_HOME` and `XDG_STATE_HOME` in a
 //! temporary directory and without the caller's `HERDR_*` and `CLAUDE*` variables, over a
-//! temporary git repository. When it ends, also on failure, it stops the session and deletes the
-//! temporary directory.
+//! temporary git repository. A fake `claude` comes first in the `PATH`, so a real one is never
+//! started. When it ends, also on failure, it stops the session and deletes the temporary
+//! directory. A second session checks the `[[startup]]` hook (design §4.4).
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -17,11 +18,13 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 const SESSION: &str = "crewtest";
+const STARTUP_SESSION: &str = "crewstart";
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-crew");
 /// macOS `sun_path`: 104 bytes including the trailing NUL.
 const MAX_SOCKET: usize = 103;
 
 struct Isolated {
+    session: &'static str,
     dir: PathBuf,
     repo: PathBuf,
     socket: PathBuf,
@@ -33,12 +36,18 @@ impl Isolated {
     fn command(&self, program: &str) -> Command {
         let mut cmd = Command::new(program);
         cmd.env_clear();
-        for key in ["HOME", "USER", "LOGNAME", "PATH", "LANG", "SHELL", "TMPDIR"] {
+        for key in ["HOME", "USER", "LOGNAME", "LANG", "SHELL", "TMPDIR"] {
             if let Some(v) = std::env::var_os(key) {
                 cmd.env(key, v);
             }
         }
-        cmd.env("TERM", "xterm-256color")
+        let mut path = std::ffi::OsString::from(self.dir.join("bin"));
+        if let Some(p) = std::env::var_os("PATH") {
+            path.push(":");
+            path.push(p);
+        }
+        cmd.env("PATH", path)
+            .env("TERM", "xterm-256color")
             .env("XDG_CONFIG_HOME", self.dir.join("c"))
             .env("XDG_STATE_HOME", self.dir.join("s"))
             .env("HERDR_SOCKET_PATH", &self.socket)
@@ -143,11 +152,18 @@ impl Isolated {
 
 impl Drop for Isolated {
     fn drop(&mut self) {
-        // Never `server stop` without a session: the test session is stopped by name.
-        let _ = self.herdr(&["session", "stop", SESSION]);
+        self.stop();
+        let _ = self.herdr(&["session", "delete", self.session]);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl Isolated {
+    /// Stops the test session by name (never `server stop` without a session) and reaps the
+    /// server process, killing it if it did not end with the session (the test started it).
+    fn stop(&mut self) {
+        let _ = self.herdr(&["session", "stop", self.session]);
         sleep(Duration::from_millis(500));
-        let _ = self.herdr(&["session", "delete", SESSION]);
-        // Reap the server process; kill it if it did not end with the session (the test started it).
         if let Some(mut child) = self.server.take() {
             let start = Instant::now();
             while matches!(child.try_wait(), Ok(None)) && start.elapsed() < Duration::from_secs(5) {
@@ -158,7 +174,61 @@ impl Drop for Isolated {
             }
             let _ = child.wait();
         }
-        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+
+    /// Starts the session's server; with `startup_cwd`, like a `herdr` client launched from that
+    /// directory, which creates herdr's initial workspace there. The server runs with
+    /// `CREW_AGENT_CMD=cat`, which reaches the plugin's hooks.
+    fn start(&mut self, startup_cwd: Option<&Path>) {
+        let mut server = self.command("herdr");
+        server
+            .args(["--session", self.session, "server"])
+            .env("CREW_AGENT_CMD", "cat")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(dir) = startup_cwd {
+            server.env("HERDR_STARTUP_CWD", dir);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            server.process_group(0);
+        }
+        self.server = Some(server.spawn().expect("herdr server"));
+        wait_until("the isolated server answers", || {
+            self.herdr(&["workspace", "list"]).status.success()
+        });
+
+        // Abort unless the server is the one under the temporary directory.
+        let status =
+            String::from_utf8_lossy(&self.herdr(&["--session", self.session, "status"]).stdout)
+                .into_owned();
+        let expected = format!("socket: {}", self.socket.display());
+        assert!(
+            status.contains(&expected),
+            "the socket is not under the temporary directory:\n{status}"
+        );
+    }
+
+    fn workspaces(&self) -> Vec<String> {
+        self.result(&["workspace", "list"])["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["label"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The finished runs in the plugin log, oldest first.
+    fn finished_logs(&self) -> Vec<Value> {
+        let r = self.result(&["plugin", "log", "list", "--plugin", "herdr-crew"]);
+        r["logs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|l| l["status"] != "running")
+            .collect()
     }
 }
 
@@ -228,13 +298,14 @@ worktree = true
 extra = true
 "#;
 
-fn setup() -> Isolated {
+/// The temporary directory with its repository, without a server yet.
+fn prepare(prefix: &str, session: &'static str) -> Isolated {
     // A short name: herdr's client socket lives under XDG_CONFIG_HOME and macOS does not accept
     // socket paths longer than 103 bytes.
-    let dir = std::env::temp_dir().join(format!("cr{:04x}", std::process::id() & 0xffff));
+    let dir = std::env::temp_dir().join(format!("{prefix}{:04x}", std::process::id() & 0xffff));
     let socket = dir
         .join("c/herdr/sessions")
-        .join(SESSION)
+        .join(session)
         .join("herdr.sock");
     let client = socket.with_file_name("herdr-client.sock");
     assert!(
@@ -245,6 +316,14 @@ fn setup() -> Isolated {
     );
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    // The fake `claude`: waits like an agent without being one.
+    let fake = dir.join("bin/claude");
+    write(fake.clone(), "#!/bin/sh\nwhile :; do sleep 1; done\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     let origin = dir.join("origin.git");
     let repo = dir.join("repo");
@@ -296,36 +375,13 @@ fn setup() -> Isolated {
     );
     git(&repo, &["push", "--quiet", "origin", "main"]);
 
-    let mut iso = Isolated {
+    Isolated {
+        session,
         dir,
         repo,
         socket,
         server: None,
-    };
-    let mut server = iso.command("herdr");
-    server
-        .args(["--session", SESSION, "server"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        server.process_group(0);
     }
-    iso.server = Some(server.spawn().expect("herdr server"));
-    wait_until("the isolated server answers", || {
-        iso.herdr(&["workspace", "list"]).status.success()
-    });
-
-    // Abort unless the server is the one under the temporary directory.
-    let status =
-        String::from_utf8_lossy(&iso.herdr(&["--session", SESSION, "status"]).stdout).into_owned();
-    let expected = format!("socket: {}", iso.socket.display());
-    assert!(
-        status.contains(&expected),
-        "the socket is not under the temporary directory:\n{status}"
-    );
-    iso
 }
 
 #[test]
@@ -340,8 +396,13 @@ fn real_herdr() {
         .unwrap();
     let before = std::fs::read(&real_plugins).ok();
     {
-        let iso = setup();
+        let mut iso = prepare("cr", SESSION);
+        iso.start(None);
         scenario(&iso);
+    }
+    {
+        let mut iso = prepare("cs", STARTUP_SESSION);
+        startup_scenario(&mut iso);
     }
     assert_eq!(
         std::fs::read(&real_plugins).ok(),
@@ -496,4 +557,72 @@ fn scenario(iso: &Isolated) {
         log["stdout"].as_str().unwrap().contains("nothing to do"),
         "{log}"
     );
+}
+
+/// The `[[startup]]` hook (design §4.4): a server launched from the repository ends with only the
+/// project's workspace, and a restart repairs the board without relaunching anything.
+fn startup_scenario(iso: &mut Isolated) {
+    // The release binary was built by `scenario` step 3; the manifest's hook runs it.
+    iso.result(&["plugin", "link", env!("CARGO_MANIFEST_DIR")]);
+
+    // a. Like `cd repo && herdr`: herdr creates its initial workspace "repo" with tab «1», and
+    // startup adopts it as "crewtest".
+    let repo = iso.repo.clone();
+    iso.start(Some(&repo));
+    let mut logs = Vec::new();
+    wait_until("the startup hook finishes", || {
+        logs = iso.finished_logs();
+        !logs.is_empty()
+    });
+    println!("startup log: {}", logs[0]);
+    assert_eq!(logs[0]["exit_code"], 0, "{}", logs[0]);
+    assert!(
+        logs[0]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("adopted as \"crewtest\""),
+        "{}",
+        logs[0]
+    );
+    assert_eq!(iso.workspaces(), ["crewtest"]);
+    assert_eq!(iso.labels(), ["ct-lead", "ct-dev", "ct-status"]);
+    let board = iso.pane_of("ct-status");
+    wait_until("the board is drawn", || {
+        iso.screen(&board).contains("Project repo")
+    });
+    let lead = iso.pane_of("ct-lead");
+    wait_until("cat runs in ct-lead", || {
+        !shell_in_foreground(&iso.process_info(&lead))
+    });
+
+    // b. A restart restores the workspace: startup repairs the board and relaunches no role.
+    // The plugin log belongs to the server, so the new one starts empty.
+    iso.stop();
+    iso.start(None);
+    wait_until("the startup hook of the restarted server finishes", || {
+        logs = iso.finished_logs();
+        !logs.is_empty()
+    });
+    let log = &logs[0];
+    println!("restart log: {log}");
+    assert_eq!(log["exit_code"], 0, "{log}");
+    let stdout = log["stdout"].as_str().unwrap();
+    assert!(!stdout.contains("adopted"), "{log}");
+    assert!(!stdout.contains(&format!("typed in {lead}")), "{log}");
+    assert!(
+        log["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("tab ct-lead has no agent"),
+        "{log}"
+    );
+    assert_eq!(iso.workspaces(), ["crewtest"]);
+    assert_eq!(iso.labels(), ["ct-lead", "ct-dev", "ct-status"]);
+    let board = iso.pane_of("ct-status");
+    wait_until("the board is drawn after the restart", || {
+        iso.screen(&board).contains("Project repo")
+    });
+    assert!(shell_in_foreground(
+        &iso.process_info(&iso.pane_of("ct-lead"))
+    ));
 }

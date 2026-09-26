@@ -5,6 +5,7 @@ A [herdr](https://herdr.dev/) plugin that starts a project's Claude Code session
 - `up` creates the herdr workspace, a tab per role (in the main checkout or in its own git worktree), and starts `claude` with the role's prompt. It is idempotent: it never starts a second agent for a live role, and it only creates what is missing.
 - `add` and `close` add or remove extra instances of a role (`dev-2`, `dev-3`…).
 - `board` draws `.herdr/status.json`, the board the coordinating role keeps up to date, and redraws it when it changes.
+- With the plugin linked, `cd repo && herdr` is enough: herdr's startup hook runs `herdr-crew startup`, which brings the project up in the workspace herdr opens, and after a herdr restart repairs the board without relaunching anything.
 
 The design, with its decisions and the herdr behaviour they rely on, is in [docs/design.md](docs/design.md).
 
@@ -33,8 +34,10 @@ herdr-crew [--root DIR] <command>
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
   check                          validate the configuration and the dependencies
+  startup                        herdr's startup hook: bring up or repair the projects in herdr
 ```
 
+- **`cd repo && herdr`.** With the plugin linked and no herdr server running, herdr opens a workspace in the repository and the plugin's startup hook turns it into the project's workspace: the roles, their agents and the board. After a herdr restart, the same hook repairs the board of each project whose workspace came back, and relaunches no role. Two cases are left to `herdr-crew up`: launching `herdr` from a project while a restored session has no workspace for it, and attaching to a server that is already running. `startup` writes only to the plugin log (`herdr plugin log list --plugin herdr-crew`).
 - **Where the project is.** The project root is the main checkout of the git repository around the current directory, or around `--root`, even when called from a worktree.
 - **The `herdr-crew.up` action.** It works on the workspace you have focused in herdr.
 - **Starting the server.** From a plain terminal, `up` starts a herdr server if none is running and then opens herdr. Pass `--no-attach` to skip opening it.

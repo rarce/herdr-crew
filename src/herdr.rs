@@ -32,6 +32,8 @@ pub struct Herdr {
     bin: OsString,
     /// Runs as a herdr action (`HERDR_PLUGIN_ID`): no visible terminal.
     pub action: bool,
+    /// Warnings and errors go only to the plugin log, never to a notification (`startup`).
+    pub silent: bool,
 }
 
 impl Herdr {
@@ -39,6 +41,7 @@ impl Herdr {
         Herdr {
             bin: std::env::var_os("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into()),
             action: std::env::var_os("HERDR_PLUGIN_ID").is_some(),
+            silent: false,
         }
     }
 
@@ -139,9 +142,15 @@ impl Herdr {
         }
     }
 
-    /// Shows a herdr notification when running as an action (no visible terminal).
+    /// Whether warnings and errors also become a herdr notification: only in an action, which
+    /// has no visible terminal, and never in `startup`, whose output goes to the plugin log.
+    pub fn notifies(&self) -> bool {
+        self.action && !self.silent
+    }
+
+    /// Shows a herdr notification when `notifies`.
     pub fn notify(&self, message: &str) {
-        if self.action {
+        if self.notifies() {
             let _ = self.call(&["notification", "show", "herdr-crew", "--body", message]);
         }
     }
@@ -252,6 +261,16 @@ pub fn execute(
                 ));
                 out.step(&format!("workspace \"{label}\" created ({id})"));
                 workspace = Some(id);
+            }
+            Step::AdoptWorkspace { initial: i, label } => {
+                if i.rename {
+                    herdr
+                        .call(&["workspace", "rename", &i.workspace, label])
+                        .map_err(|e| format!("could not rename {}: {e}", i.workspace))?;
+                }
+                out.step(&format!("workspace {} adopted as \"{label}\"", i.workspace));
+                initial = Some((i.tab.clone(), i.pane.clone()));
+                workspace = Some(i.workspace.clone());
             }
             Step::RenameTab { label } => {
                 let (tab, pane) = initial.clone().ok_or("there is no initial tab to rename")?;
@@ -403,5 +422,22 @@ pub fn write_file(path: &Path, content: &str, atomic: bool) -> Result<(), String
         std::fs::rename(&tmp, path).map_err(fail)
     } else {
         std::fs::write(path, content).map_err(fail)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_warnings_go_only_to_the_log() {
+        let h = |action, silent| Herdr {
+            bin: "herdr".into(),
+            action,
+            silent,
+        };
+        assert!(h(true, false).notifies(), "an action notifies");
+        assert!(!h(true, true).notifies(), "startup never notifies");
+        assert!(!h(false, false).notifies(), "a terminal prints");
     }
 }

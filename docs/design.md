@@ -1,6 +1,6 @@
 # herdr-crew: design of a herdr plugin for role-based Claude Code sessions
 
-**Date:** 2026-09-26. **Status:** the design the code honours. Step 1 of the construction table (§11) is built: the binary, its tests and a real test against an isolated herdr. The step-1 hypotheses are verified, except the implicit `.exe` on Windows.
+**Date:** 2026-09-26. **Status:** the design the code honours. Step 1 of the construction table (§11) is built: the binary, its tests and a real test against an isolated herdr. The step-1 hypotheses are verified, except the implicit `.exe` on Windows. The startup hook (§4.4) is built too.
 
 Where claims come from:
 
@@ -33,7 +33,7 @@ That goes into the configuration file; the logic lives in one binary.
 - **Reading agent state for the board.**
 - **Agents other than Claude Code.**
 - **Touching `~/.config/herdr/config.toml` or `plugins.json`.** Linking or installing the plugin is the user's decision.
-- **`[[startup]]`, `[[events]]` and `[[link_handlers]]`.**
+- **`[[events]]` and `[[link_handlers]]`.** The only hook is `[[startup]]` (§4.4).
 
 **Invariants:**
 
@@ -153,6 +153,9 @@ platforms = ["macos", "linux", "windows"]
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]
 
+[[startup]]
+command = ["target/release/herdr-crew", "startup"]
+
 [[actions]]
 id = "up"
 title = "Start or complete the project's sessions"
@@ -160,7 +163,9 @@ contexts = ["workspace", "pane"]
 command = ["target/release/herdr-crew", "up"]
 ```
 
-The id is `herdr-crew`, like the repository; the action is `herdr-crew.up`.
+The id is `herdr-crew`, like the repository; the action is `herdr-crew.up`. The `[[startup]]` hook runs `startup` (§4.4).
+
+herdr reads a linked plugin's manifest from its `manifest_path` when the server starts, not only the copy in `plugins.json`: a `[[startup]]` added to a manifest after `plugin link` ran at the next server start, while `plugins.json` still lacked it [verified]. An already linked checkout needs no new `link`.
 
 **Variants are not actions.** herdr actions take no parameters [vendor: issue #3603, _not planned_]. What a user starts by hand is "bring the project up".
 
@@ -185,6 +190,7 @@ Whether herdr finds the `.exe` without its extension on Windows remains [H] unti
 - `close <name>`
 - `board [--file PATH] [--once] [--interval S]`
 - `check`
+- `startup`: only herdr's `[[startup]]` hook runs it (§4.4); it takes no option, not even `--root`.
 
 Global option: `--root DIR`. `--dry-run` prints the plan (§6.2) without running it; it is meant for migrations (§9) and debugging.
 
@@ -260,7 +266,45 @@ herdr is invoked as `$HERDR_BIN_PATH` when set (herdr actions), else as `herdr` 
 
 - **Output.** Each step is printed on stdout (`herdr-crew: globex-dev in w3:p7`), and each warning or error on stderr.
 - **Exit codes.** 1 if the plan stopped; 2 if the command line or the configuration is invalid.
-- **As an action.** herdr keeps stdout, stderr (up to 64 KiB) and the exit code in `plugin log list` [vendor]. The action runs without a visible terminal, so it also calls `herdr notification show "herdr-crew" --body "<message>"` on an error, an `agent_not_ready` or a step-3 warning. That way the user sees it without opening the log.
+- **As an action.** herdr keeps stdout, stderr (up to 64 KiB) and the exit code in `plugin log list` [vendor]. The action runs without a visible terminal, so it also calls `herdr notification show "herdr-crew" --body "<message>"` on an error, an `agent_not_ready` or a step-3 warning. That way the user sees it without opening the log. `startup` is the exception: it writes only to the log (§4.4).
+
+### 4.4 `startup`: the `[[startup]]` hook
+
+With the plugin linked, `cd repo && herdr` brings the project up with nothing else to type. The project is the one herdr was launched from; there is no global list of projects.
+
+**What herdr does** [verified on 2026-09-26 with herdr 0.9.1 in an isolated XDG]:
+
+- A `herdr` client that finds no server starts one that creates an **initial workspace** in the client's directory: label = the directory's name, one tab «1», one pane in that directory (server log: `created startup workspace cwd=…`). The client hands the directory over in `HERDR_STARTUP_CWD`; a headless server started with that variable does the same.
+- `[[startup]]` runs once per server, **after** that workspace exists (0.35 s later in the check), in the plugin directory, with `HERDR_PLUGIN_CONTEXT_JSON` naming it: `workspace_id`, `workspace_label`, `workspace_cwd` = the launch directory, `invocation_source: "startup"`.
+- A headless `herdr server`, as `up` starts it (§4.2 step 1), creates **no** workspace; startup then runs with a context without workspace (`{"invocation_source":"startup",…}`), and a client attaching later to that empty server creates none either.
+- A client attaching to a running server, from any directory, creates no workspace and runs no hook.
+- On a restart with a saved session, herdr restores the workspaces, ignores the launch directory (log: `restored session already has workspaces; ignoring startup cwd`) and runs startup once, with the **focused** workspace as its context. Restored workspaces fire no `workspace.created`.
+- Plugin commands inherit the server's environment (`CREW_AGENT_CMD` reached the hook in the real test).
+
+**Roots.** `startup` lists the workspaces and takes each one's **first pane** `cwd`; the root is the parent of its git common dir (§2.1) when `<root>/.herdr/crew.toml` exists. Roots are deduplicated. The hook's own directory and `workspace_cwd` are not used to find roots.
+
+**Per root**, with its configuration and the state of §4.2 step 2:
+
+1. **Adoption**, the only path that creates a project from nothing. The context's workspace is adopted only if all of these hold:
+   - it is the context's workspace, and it is the only workspace in herdr;
+   - no other workspace carries the project's label;
+   - its label is its pane's directory name, and it has one tab, labelled «1», with one pane;
+   - that pane has no `agent_session`;
+   - the pane's `cwd` is the root, both with symbolic links resolved;
+   - the pane's shell is in the foreground (§4.2 step 9), waiting up to 2 s while the shell sources its rc files.
+
+   Then the plan is `up`'s for a missing workspace, with `AdoptWorkspace` instead of `CreateWorkspace`: it renames the workspace to the project's label (unless the directory already has that name) and takes tab «1» as the initial tab, which `RenameTab` gives to the first role without a worktree (§4.2 step 4). The rest follows `up`: tabs, agents, board. A directory whose name is the project's label is adopted too; there the label the candidate carries is not "another workspace".
+2. **Repair**, when adoption does not hold and a workspace with the project's label exists: `up`'s plan over it. A role tab that exists is never relaunched, occupied or not (the `no agent` verdict only warns, §4.2 step 3), and the board is typed again only when its pane is a bare shell. Missing tabs are created as in `up`.
+3. **Nothing**, otherwise: a project whose workspace was closed is not brought back. The reason goes to the log.
+
+**Output.** Steps on stdout and warnings on stderr, both kept by herdr in `plugin log list`. `startup` never calls `notification show`, not even for an error. It focuses the adopted workspace and nothing else, and never attaches. It exits 0 when there is nothing to do and 1 when a root failed; the other roots still run.
+
+**Cold `up`.** When `up` starts the server itself, that server is headless and creates no workspace, so startup finds nothing to adopt and does nothing, and `up` plans as always. There is no race between the two and `up` does not wait for startup [verified: `up --no-attach` with the plugin linked left one workspace, and startup's log was empty with exit 0]. If herdr ever made a headless server create the initial workspace, `up` would stop planning when it has just started the server with the plugin linked and enabled, and leave the bring-up to startup; that is not built.
+
+**Limits**, both covered by running `herdr-crew up` in the project:
+
+- launching `herdr` from project E while a restored session has no workspace for E: herdr ignores the launch directory on restore, so startup never sees E;
+- attaching to a server that is already running: no hook runs.
 
 ## 5. The board
 
@@ -371,7 +415,7 @@ The core runs no processes and reads neither the clock nor the disk except throu
 - **`Config::parse(text, root) -> Result<Config, Vec<Error>>`.**
 - **`plan(&Config, &HerdrState, &Env) -> Plan`.**
   - `Env` carries the test command, the binary's path, which worktrees exist and what runs in the foreground of the board pane.
-  - `Plan` carries the verdicts and a list of `Step`: `CreateWorkspace`, `RenameTab`, `CreateWorktree`, `CreateTab`, `WritePrompt`, `StartAgent`, `RunInPane`, `SeedStatus`, `WriteSchema` and `Warn`. Focus is not a step (§4.2 step 10).
+  - `Plan` carries the verdicts and a list of `Step`: `CreateWorkspace`, `AdoptWorkspace`, `RenameTab`, `CreateWorktree`, `CreateTab`, `WritePrompt`, `StartAgent`, `RunInPane`, `SeedStatus`, `WriteSchema` and `Warn`. Focus is not a step (§4.2 step 10).
   - The workspace and pane ids in the steps are symbolic references to the result of an earlier step.
 - **`board::load(bytes, &Config) -> Result<Status, Unavailable>` and `board::view(frame, Status | Unavailable, now, path)`.**
 
@@ -413,6 +457,11 @@ All fixtures are synthetic: a project `acme` with four roles in the main checkou
   - `CREW_AGENT_CMD` replaces `agent start`;
   - `add` numbers after `-2` and `-5` as `-6`;
   - `close` rejects a base role.
+- **Startup (§4.4):**
+  - herdr's fresh initial workspace is adopted (`AdoptWorkspace`, then `RenameTab` to the first role, the other tabs, agents and board), renamed when its directory is not called like the project and not renamed when it is;
+  - each refusal separately: two workspaces, a renamed workspace or tab, a pane with `agent_session`, a pane outside the root, a busy shell, the label on another workspace, no context;
+  - a restored workspace is only repaired: no `StartAgent`, no tab, the board typed in its bare shell; a project without its workspace is not recreated;
+  - `startup` warnings never become notifications.
 - **Board drawing:** `TestBackend` at 100×40, comparing the buffer's text (no colours) with snapshots in `tests/snapshots/`. Cases:
   - each project's example;
   - a busy board;
@@ -441,7 +490,10 @@ On a temporary git repository with its own test `crew.toml`:
 2. It quits the viewer with `pane send-keys <P> q` and runs `up` again: the viewer comes back (repair). With `cat` running in the board pane, `up` types nothing.
 3. `add` and `close` of an extra instance. A later `add` gives the same number and reuses the worktree, and `close` of a base role fails.
 4. `herdr plugin link` of the plugin directory (it writes the temporary `plugins.json`), then `herdr plugin action invoke up --plugin herdr-crew` from a test pane, then `plugin log list`.
-5. `herdr session stop crewtest` and `session delete`, reaping the server process. It checks that `~/.config/herdr/plugins.json` did not change. `server stop` is never run without `--session`.
+5. **Startup (§4.4)**, in a second session `crewstart`: it links the plugin, starts the server with `HERDR_STARTUP_CWD` in the repository (like a client launched there) and checks that startup leaves one workspace, `crewtest`, with the role tabs and the board and no tab «1». Then it stops the session, starts the server again and checks that the restored workspace gets its board back while `ct-lead` stays a bare shell.
+6. `herdr session stop` and `session delete` of each session, reaping the server process. It checks that `~/.config/herdr/plugins.json` did not change. `server stop` is never run without `--session`.
+
+A fake `claude` comes first in the `PATH` of every process the test starts, so a real one never runs even if `CREW_AGENT_CMD` were lost. The plain `herdr` client in a terminal was checked by hand in the same isolation (a pty from a directory not called like the label, with zsh): startup adopted and renamed the workspace, and left the roles and the board [verified].
 
 It is both the integration test of step 1 and the check of the [H] (§11). It passed on 2026-09-26 on macOS with herdr 0.9.1 [verified]:
 
@@ -497,6 +549,8 @@ A project that runs role sessions with its own scripts migrates in one change:
 - **Unstable ratatui feature.** A box with wrapped text gets its height from `Paragraph::line_count`, which needs ratatui's unstable `unstable-rendered-line-info` feature. If that changes, the text is wrapped by hand [E].
 - **Name clashes across projects.** A live agent with a role's name in another project blocks that role (invariant 3). Project-prefixed names avoid it; validation does not enforce them.
 - **Schema drift.** The generated schema and the viewer's validator may diverge (§5.2); that is fixed when a real divergence affects the writer.
+- **Restore before resume.** With `resume_agents_on_restore`, herdr relaunches a restored agent pane with `claude --resume <id>` about 0.7 s after startup begins. `pane list` already reports that pane's `agent_session` when startup runs, so adoption refuses it; the agent itself is not live yet, so a role tab reads `no agent` and only warns [verified with a fake `claude` and the session reported through `pane report-agent-session`, the call the Claude hook makes]. What remains: a pane whose agent never reported a session, for example without herdr's Claude integration, carries nothing that tells it from a fresh shell. herdr does not resume such a pane either, so adopting it types into an idle shell, the same as a fresh one.
+- **Adopting a look-alike.** A restored session with one workspace, named like its directory, with a single tab «1» whose only pane is an idle shell in a project's root, is indistinguishable from a fresh one and is adopted. That is what the user would have got by typing `herdr-crew up` there.
 
 **Discarded alternatives:**
 
@@ -504,7 +558,9 @@ A project that runs role sessions with its own scripts migrates in one change:
 - **Keeping per-project scripts**: copies in several shells, plus viewers that diverge, pulling in tools like jq, uv and Python.
 - **WASM**: herdr spawns processes and has no WASM runtime [vendor], so a host such as wasmtime would also be needed.
 - **`herdr worktree create`**: it creates one workspace per worktree [verified: `herdr worktree` help], while here each worktree is a tab of the project's workspace.
-- **`[[startup]]` to bring the project up**: it runs on every restore and would duplicate what herdr already resumes [vendor].
+- **`[[startup]]` only for plugin state, never to bring the project up**: discarded because it runs on every restore and would duplicate what herdr already resumes [vendor]. Reversed (§4.4): restore is safe because the role's tab exists with its label, so the `no agent` verdict never relaunches, and a project is only created by adopting herdr's fresh initial workspace.
+- **`[[events]] on = "workspace.created"`**: it does not fire for herdr's initial workspace nor for restored ones, and it does fire for the workspaces `up` itself creates, which would run the hook again [verified]. Its event data has no `cwd`.
+- **A bounded wait in a cold `up`** for startup to adopt: a headless server creates no initial workspace, so there is nothing to wait for (§4.4).
 - **The board as a plugin pane**: see §3.
 - **Socket instead of CLI**: it ties the binary to protocol 22; the CLI is the documented plugin API.
 - **Counting only agent names to tell whether a role is alive**: sessions started by hand have no name (§4.2 step 3).
@@ -515,6 +571,7 @@ A project that runs role sessions with its own scripts migrates in one change:
 | Status   | What                                                                                                                                                                                                                                                                     | Trigger                                                              |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
 | Built    | Step 1 (2026-09-26): the crate with its manifest, `up` (with `--dry-run`), `add`, `close`, `board` and `check`. The pure core (`config`, `prompt`, `plan`, `board`) is separate from the adapters (`herdr`, `git`, terminal loop). The §7.1 tests and the §7.2 real test pass. The step-1 [H] are verified except the Windows `.exe` (§3). | —                                                                    |
+| Built    | The startup hook (2026-09-26): `[[startup]]` runs `herdr-crew startup`, which adopts herdr's fresh initial workspace and otherwise only repairs existing project workspaces (§4.4). Unit tests for adoption and each refusal, and the real test's startup session. | —                                                                    |
 | Built    | Own repository with CI running `cargo fmt --check`, `clippy -D warnings` and `cargo test` on Linux and macOS; prompts inline in `crew.toml`                                                                                                                              | —                                                                    |
 | Step 2   | Migrating the first project (§9)                                                                                                                                                                                                                                         | Step 1 green and linking approved by its user                        |
 | Step 3   | A fake herdr in Rust (feature `fake-herdr`, persistent state, a call log) to test the §4.2 sequence in CI without a real herdr; Windows in CI                                                                                                                             | The first migration done                                             |
@@ -526,6 +583,7 @@ A project that runs role sessions with its own scripts migrates in one change:
 | Deferred | Scrolling in the board                                                                                                                                                                                                                                                   | A project's board does not fit its tab                               |
 | Deferred | Configurable `owner` sections and board texts                                                                                                                                                                                                                            | A project with other sections                                        |
 | Deferred | Relaunching a role automatically with `claude -r` and the session herdr knows                                                                                                                                                                                            | Tabs without an agent after restarts become frequent                 |
+| Deferred | `up` leaving the bring-up to startup when it has just started the server (§4.4, cold `up`)                                                                                                                                            | herdr's headless server creates an initial workspace                 |
 | Deferred | A lock against concurrent `up`/`add`                                                                                                                                                                                                                                     | An orphan tab caused by concurrency in real use                      |
 
 ## 12. Open questions

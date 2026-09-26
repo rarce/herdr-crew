@@ -12,7 +12,8 @@ mod prompt;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -20,7 +21,7 @@ use serde_json::Value;
 
 use config::Config;
 use herdr::{Herdr, Output};
-use plan::{Env, HerdrState};
+use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, WorkspaceItem};
 
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   up [--no-attach] [--dry-run]   start or complete the project's sessions
@@ -28,7 +29,8 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   close <name>                   close the tab of an extra instance (keeps its worktree)
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
-  check                          validate the configuration and the dependencies";
+  check                          validate the configuration and the dependencies
+  startup                        herdr's startup hook: bring up or repair the projects in herdr";
 
 /// A failure with its exit code: 2 for an invalid command line or configuration, 1 when the
 /// plan stopped or something else failed (design §4.3).
@@ -94,7 +96,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
     }
     let allowed: &[&str] = match a.command.as_str() {
         "up" => &["no_attach", "dry_run"],
-        "add" | "close" | "check" => &[],
+        "add" | "close" | "check" | "startup" => &[],
         "board" => &["file", "once", "interval"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
@@ -242,6 +244,147 @@ fn up(c: &Config, a: &Args) -> Result<(), Fail> {
     Ok(())
 }
 
+/// How long `startup` waits for the initial pane's shell to finish sourcing its rc files.
+const SHELL_WAIT: Duration = Duration::from_secs(2);
+
+/// `startup`, run by herdr's `[[startup]]` hook (design §4.4). It adopts herdr's initial
+/// workspace when it is a fresh one in a project's root, and otherwise only repairs the
+/// projects whose workspace already exists. It never notifies, never attaches, and focuses only
+/// an adopted workspace.
+fn startup() -> Result<(), Fail> {
+    let mut herdr = Herdr::from_env();
+    herdr.silent = true;
+    let workspaces = herdr
+        .call(&["workspace", "list"])
+        .map_err(|e| Fail::run(format!("the herdr server does not answer: {e}")))?;
+    let items = plan::workspace_items(&workspaces).map_err(Fail::run)?;
+    let context: Option<String> = std::env::var("HERDR_PLUGIN_CONTEXT_JSON")
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["workspace_id"].as_str().map(str::to_string));
+    // The roots of the projects in herdr: only the directory of each workspace's first pane.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for w in &items {
+        let Ok(panes) = panes_of(&herdr, &w.workspace_id) else {
+            continue;
+        };
+        let Some(root) = panes
+            .first()
+            .and_then(|p| p.cwd.as_deref())
+            .and_then(|d| git::main_root(d).ok())
+            .filter(|r| r.join(config::CONFIG_FILE).is_file())
+        else {
+            continue;
+        };
+        let root = root.canonicalize().unwrap_or(root);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    let mut failed = false;
+    for root in &roots {
+        if let Err(f) = startup_root(&herdr, root, context.as_deref()) {
+            for line in f.lines {
+                eprintln!("{line}");
+            }
+            failed = true;
+        }
+    }
+    if failed {
+        Err(Fail {
+            code: 1,
+            lines: Vec::new(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn startup_root(herdr: &Herdr, root: &Path, context: Option<&str>) -> Result<(), Fail> {
+    let c = load_config(root)?;
+    let mut out = Output;
+    // Read again for every root: an earlier one may have renamed a workspace.
+    let workspaces = herdr
+        .call(&["workspace", "list"])
+        .map_err(|e| Fail::run(e.to_string()))?;
+    let state = herdr.state(&workspaces, &c.label).map_err(Fail::run)?;
+    let items = plan::workspace_items(&workspaces).map_err(Fail::run)?;
+    let state = match plan::startup_state(state, adoption(herdr, &c, &items, context)?) {
+        Ok(s) => s,
+        Err(why) => {
+            out.step(&format!("{}: nothing to do ({why})", c.label));
+            return Ok(());
+        }
+    };
+    let adopted = state.adopt.is_some();
+    let p = plan::plan(&c, &state, &env(&c, &state, Some(herdr)));
+    let ws = herdr::execute(herdr, &c, &state, &p, &mut out).map_err(Fail::run)?;
+    if p.actions().next().is_none() {
+        out.step(&format!("{}: nothing to do", c.label));
+    }
+    if let (true, Some(ws)) = (adopted, ws) {
+        let _ = herdr.call(&["workspace", "focus", &ws]);
+    }
+    Ok(())
+}
+
+/// Whether `startup` may adopt the workspace of its context (design §4.4). It waits up to
+/// `SHELL_WAIT` for the pane's shell to come to the foreground.
+fn adoption(
+    herdr: &Herdr,
+    c: &Config,
+    workspaces: &[WorkspaceItem],
+    context: Option<&str>,
+) -> Result<Result<Initial, Refusal>, Fail> {
+    let Some(id) = context else {
+        return Ok(Err(Refusal::NoContext));
+    };
+    let tabs: Vec<Tab> = herdr
+        .call(&["tab", "list", "--workspace", id])
+        .map_err(|e| Fail::run(e.to_string()))
+        .and_then(|v| {
+            serde_json::from_value(v["tabs"].clone()).map_err(|e| Fail::run(e.to_string()))
+        })?;
+    let panes = panes_of(herdr, id)?;
+    let pane_dir = panes
+        .first()
+        .and_then(|p| p.cwd.as_deref())
+        .and_then(|d| d.canonicalize().ok());
+    let root = c.root.canonicalize().unwrap_or_else(|_| c.root.clone());
+    let start = Instant::now();
+    loop {
+        let foreground = match panes.as_slice() {
+            [p] => herdr.foreground(&p.id),
+            _ => Foreground::Unknown("more than one pane".into()),
+        };
+        let verdict = plan::adoption(
+            c,
+            &Candidate {
+                context: Some(id),
+                workspaces,
+                tabs: &tabs,
+                panes: &panes,
+                pane_dir: pane_dir.as_deref(),
+                root: &root,
+                foreground: &foreground,
+            },
+        );
+        match verdict {
+            Err(Refusal::Foreground(_)) if start.elapsed() < SHELL_WAIT => {
+                sleep(Duration::from_millis(200));
+            }
+            v => return Ok(v),
+        }
+    }
+}
+
+fn panes_of(herdr: &Herdr, workspace: &str) -> Result<Vec<plan::Pane>, Fail> {
+    herdr
+        .call(&["pane", "list", "--workspace", workspace])
+        .map_err(|e| Fail::run(e.to_string()))
+        .and_then(|v| plan::pane_items(&v).map_err(Fail::run))
+}
+
 fn current_state(c: &Config, herdr: &Herdr) -> Result<HerdrState, Fail> {
     let workspaces = herdr
         .call(&["workspace", "list"])
@@ -370,6 +513,12 @@ fn run() -> Result<(), Fail> {
         return Ok(());
     }
     let a = parse_args(raw)?;
+    if a.command == "startup" {
+        if a.root.is_some() {
+            return Err(Fail::usage("startup does not take --root"));
+        }
+        return startup();
+    }
     let root = resolve_root(a.root.as_deref())?;
     let c = load_config(&root)?;
     match a.command.as_str() {
@@ -407,6 +556,7 @@ mod tests {
         let a = args("up --dry-run --root /x").unwrap();
         assert!(a.dry_run && a.command == "up" && a.root.as_deref() == Some(Path::new("/x")));
         assert_eq!(args("add globex-dev").unwrap().positional, ["globex-dev"]);
+        assert_eq!(args("startup").unwrap().command, "startup");
         let a = args("board --file /f --once --interval 2").unwrap();
         assert!(a.once && a.interval == Some(2.0));
     }
@@ -422,6 +572,8 @@ mod tests {
             "board --interval 0",
             "up --x",
             "board --file",
+            "startup now",
+            "startup --dry-run",
         ] {
             assert_eq!(args(bad).err(), Some(2), "{bad}");
         }

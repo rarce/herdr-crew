@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -13,11 +13,23 @@ use crate::config::{Config, extra_number};
 use crate::prompt;
 
 /// What `up` needs to know from herdr: the project's workspace (by label) and the live agents
-/// of every workspace, because their names are global.
+/// of every workspace, because their names are global. `adopt` is herdr's initial workspace
+/// that `startup` takes over instead of creating one (§4.4).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HerdrState {
     pub workspace: Option<Workspace>,
     pub agents: Vec<Agent>,
+    pub adopt: Option<Initial>,
+}
+
+/// herdr's initial workspace with its only tab and pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Initial {
+    pub workspace: String,
+    pub tab: String,
+    pub pane: String,
+    /// Its label is not the project's yet.
+    pub rename: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +52,7 @@ pub struct Pane {
     pub tab_id: String,
     /// `agent_session.value` when herdr reports it: the Claude session that can be resumed.
     pub agent_session: Option<String>,
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -50,10 +63,10 @@ pub struct Agent {
     pub pane_id: String,
 }
 
-#[derive(Deserialize)]
-struct WorkspaceItem {
-    workspace_id: String,
-    label: String,
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WorkspaceItem {
+    pub workspace_id: String,
+    pub label: String,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +74,7 @@ struct PaneItem {
     pane_id: String,
     tab_id: String,
     agent_session: Option<SessionItem>,
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -76,10 +90,27 @@ fn items<T: for<'de> Deserialize<'de>>(result: &Value, key: &str) -> Result<Vec<
         .map_err(|e| format!("unreadable herdr response in \"{key}\": {e}"))
 }
 
+/// The workspaces in the `.result` of `workspace list`.
+pub fn workspace_items(workspaces: &Value) -> Result<Vec<WorkspaceItem>, String> {
+    items(workspaces, "workspaces")
+}
+
+/// The panes in the `.result` of `pane list`.
+pub fn pane_items(panes: &Value) -> Result<Vec<Pane>, String> {
+    Ok(items::<PaneItem>(panes, "panes")?
+        .into_iter()
+        .map(|p| Pane {
+            id: p.pane_id,
+            tab_id: p.tab_id,
+            agent_session: p.agent_session.map(|s| s.value),
+            cwd: p.cwd,
+        })
+        .collect())
+}
+
 /// The id of the workspace with that label in the `.result` of `workspace list`.
 pub fn find_workspace(workspaces: &Value, label: &str) -> Result<Option<String>, String> {
-    let list: Vec<WorkspaceItem> = items(workspaces, "workspaces")?;
-    Ok(list
+    Ok(workspace_items(workspaces)?
         .into_iter()
         .find(|w| w.label == label)
         .map(|w| w.workspace_id))
@@ -97,19 +128,13 @@ impl HerdrState {
             Some((id, tabs, panes)) => Some(Workspace {
                 id,
                 tabs: items(tabs, "tabs")?,
-                panes: items::<PaneItem>(panes, "panes")?
-                    .into_iter()
-                    .map(|p| Pane {
-                        id: p.pane_id,
-                        tab_id: p.tab_id,
-                        agent_session: p.agent_session.map(|s| s.value),
-                    })
-                    .collect(),
+                panes: pane_items(panes)?,
             }),
         };
         Ok(HerdrState {
             workspace,
             agents: items(agents, "agents")?,
+            adopt: None,
         })
     }
 
@@ -213,6 +238,12 @@ pub enum Step {
         label: String,
         cwd: PathBuf,
     },
+    /// Takes over herdr's initial workspace (§4.4): renames it when `rename` and makes its tab
+    /// the initial tab that `RenameTab` renames.
+    AdoptWorkspace {
+        initial: Initial,
+        label: String,
+    },
     /// Renames the initial tab of the workspace just created.
     RenameTab {
         label: String,
@@ -260,6 +291,14 @@ impl fmt::Display for Step {
         match self {
             Step::CreateWorkspace { label, cwd } => {
                 write!(f, "create workspace \"{label}\" in {}", cwd.display())
+            }
+            Step::AdoptWorkspace { initial, label } if initial.rename => write!(
+                f,
+                "adopt workspace {} renamed to \"{label}\"",
+                initial.workspace
+            ),
+            Step::AdoptWorkspace { initial, .. } => {
+                write!(f, "adopt workspace {}", initial.workspace)
             }
             Step::RenameTab { label } => write!(f, "rename the initial tab to \"{label}\""),
             Step::CreateWorktree {
@@ -448,9 +487,15 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
     // root, or to the board if every role works in a worktree.
     let mut renamed = None;
     if ws.is_none() {
-        p.steps.push(Step::CreateWorkspace {
-            label: c.label.clone(),
-            cwd: c.root.clone(),
+        p.steps.push(match &s.adopt {
+            Some(initial) => Step::AdoptWorkspace {
+                initial: initial.clone(),
+                label: c.label.clone(),
+            },
+            None => Step::CreateWorkspace {
+                label: c.label.clone(),
+                cwd: c.root.clone(),
+            },
         });
         let first = create
             .iter()
@@ -601,6 +646,122 @@ pub fn board_command(c: &Config, e: &Env) -> String {
     }
 }
 
+/// Label of the only tab of a workspace herdr has just created.
+pub const INITIAL_TAB: &str = "1";
+
+/// Why `startup` does not adopt a workspace (§4.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    NoContext,
+    LabelTaken(String),
+    NotAlone(usize),
+    NotInitial(String),
+    Session(String),
+    OtherDir(String),
+    Foreground(String),
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::NoContext => write!(f, "the startup context has no workspace"),
+            Refusal::LabelTaken(id) => write!(f, "workspace {id} already carries the label"),
+            Refusal::NotAlone(n) => write!(f, "{n} workspaces, not only herdr's initial one"),
+            Refusal::NotInitial(why) => write!(f, "not a fresh initial workspace: {why}"),
+            Refusal::Session(v) => write!(f, "its pane has the agent session {v}"),
+            Refusal::OtherDir(d) => write!(f, "its pane is in {d}, not in the root"),
+            Refusal::Foreground(what) => write!(f, "its shell is not idle: {what}"),
+        }
+    }
+}
+
+/// What `startup` knows about the workspace of its context, to decide whether to adopt it.
+pub struct Candidate<'a> {
+    /// `workspace_id` of the startup context.
+    pub context: Option<&'a str>,
+    pub workspaces: &'a [WorkspaceItem],
+    pub tabs: &'a [Tab],
+    pub panes: &'a [Pane],
+    /// The pane's `cwd` with symbolic links resolved.
+    pub pane_dir: Option<&'a Path>,
+    /// The root with symbolic links resolved.
+    pub root: &'a Path,
+    pub foreground: &'a Foreground,
+}
+
+/// herdr's initial workspace when `startup` may adopt it (§4.4): the context's workspace is the
+/// only one, labelled with its directory's name, with one tab «1» and one pane without an agent
+/// session, in the root, with its shell idle, and no other workspace carries the project's
+/// label.
+pub fn adoption(c: &Config, k: &Candidate) -> Result<Initial, Refusal> {
+    let id = k.context.ok_or(Refusal::NoContext)?;
+    if let Some(w) = k
+        .workspaces
+        .iter()
+        .find(|w| w.label == c.label && w.workspace_id != id)
+    {
+        return Err(Refusal::LabelTaken(w.workspace_id.clone()));
+    }
+    let ws = match k.workspaces {
+        [w] if w.workspace_id == id => w,
+        _ => return Err(Refusal::NotAlone(k.workspaces.len())),
+    };
+    let (tab, pane) = match (k.tabs, k.panes) {
+        ([t], [p]) if t.label == INITIAL_TAB && p.tab_id == t.id => (t, p),
+        _ => {
+            return Err(Refusal::NotInitial(format!(
+                "{} tabs and {} panes",
+                k.tabs.len(),
+                k.panes.len()
+            )));
+        }
+    };
+    if let Some(v) = &pane.agent_session {
+        return Err(Refusal::Session(v.clone()));
+    }
+    let dir = pane.cwd.as_deref().unwrap_or(Path::new(""));
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if ws.label != name {
+        return Err(Refusal::NotInitial(format!(
+            "label \"{}\" is not its directory's name",
+            ws.label
+        )));
+    }
+    if k.pane_dir != Some(k.root) {
+        return Err(Refusal::OtherDir(dir.display().to_string()));
+    }
+    match k.foreground {
+        Foreground::Shell => {}
+        Foreground::Other(what) | Foreground::Unknown(what) => {
+            return Err(Refusal::Foreground(what.clone()));
+        }
+    }
+    Ok(Initial {
+        workspace: id.to_string(),
+        tab: tab.id.clone(),
+        pane: pane.id.clone(),
+        rename: ws.label != c.label,
+    })
+}
+
+/// The state `startup` plans over for a project (§4.4): herdr's initial workspace to adopt, or
+/// the project's existing workspace to repair. A project without its workspace that cannot
+/// adopt one is left alone: a closed project is not brought back.
+pub fn startup_state(
+    mut s: HerdrState,
+    adoption: Result<Initial, Refusal>,
+) -> Result<HerdrState, Refusal> {
+    match adoption {
+        Ok(initial) => {
+            s.workspace = None;
+            s.adopt = Some(initial);
+            Ok(s)
+        }
+        Err(why) if s.workspace.is_none() => Err(why),
+        Err(_) => Ok(s),
+    }
+}
+
 /// The plan of `add <role>`: the assigned name and its steps (design §4.2, `add`).
 pub fn plan_add(c: &Config, s: &HerdrState, e: &Env, role: &str) -> Result<(String, Plan), String> {
     if !c.role(role).is_some_and(|r| r.extra) {
@@ -724,6 +885,7 @@ mod tests {
             id: id.into(),
             tab_id: tab.into(),
             agent_session: session.map(Into::into),
+            cwd: None,
         }
     }
 
@@ -762,6 +924,7 @@ mod tests {
                 panes,
             }),
             agents,
+            adopt: None,
         }
     }
 
@@ -778,6 +941,7 @@ mod tests {
             .iter()
             .map(|s| match s {
                 Step::CreateWorkspace { .. } => "workspace".into(),
+                Step::AdoptWorkspace { initial, .. } => format!("adopt {}", initial.workspace),
                 Step::RenameTab { label } => format!("rename {label}"),
                 Step::CreateWorktree { name, .. } => format!("worktree {name}"),
                 Step::CreateTab { label, .. } => format!("tab {label}"),
@@ -1094,6 +1258,7 @@ mod tests {
         let s = HerdrState {
             workspace: None,
             agents: vec![agent(None, "w2", "w2:t1", "w2:p1")],
+            adopt: None,
         };
         let p = plan(&c, &s, &env());
         assert_eq!(kinds(&p)[..2], ["workspace", "rename acme-lead"]);
@@ -1205,5 +1370,208 @@ mod tests {
             ..env()
         };
         assert!(board_command(&c, &e).starts_with(r"& 'C:\o''k\crew.exe' board --root "));
+    }
+
+    /// herdr's initial workspace for `basic()` (root `/r/acme`) launched from `dir`.
+    struct Fresh {
+        workspaces: Vec<WorkspaceItem>,
+        tabs: Vec<Tab>,
+        panes: Vec<Pane>,
+        dir: PathBuf,
+        foreground: Foreground,
+    }
+
+    fn fresh(dir: &str) -> Fresh {
+        let label = Path::new(dir).file_name().unwrap().to_str().unwrap();
+        Fresh {
+            workspaces: vec![WorkspaceItem {
+                workspace_id: "w1".into(),
+                label: label.into(),
+            }],
+            tabs: vec![tab("w1:t1", INITIAL_TAB)],
+            panes: vec![Pane {
+                cwd: Some(dir.into()),
+                ..pane("w1:p1", "w1:t1", None)
+            }],
+            dir: dir.into(),
+            foreground: Foreground::Shell,
+        }
+    }
+
+    fn adopt(c: &Config, f: &Fresh) -> Result<Initial, Refusal> {
+        adoption(
+            c,
+            &Candidate {
+                context: Some("w1"),
+                workspaces: &f.workspaces,
+                tabs: &f.tabs,
+                panes: &f.panes,
+                pane_dir: Some(&f.dir),
+                root: &c.root,
+                foreground: &f.foreground,
+            },
+        )
+    }
+
+    #[test]
+    fn startup_adopts_the_fresh_initial_workspace() {
+        let c = basic();
+        let initial = adopt(&c, &fresh("/r/acme")).unwrap();
+        assert_eq!(
+            initial,
+            Initial {
+                workspace: "w1".into(),
+                tab: "w1:t1".into(),
+                pane: "w1:p1".into(),
+                rename: false,
+            }
+        );
+        // The directory is not called like the label: the workspace is renamed.
+        let mut c2 = basic();
+        c2.label = "acme-crew".into();
+        assert!(adopt(&c2, &fresh("/r/acme")).unwrap().rename);
+
+        let s = startup_state(HerdrState::default(), Ok(initial)).unwrap();
+        let p = plan(
+            &c,
+            &s,
+            &Env {
+                status_exists: false,
+                ..env()
+            },
+        );
+        assert_eq!(
+            kinds(&p)[..4],
+            [
+                "adopt w1",
+                "rename acme-lead",
+                "tab acme-reviewer",
+                "tab acme-designer"
+            ]
+        );
+        assert!(!kinds(&p).contains(&"workspace".into()));
+        assert!(kinds(&p).contains(&"agent acme-lead".into()));
+        assert!(kinds(&p).contains(&"tab acme-status".into()));
+        assert_eq!(
+            p.dry_run().lines().find(|l| l.contains("adopt")),
+            Some("  1. adopt workspace w1")
+        );
+    }
+
+    #[test]
+    fn startup_adopts_a_workspace_already_called_like_the_project() {
+        // The directory has the project's label (`/r/acme`, label "acme"): the label taken by the
+        // candidate itself does not block adoption.
+        let c = basic();
+        assert_eq!(c.label, "acme");
+        let state = state(&[INITIAL_TAB], &[]);
+        let s = startup_state(state, adopt(&c, &fresh("/r/acme"))).unwrap();
+        assert_eq!(s.workspace, None);
+        assert_eq!(
+            kinds(&plan(&c, &s, &env()))[..2],
+            ["adopt w1", "rename acme-lead"]
+        );
+    }
+
+    #[test]
+    fn startup_refuses_two_workspaces() {
+        let c = basic();
+        let mut f = fresh("/r/acme");
+        f.workspaces.push(WorkspaceItem {
+            workspace_id: "w2".into(),
+            label: "other".into(),
+        });
+        assert_eq!(adopt(&c, &f), Err(Refusal::NotAlone(2)));
+    }
+
+    #[test]
+    fn startup_refuses_a_renamed_workspace() {
+        let c = basic();
+        let mut f = fresh("/r/acme");
+        f.workspaces[0].label = "mine".into();
+        assert!(matches!(adopt(&c, &f), Err(Refusal::NotInitial(_))));
+        let mut f = fresh("/r/acme");
+        f.tabs[0].label = "notes".into();
+        assert!(matches!(adopt(&c, &f), Err(Refusal::NotInitial(_))));
+        let mut f = fresh("/r/acme");
+        f.tabs.push(tab("w1:t2", "2"));
+        assert!(matches!(adopt(&c, &f), Err(Refusal::NotInitial(_))));
+    }
+
+    #[test]
+    fn startup_refuses_a_pane_with_an_agent_session() {
+        let c = basic();
+        let mut f = fresh("/r/acme");
+        f.panes[0].agent_session = Some("0f3c".into());
+        assert_eq!(adopt(&c, &f), Err(Refusal::Session("0f3c".into())));
+    }
+
+    #[test]
+    fn startup_refuses_a_pane_outside_the_root() {
+        let c = basic();
+        // A subdirectory of the project resolves to the same root but is not the root.
+        let f = fresh("/r/acme/docs");
+        assert_eq!(adopt(&c, &f), Err(Refusal::OtherDir("/r/acme/docs".into())));
+    }
+
+    #[test]
+    fn startup_refuses_a_busy_shell() {
+        let c = basic();
+        let mut f = fresh("/r/acme");
+        f.foreground = Foreground::Other("vim".into());
+        assert_eq!(adopt(&c, &f), Err(Refusal::Foreground("vim".into())));
+    }
+
+    #[test]
+    fn startup_refuses_when_the_label_exists() {
+        let c = basic();
+        let mut f = fresh("/r/acme");
+        f.workspaces.insert(
+            0,
+            WorkspaceItem {
+                workspace_id: "w0".into(),
+                label: "acme".into(),
+            },
+        );
+        assert_eq!(adopt(&c, &f), Err(Refusal::LabelTaken("w0".into())));
+        let none = Candidate {
+            context: None,
+            workspaces: &f.workspaces,
+            tabs: &f.tabs,
+            panes: &f.panes,
+            pane_dir: Some(&f.dir),
+            root: &c.root,
+            foreground: &f.foreground,
+        };
+        assert_eq!(adoption(&c, &none), Err(Refusal::NoContext));
+    }
+
+    #[test]
+    fn startup_repairs_only_an_existing_workspace() {
+        let c = basic();
+        // Restore: the project's workspace is back with its tabs, the agents are not running yet
+        // and the board pane is a bare shell. Nothing is relaunched; only the board is typed.
+        let s = startup_state(state(&ALL, &[]), Err(Refusal::NotAlone(3))).unwrap();
+        let p = plan(&c, &s, &settled(&c, Foreground::Shell));
+        assert!(!p.steps.iter().any(|s| matches!(
+            s,
+            Step::StartAgent { .. } | Step::CreateTab { .. } | Step::CreateWorkspace { .. }
+        )));
+        assert_eq!(
+            p.verdicts
+                .iter()
+                .filter(|(_, v)| *v == Verdict::NoAgent)
+                .count(),
+            4
+        );
+        assert!(matches!(
+            p.actions().collect::<Vec<_>>()[..],
+            [Step::RunInPane { new_tab: false, .. }]
+        ));
+        // A closed project (no workspace with its label) is not brought back.
+        assert_eq!(
+            startup_state(HerdrState::default(), Err(Refusal::NotAlone(2))),
+            Err(Refusal::NotAlone(2))
+        );
     }
 }
