@@ -2,7 +2,7 @@ id = "herdr-crew"
 name = "herdr crew"
 version = "0.1.0"
 min_herdr_version = "0.9.1"
-platforms = ["macos", "linux", "windows"]
+platforms = ["macos", "linux"]
 
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]

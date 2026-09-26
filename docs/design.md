@@ -166,7 +166,7 @@ id = "herdr-crew"
 name = "herdr crew"
 version = "0.1.0"
 min_herdr_version = "0.9.1"
-platforms = ["macos", "linux", "windows"]
+platforms = ["macos", "linux"]
 
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]
@@ -197,7 +197,7 @@ herdr reads a linked plugin's manifest from its `manifest_path` when the server 
 
 The `command` is a path relative to the plugin directory, where herdr runs the commands [vendor]. herdr resolves a relative `argv[0]` against that directory and also uses it as the current directory [verified with `plugin link` and `plugin action invoke` in an isolated XDG: the process got an absolute `argv[0]` under `HERDR_PLUGIN_ROOT`, and that `cwd`].
 
-Whether herdr finds the `.exe` without its extension on Windows remains [H] until a Windows run. Action ids are unique even across platforms [vendor], so one action per platform is not possible. If it fails, `[[build]]` copies the binary to `bin/` with a fixed name per platform, and this paragraph is revised.
+The manifest declares only macOS and Linux, so the marketplace card does not promise Windows (2026-09-26). The code keeps its Windows branches, and `windows` goes back into `platforms` after a Windows run confirms the following. Whether herdr finds the `.exe` without its extension on Windows remains [H] until that run. Action ids are unique even across platforms [vendor], so one action per platform is not possible. If it fails, `[[build]]` copies the binary to `bin/` with a fixed name per platform, and this paragraph is revised.
 
 ## 4. Launcher behaviour
 

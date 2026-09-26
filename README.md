@@ -1,17 +1,34 @@
 # herdr-crew
 
-A [herdr](https://herdr.dev/) plugin that starts a project's Claude Code sessions, one tab per role, and draws the project's status board in another tab. Everything comes from one versioned file in the repository, `.herdr/crew.toml`.
+**Bring up a team of Claude Code sessions, one per role, from a file you keep in the repository.**
 
-- `up` creates the herdr workspace, a tab per role (in the main checkout or in its own git worktree), and starts `claude` with the role's prompt. It is idempotent: it never starts a second agent for a live role, and it only creates what is missing.
-- `add` and `close` add or remove extra instances of a role (`dev-2`, `dev-3`…).
-- `board` draws `.herdr/status.json`, the board the coordinating role keeps up to date, and redraws it when it changes.
-- With the plugin linked, `cd repo && herdr` is enough: herdr's startup hook runs `herdr-crew startup`, which brings the project up in the workspace herdr opens, and after a herdr restart repairs only the board.
+herdr-crew is a [herdr](https://herdr.dev/) plugin. You describe the project's roles once in `.herdr/crew.toml`: their prompts, whether each works in its own git worktree, and which one coordinates. After that, `cd repo && herdr` opens the project's workspace with a tab per role running `claude`, plus a tab with a live status board.
+
+- **One command, idempotent.** `up` creates the workspace, the role tabs and their worktrees, and starts each agent with its prompt. Run it again and it only fills in what is missing; it never starts a second agent for a live role.
+- **Starts with herdr.** With the plugin installed, herdr's startup hook brings the project up in the workspace herdr opens. After a herdr restart it repairs only the board and leaves the resumed sessions alone.
+- **More hands on demand.** `add` and `close` add or remove extra instances of a role (`dev-2`, `dev-3`…), each in its own worktree if the role asks for one.
+- **A status board.** `board` draws `.herdr/status.json`, which the coordinating role keeps up to date, and validates it against a schema generated from `crew.toml`.
+- **Checked configuration.** Unknown keys and placeholders are errors reported with line and column, all at once.
 
 The design, with its decisions and the herdr behaviour they rely on, is in [docs/design.md](docs/design.md).
 
+## Requirements
+
+- herdr 0.9.1 or later, on macOS or Linux
+- Rust (stable) with `cargo`: herdr builds the plugin from source when it installs it
+- `git` and `claude` (Claude Code) on the `PATH`
+
 ## Install
 
-You need Rust (stable), `git`, `claude` and herdr 0.9.1 or later.
+From the [herdr plugin marketplace](https://herdr.dev/plugins/):
+
+```sh
+herdr plugin install rarce/herdr-crew
+```
+
+herdr clones the repository and runs `cargo build --release --locked`. Pin a release with `--ref v0.1.0`.
+
+From a checkout, for development:
 
 ```sh
 git clone https://github.com/rarce/herdr-crew
@@ -20,9 +37,19 @@ cargo build --release --locked
 herdr plugin link "$PWD"
 ```
 
-`plugin link` does not build anything, so rebuild after each update. `herdr-crew check` prints the binary's version.
+`plugin link` does not build anything, so rebuild after each update. `herdr-crew check` validates the configuration and prints the binary's version.
 
 The binary also works without the plugin: `target/release/herdr-crew up` from inside the project.
+
+## Quick start
+
+1. Add `.herdr/crew.toml` to your repository (see [the format](#herdrcrewtoml) below) and the generated files to `.gitignore`.
+2. Check it: `herdr-crew check` from the repository, or `--dry-run` to see what `up` would do.
+3. Start herdr from the repository with no herdr server running: `cd repo && herdr`. The startup hook creates the workspace, the role tabs and the board.
+
+If a herdr server is already running, run `herdr-crew up` from the repository instead.
+
+**Trust.** Plugins listed in the herdr marketplace are not reviewed. herdr-crew runs `claude`, `git` and `herdr` on your machine with the prompts in your `crew.toml`; read the source before installing it.
 
 ## Usage
 
@@ -204,4 +231,4 @@ The test clears the environment of the processes it starts, so no `HERDR_*` or `
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). herdr-crew is an independent project, not affiliated with herdr or Anthropic.
