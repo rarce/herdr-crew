@@ -1,6 +1,6 @@
 # herdr-crew
 
-A herdr plugin that starts a project's Claude Code sessions, one tab per role, and draws the project's status board in another tab. Everything comes from one versioned file in the repository, `.herdr/crew.toml`.
+A [herdr](https://herdr.dev/) plugin that starts a project's Claude Code sessions, one tab per role, and draws the project's status board in another tab. Everything comes from one versioned file in the repository, `.herdr/crew.toml`.
 
 - `up` creates the herdr workspace, a tab per role (in the main checkout or in its own git worktree), and starts `claude` with the role's prompt. It is idempotent: it never starts a second agent for a live role, and it only creates what is missing.
 - `add` and `close` add or remove extra instances of a role (`dev-2`, `dev-3`…).
