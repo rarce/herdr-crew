@@ -378,8 +378,8 @@ impl Plan {
         self.steps.iter().filter(|s| !matches!(s, Step::Warn(_)))
     }
 
-    /// Output of `up --dry-run` (design §6.2).
-    pub fn dry_run(&self) -> String {
+    /// One line per role and one for the board with its verdict, as `--dry-run` prints them.
+    pub fn verdict_lines(&self) -> String {
         let width = self
             .verdicts
             .iter()
@@ -387,10 +387,15 @@ impl Plan {
             .max()
             .unwrap_or(0)
             .max(14);
-        let mut out = String::new();
-        for (name, verdict) in &self.verdicts {
-            out.push_str(&format!("{name:<width$} {verdict}\n"));
-        }
+        self.verdicts
+            .iter()
+            .map(|(name, verdict)| format!("{name:<width$} {verdict}\n"))
+            .collect()
+    }
+
+    /// Output of `up --dry-run` (design §6.2).
+    pub fn dry_run(&self) -> String {
+        let mut out = self.verdict_lines();
         for w in self.warnings() {
             out.push_str(&format!("warning: {w}\n"));
         }
@@ -464,9 +469,11 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                         "tab {} has no agent; restart it there with `claude -r {v} -n {}`",
                         r.name, r.name
                     ),
+                    // Roles start with `-n <role>`, so the picker finds the conversation by name.
                     None => format!(
-                        "tab {} has no agent; restart it by hand with `claude -r`",
-                        r.name
+                        "tab {} has no agent and herdr knows no session; restart it there with \
+                         `claude -r {}`",
+                        r.name, r.name
                     ),
                 }));
             }
@@ -1199,7 +1206,8 @@ mod tests {
         assert_eq!(kinds(&p), ["warn"]);
         assert_eq!(
             p.warnings().next().unwrap(),
-            "tab acme-lead has no agent; restart it by hand with `claude -r`"
+            "tab acme-lead has no agent and herdr knows no session; restart it there with \
+             `claude -r acme-lead`"
         );
         s.workspace.as_mut().unwrap().panes[0].agent_session = Some("0f3c".into());
         let p = plan(&c, &s, &e);
@@ -1638,5 +1646,25 @@ mod tests {
             kinds(&plan(&c, &s, &settled(&c, Foreground::Shell)))
                 .contains(&"agent acme-designer".into())
         );
+    }
+
+    #[test]
+    fn verdict_lines_are_the_head_of_the_dry_run() {
+        let c = basic();
+        let mut s = state(&ALL, &ALL[1..4]);
+        // Restored: herdr lists the role's named agent before its process runs again.
+        s.agents
+            .push(agent(Some("acme-lead"), "w1", "w1:t0", "w1:p0"));
+        let p = plan(&c, &s, &settled(&c, Foreground::Shell));
+        let lines = p.verdict_lines();
+        assert_eq!(
+            lines,
+            "acme-lead      occupied (agent \"acme-lead\" in w1:p0)\n\
+             acme-reviewer  occupied (unnamed agent in w1:p1)\n\
+             acme-designer  occupied (unnamed agent in w1:p2)\n\
+             acme-dev       occupied (unnamed agent in w1:p3)\n\
+             acme-status    repair\n"
+        );
+        assert!(p.dry_run().starts_with(&lines));
     }
 }

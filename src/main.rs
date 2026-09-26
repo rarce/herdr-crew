@@ -335,6 +335,8 @@ fn bring_up(
     };
     let adopted = state.adopt.is_some();
     let p = plan::plan(&c, &state, &env(&c, &state, Some(herdr)));
+    // What startup saw, for the plugin log.
+    print!("{}", startup_verdicts(&c.label, &p));
     let ws = herdr::execute(herdr, &c, &state, &p, &mut out).map_err(Fail::run)?;
     if p.actions().next().is_none() {
         out.step(&format!("{}: nothing to do", c.label));
@@ -343,6 +345,11 @@ fn bring_up(
         let _ = herdr.call(&["workspace", "focus", &ws]);
     }
     Ok(())
+}
+
+/// The verdicts of a project in `startup`'s log: a header, then the `--dry-run` lines.
+fn startup_verdicts(label: &str, p: &plan::Plan) -> String {
+    format!("herdr-crew: {label}\n{}", p.verdict_lines())
 }
 
 /// Whether `startup` may adopt the workspace of its context (design §4.4). It waits up to
@@ -573,6 +580,21 @@ mod tests {
         assert_eq!(args("startup").unwrap().command, "startup");
         let a = args("board --file /f --once --interval 2").unwrap();
         assert!(a.once && a.interval == Some(2.0));
+    }
+
+    #[test]
+    fn startup_prints_its_verdicts() {
+        let p = plan::Plan {
+            verdicts: vec![
+                ("acme-lead".into(), plan::Verdict::NoAgent),
+                ("acme-status".into(), plan::Verdict::Repair),
+            ],
+            steps: Vec::new(),
+        };
+        assert_eq!(
+            startup_verdicts("acme", &p),
+            "herdr-crew: acme\nacme-lead      no agent\nacme-status    repair\n"
+        );
     }
 
     #[test]
