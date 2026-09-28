@@ -513,6 +513,13 @@ fn check(c: &Config) -> Result<(), Fail> {
             ));
         }
     }
+    if Herdr::from_env().call(&["workspace", "list"]).is_ok() {
+        let path = binary().to_string_lossy().replace('\'', "'\\''");
+        println!(
+            "herdr-crew: a herdr server is already running; `herdr` only attaches and does not \
+             run plugin startup. From this project, run `'{path}' up --no-attach`"
+        );
+    }
     if missing.is_empty() {
         Ok(())
     } else {
