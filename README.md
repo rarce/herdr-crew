@@ -39,17 +39,17 @@ cargo build --release --locked
 herdr plugin link "$PWD"
 ```
 
-`plugin link` does not build anything, so rebuild after each update. `herdr-crew check` validates the configuration and prints the binary's version.
+`plugin link` does not build anything, so rebuild after each update. The binary's `check` command validates the configuration, prints its location and warns when a running herdr server means `herdr` will only attach. A plugin install does not add `herdr-crew` to your `PATH`.
 
 The binary also works without the plugin: `target/release/herdr-crew up` from inside the project.
 
 ## Quick start
 
 1. Add `.herdr/crew.toml` to your repository (see [the format](#herdrcrewtoml) below) and the generated files to `.gitignore`.
-2. Check it: `herdr-crew check` from the repository, or `--dry-run` to see what `up` would do.
-3. Start herdr from the repository with no herdr server running: `cd repo && herdr`. The startup hook creates the workspace, the role tabs and the board.
+2. Check it from the repository with the installed binary's `check` command, or use `up --dry-run` to see the plan. Find the binary through `plugin_root` as described below.
+3. Start herdr from the repository with no herdr server running: `cd repo && herdr`. The startup hook creates the workspace, the role tabs and the board when herdr opens its initial workspace there.
 
-If a herdr server is already running, run `herdr-crew up` from the repository instead.
+If a herdr server is already running, `herdr` only attaches and its startup hook does not run. Focus this project's workspace and invoke the `herdr-crew.up` action (or run `herdr plugin action invoke herdr-crew.up`). If the project has no workspace yet, run the plugin binary from the project directory with `up --no-attach`. Find its `plugin_root` with `herdr plugin list --plugin herdr-crew --json`; the binary is at `<plugin_root>/target/release/herdr-crew`. This also covers a restored server that ignored the project's launch directory. A live agent in an unrelated tab such as `1` will prevent new roles from starting; rename that tab to its role if it belongs to the crew, or close it after saving its work.
 
 Each role's tab runs `claude` with its prompt, in the main checkout or in its own worktree, and gets the `start_message` as its first message:
 
@@ -72,7 +72,7 @@ herdr-crew [--root DIR] <command>
   startup                        herdr's startup hook: bring up or repair the projects in herdr
 ```
 
-- **`cd repo && herdr`.** With the plugin linked and no herdr server running, herdr opens a workspace in the repository and the plugin's startup hook turns it into the project's workspace: the roles, their agents and the board. After a herdr restart, the same hook repairs only the board of each project whose workspace came back: it relaunches no role and does not recreate a tab you closed, which an explicit `herdr-crew up` does. Two cases are left to `herdr-crew up`: launching `herdr` from a project while a restored session has no workspace for it, and attaching to a server that is already running. `startup` writes to the plugin log (`herdr plugin log list --plugin herdr-crew`), and when it fails while bringing a project up in front of you it also shows a herdr notification.
+- **`cd repo && herdr`.** With no herdr server running, herdr may open an initial workspace in the repository, which the startup hook brings up. On a restore, the hook repairs only existing project workspaces: it relaunches no role and does not recreate a tab you closed. If herdr ignores the launch directory because it restored a different workspace, or if it attaches to an already-running server, use the `herdr-crew.up` action or the binary's `up` command as described above. `startup` writes to the plugin log (`herdr plugin log list --plugin herdr-crew`) and notifies when adoption fails.
 - **Where the project is.** The project root is the main checkout of the git repository around the current directory, or around `--root`, even when called from a worktree.
 - **The `herdr-crew.up` action.** It works on the workspace you have focused in herdr.
 - **Starting the server.** From a plain terminal, `up` starts a herdr server if none is running and then opens herdr. Pass `--no-attach` to skip opening it.

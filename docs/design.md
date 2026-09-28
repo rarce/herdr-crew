@@ -157,7 +157,7 @@ Every table is parsed with `toml` and `serde` with `deny_unknown_fields`, so an 
 - **Format.** Every message starts with `herdr-crew:` and the absolute path of `crew.toml`, with line and column when they are known.
 - **Placeholder positions.** An unknown placeholder is located in the source text of its prompt, so the line and column point at it inside `crew.toml`.
 - **All errors at once.** Every validation error is reported, not only the first.
-- **`herdr-crew check`.** It validates the configuration, checks that `git`, `herdr` and `claude` are on the `PATH`, prints the official installer of what is missing without running it, prints the binary's version and exits.
+- **`herdr-crew check`.** It validates the configuration, checks that `git`, `herdr` and `claude` are on the `PATH`, prints the official installer of what is missing without running it, and prints the binary's version and location. If a herdr server answers, it also explains that `herdr` only attaches and prints the full binary path for `up --no-attach`.
 
 ## 3. Manifest
 
@@ -322,6 +322,8 @@ With the plugin linked, `cd repo && herdr` brings the project up with nothing el
 
 - launching `herdr` from project E while a restored session has no workspace for E: herdr ignores the launch directory on restore, so startup never sees E;
 - attaching to a server that is already running: no hook runs.
+
+The server receives `HERDR_STARTUP_CWD` when it starts from a client, but the startup plugin process does not receive it [verified with the isolated real-herdr test]. A plugin-only startup change therefore cannot detect project E in the first case. Herdr would need to pass the launch directory to the hook and run a hook on client attach to cover both automatically.
 
 ## 5. The board
 

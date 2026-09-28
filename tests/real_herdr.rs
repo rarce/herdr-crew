@@ -486,6 +486,14 @@ fn scenario(iso: &Isolated) {
     let out = iso.crew(&["up", "--no-attach"]);
     assert!(out.status.success());
     assert_eq!(iso.labels(), ["ct-lead", "ct-dev", "ct-status"]);
+    let check = iso.crew(&["check"]);
+    assert!(check.status.success());
+    let check_text = String::from_utf8_lossy(&check.stdout);
+    assert!(check_text.contains("`herdr` only attaches"), "{check_text}");
+    assert!(
+        check_text.contains(&format!("'{BIN}' up --no-attach")),
+        "{check_text}"
+    );
     assert!(iso.repo.join(".wt/ct-dev").is_dir());
     let prompt = std::fs::read_to_string(iso.repo.join(".herdr/prompts/ct-lead.txt")).unwrap();
     assert!(
