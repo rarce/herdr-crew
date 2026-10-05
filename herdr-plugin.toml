@@ -5,13 +5,13 @@ min_herdr_version = "0.9.1"
 platforms = ["macos", "linux"]
 
 [[build]]
-command = ["cargo", "build", "--release", "--locked"]
+command = ["sh", "scripts/build.sh", "--install-launcher"]
 
 [[startup]]
-command = ["target/release/herdr-crew", "startup"]
+command = ["bin/herdr-crew", "startup"]
 
 [[actions]]
 id = "up"
 title = "Start or complete the project's sessions"
 contexts = ["workspace", "pane"]
-command = ["target/release/herdr-crew", "up"]
+command = ["bin/herdr-crew", "up"]

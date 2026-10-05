@@ -6,6 +6,7 @@ mod board;
 mod config;
 mod git;
 mod herdr;
+mod init;
 mod plan;
 mod prompt;
 
@@ -24,6 +25,9 @@ use herdr::{Herdr, Output};
 use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, WorkspaceItem};
 
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
+  init [--preset solo|review|parallel|research] [--name NAME]
+       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
+                                 configure a crew with the setup wizard
   up [--no-attach] [--dry-run]   start or complete the project's sessions
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
@@ -65,6 +69,7 @@ struct Args {
     once: bool,
     file: Option<PathBuf>,
     interval: Option<f64>,
+    init: init::Options,
 }
 
 fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
@@ -87,6 +92,17 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
                 })?);
             }
             "--no-attach" => a.no_attach = true,
+            "--preset" => {
+                let preset = value("--preset")?;
+                a.init.preset = Some(init::Preset::parse(&preset).ok_or_else(|| {
+                    Fail::usage("--preset must be solo, review, parallel or research")
+                })?);
+            }
+            "--name" => a.init.name = Some(value("--name")?),
+            "--base" => a.init.base = Some(value("--base")?),
+            "--shared-checkout" => a.init.shared_checkout = true,
+            "--yes" => a.init.yes = true,
+            "--no-ignore" => a.init.no_ignore = true,
             "--dry-run" => a.dry_run = true,
             "--once" => a.once = true,
             s if s.starts_with('-') => return Err(Fail::usage(format!("unknown option {s}"))),
@@ -95,6 +111,15 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         }
     }
     let allowed: &[&str] = match a.command.as_str() {
+        "init" => &[
+            "preset",
+            "name",
+            "base",
+            "shared_checkout",
+            "no_ignore",
+            "yes",
+            "dry_run",
+        ],
         "up" => &["no_attach", "dry_run"],
         "add" | "close" | "check" | "startup" => &[],
         "board" => &["file", "once", "interval"],
@@ -107,6 +132,12 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ("once", a.once),
         ("file", a.file.is_some()),
         ("interval", a.interval.is_some()),
+        ("preset", a.init.preset.is_some()),
+        ("name", a.init.name.is_some()),
+        ("base", a.init.base.is_some()),
+        ("shared_checkout", a.init.shared_checkout),
+        ("yes", a.init.yes),
+        ("no_ignore", a.init.no_ignore),
     ];
     if let Some((name, _)) = used.iter().find(|(n, on)| *on && !allowed.contains(n)) {
         return Err(Fail::usage(format!(
@@ -548,6 +579,9 @@ fn run() -> Result<(), Fail> {
         return startup();
     }
     let root = resolve_root(a.root.as_deref())?;
+    if a.command == "init" {
+        return init::run(&root, &a.init, a.dry_run);
+    }
     let c = load_config(&root)?;
     match a.command.as_str() {
         "up" => up(&c, &a),
@@ -585,6 +619,14 @@ mod tests {
         assert!(a.dry_run && a.command == "up" && a.root.as_deref() == Some(Path::new("/x")));
         assert_eq!(args("add globex-dev").unwrap().positional, ["globex-dev"]);
         assert_eq!(args("startup").unwrap().command, "startup");
+        let init = args(
+            "init --preset parallel --name acme --base upstream/trunk --yes --no-ignore --dry-run",
+        )
+        .unwrap();
+        assert_eq!(init.init.preset, Some(init::Preset::Parallel));
+        assert_eq!(init.init.name.as_deref(), Some("acme"));
+        assert_eq!(init.init.base.as_deref(), Some("upstream/trunk"));
+        assert!(init.init.yes && init.init.no_ignore && init.dry_run);
         let a = args("board --file /f --once --interval 2").unwrap();
         assert!(a.once && a.interval == Some(2.0));
     }
@@ -617,6 +659,11 @@ mod tests {
             "board --file",
             "startup now",
             "startup --dry-run",
+            "init --preset unknown",
+            "init --base",
+            "up --preset solo",
+            "check --name acme",
+            "board --yes",
         ] {
             assert_eq!(args(bad).err(), Some(2), "{bad}");
         }
