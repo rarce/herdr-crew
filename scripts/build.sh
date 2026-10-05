@@ -19,6 +19,16 @@ case "$#" in
         ;;
 esac
 
+if [ "$install_launcher" -eq 1 ] && [ "${CREW_BIN_DIR+x}" = x ]; then
+    case "$CREW_BIN_DIR" in
+        /*) ;;
+        *)
+            printf 'CREW_BIN_DIR must be an absolute path for plugin installation\n' >&2
+            exit 2
+            ;;
+    esac
+fi
+
 script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
 cd "$script_dir/.."
 cargo build --release --locked --bins --target-dir target

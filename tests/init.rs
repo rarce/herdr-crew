@@ -362,6 +362,117 @@ fn setup_from_a_linked_worktree_writes_only_to_the_main_checkout() {
 }
 
 #[test]
+fn separate_git_directory_keeps_configuration_in_the_working_checkout() {
+    let repo = Repo::new(false);
+    let checkout = repo.root.join("checkout \n");
+    let metadata_parent = repo.root.join("metadata");
+    let metadata = metadata_parent.join("store.git");
+    fs::create_dir(&metadata_parent).unwrap();
+    repo.git(&[
+        "init",
+        "--quiet",
+        "--separate-git-dir",
+        metadata.to_str().unwrap(),
+        checkout.to_str().unwrap(),
+    ]);
+    let subdirectory = checkout.join("subdirectory");
+    fs::create_dir(&subdirectory).unwrap();
+    success(
+        repo.command()
+            .current_dir(subdirectory)
+            .args(["init", "--name", "sample", "--yes"])
+            .output()
+            .unwrap(),
+    );
+    assert!(checkout.join(".herdr/crew.toml").is_file());
+    assert!(checkout.join(".gitignore").is_file());
+    assert!(!metadata_parent.join(".herdr").exists());
+    assert!(!metadata_parent.join(".gitignore").exists());
+    repo.unchanged();
+}
+
+#[test]
+fn submodule_setup_keeps_configuration_out_of_superproject_metadata() {
+    let repo = Repo::new(false);
+    let source = Repo::new(false);
+    repo.git(&[
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--quiet",
+        source.root.to_str().unwrap(),
+        "module",
+    ]);
+    let module = repo.root.join("module");
+    success(
+        repo.command()
+            .args(["--root", module.to_str().unwrap(), "init", "--yes"])
+            .output()
+            .unwrap(),
+    );
+    assert!(module.join(".herdr/crew.toml").is_file());
+    assert!(module.join(".gitignore").is_file());
+    assert!(!repo.root.join(".git/modules/.herdr").exists());
+    assert!(!repo.root.join(".git/modules/.gitignore").exists());
+    repo.unchanged();
+    source.unchanged();
+}
+
+#[test]
+fn linked_worktree_with_unresolvable_main_checkout_is_rejected_without_writes() {
+    let repo = Repo::new(false);
+    let checkout = repo.root.join("checkout");
+    let metadata_parent = repo.root.join("metadata");
+    let metadata = metadata_parent.join("store.git");
+    fs::create_dir(&metadata_parent).unwrap();
+    repo.git(&[
+        "init",
+        "--quiet",
+        "--separate-git-dir",
+        metadata.to_str().unwrap(),
+        checkout.to_str().unwrap(),
+    ]);
+    repo.git(&[
+        "-C",
+        checkout.to_str().unwrap(),
+        "-c",
+        "user.name=Crew test",
+        "-c",
+        "user.email=crew@example.invalid",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "Initial",
+    ]);
+    let linked = repo.root.join("linked");
+    repo.git(&[
+        "-C",
+        checkout.to_str().unwrap(),
+        "worktree",
+        "add",
+        "--quiet",
+        "--detach",
+        linked.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let output = repo
+        .command()
+        .current_dir(&linked)
+        .args(["init", "--yes"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("main checkout"));
+    for directory in [&checkout, &linked, &metadata_parent, &metadata] {
+        assert!(!directory.join(".herdr").exists());
+        assert!(!directory.join(".gitignore").exists());
+    }
+    repo.unchanged();
+}
+
+#[test]
 fn bare_repositories_are_rejected_before_initializing_their_parent_directory() {
     let repo = Repo::new(false);
     let bare = repo.root.join("bare.git");

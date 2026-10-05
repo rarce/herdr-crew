@@ -379,6 +379,27 @@ fn install_script_survives_checkout_relocation_and_launcher_outlives_uninstall()
 }
 
 #[test]
+fn plugin_install_rejects_relative_or_empty_bin_directory_before_building() {
+    for directory in ["tools/bin", ""] {
+        let fixture = Fixture::new();
+        let output = build_command(&fixture)
+            .arg("--install-launcher")
+            .env("CREW_BIN_DIR", directory)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("CREW_BIN_DIR must be an absolute path")
+        );
+        assert!(!fixture.plugin.join("target").exists());
+        assert!(!fixture.plugin.join("bin").exists());
+        assert!(!fixture.plugin.join("tools/bin").exists());
+        assert!(!fixture.prefix.exists());
+    }
+}
+
+#[test]
 fn local_build_does_not_install_public_launcher_and_failed_build_keeps_previous_files() {
     let fixture = Fixture::new();
     success(build_command(&fixture).output().unwrap());

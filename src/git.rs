@@ -12,7 +12,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("could not run git: {e}"))?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+        let value = String::from_utf8_lossy(&out.stdout);
+        Ok(value.strip_suffix('\n').unwrap_or(&value).to_string())
     } else {
         Err(format!(
             "git {} failed: {}",
@@ -22,8 +23,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// The main checkout that contains `dir`: the parent of the `git-common-dir`, also from a
-/// worktree (design §2.1).
+/// Resolve the main working checkout without treating Git metadata as a project directory.
 pub fn main_root(dir: &Path) -> Result<PathBuf, String> {
     if git(dir, &["rev-parse", "--is-bare-repository"]).as_deref() == Ok("true") {
         return Err(format!(
@@ -36,10 +36,40 @@ pub fn main_root(dir: &Path) -> Result<PathBuf, String> {
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
     .map_err(|_| format!("{} is not inside a git repository", dir.display()))?;
-    Path::new(&common)
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| format!("git-common-dir without a parent: {common}"))
+    let unresolved = || {
+        format!(
+            "cannot locate the main checkout for {}; run crew from the main checkout",
+            dir.display()
+        )
+    };
+    let common = Path::new(&common)
+        .canonicalize()
+        .map_err(|_| unresolved())?;
+    let git_dir = git(dir, &["rev-parse", "--path-format=absolute", "--git-dir"])?;
+    let git_dir = Path::new(&git_dir)
+        .canonicalize()
+        .map_err(|_| unresolved())?;
+    if git_dir == common {
+        // Main checkouts and submodules can keep their metadata somewhere else entirely.
+        return git(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from);
+    }
+
+    // A linked worktree normally has its main checkout beside the shared .git directory.
+    // Verify the candidate so relocated metadata cannot select an unrelated repository.
+    let candidate = common.parent().ok_or_else(unresolved)?;
+    let root = git(candidate, &["rev-parse", "--show-toplevel"])
+        .map(PathBuf::from)
+        .map_err(|_| unresolved())?;
+    let root_git_dir = git(&root, &["rev-parse", "--path-format=absolute", "--git-dir"])
+        .map_err(|_| unresolved())?;
+    if Path::new(&root_git_dir)
+        .canonicalize()
+        .map_err(|_| unresolved())?
+        != common
+    {
+        return Err(unresolved());
+    }
+    Ok(root)
 }
 
 pub fn fetch(root: &Path, remote: &str, branch: &str) -> Result<(), String> {

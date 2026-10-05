@@ -62,7 +62,7 @@ The root is resolved as follows; the first rule that yields a directory wins:
    - Agents, scripts and any other project use the binary directly (`{{LAUNCHER}} up`), never `plugin action invoke`.
 3. Outside an action, the current directory.
 
-From that directory, the root is the parent of `git rev-parse --path-format=absolute --git-common-dir`, which is the main checkout even from a worktree. Without a git repository it fails, because worktrees require one. If `<root>/.herdr/crew.toml` does not exist, it fails naming the path it looked for.
+From that directory, Git's absolute `git-dir` and `git-common-dir` distinguish a main checkout from a linked worktree. Main checkouts, including submodules and repositories with separate metadata, use `git rev-parse --show-toplevel`. For a linked worktree, the parent of the common directory is a candidate only: its working checkout must use that same common directory as its own Git directory. If it cannot be verified, the command fails and asks to run from the main checkout rather than writing in metadata or an unrelated repository. Bare repositories are rejected. Without a git repository it fails, because worktrees require one. Except for `init`, a missing `<root>/.herdr/crew.toml` fails naming the path it looked for.
 
 ### 2.2 Schema
 
@@ -310,7 +310,7 @@ With the plugin linked, `cd repo && herdr` brings the project up with nothing el
 - On a restart with a saved session, herdr restores the workspaces, ignores the launch directory (log: `restored session already has workspaces; ignoring startup cwd`) and runs startup once, with the **focused** workspace as its context. Restored workspaces fire no `workspace.created`.
 - Plugin commands inherit the server's environment (`CREW_AGENT_CMD` reached the hook in the real test).
 
-**Roots.** `startup` lists the workspaces and takes each one's **first pane** `cwd`; the root is the parent of its git common dir (§2.1) when `<root>/.herdr/crew.toml` exists. Roots are deduplicated. The hook's own directory and `workspace_cwd` are not used to find roots.
+**Roots.** `startup` lists the workspaces and takes each one's **first pane** `cwd`; the root is its verified main Git checkout (§2.1) when `<root>/.herdr/crew.toml` exists. Roots are deduplicated. The hook's own directory and `workspace_cwd` are not used to find roots.
 
 **Per root**, with its configuration and the state of §4.2 step 2:
 
@@ -547,7 +547,7 @@ It is both the integration test of step 1 and the check of the [H] (§11). It pa
 
 - **When `[[build]]` runs.** Only on `herdr plugin install` from GitHub, never on `plugin link`, and it gets no execution context [vendor].
 - **Artifact preparation.** `sh scripts/build.sh` builds both Rust binaries with the locked dependencies and copies the runtime to `bin/herdr-crew` via a temporary file and rename. The manifest points there. This runs before linking and after each development change; it installs nothing outside the checkout unless passed `--install-launcher`.
-- **Public CLI.** GitHub installation passes `--install-launcher`. It copies `herdr-crew-launcher` into `CREW_BIN_DIR` or `~/.local/bin` as `herdr-crew`. `--bin-dir DIR` overrides the environment when installing it directly. Installation replaces only a regular file carrying the launcher's ownership marker; unrelated commands and symlinks are preserved. The launcher reports a missing PATH entry without editing shell profiles.
+- **Public CLI.** GitHub installation passes `--install-launcher`. It copies `herdr-crew-launcher` into `CREW_BIN_DIR` or `~/.local/bin` as `herdr-crew`. For plugin installation, an explicitly set `CREW_BIN_DIR` must be absolute and nonempty; validation runs before compilation or artifact writes so checkout relocation cannot invalidate the destination. `--bin-dir DIR` overrides the environment when installing it directly. Installation replaces only a regular file carrying the launcher's ownership marker; unrelated commands and symlinks are preserved. The launcher reports a missing PATH entry without editing shell profiles.
 - **Resolution.** Every ordinary public CLI invocation runs `herdr plugin list --plugin herdr-crew --json`, reads `plugin_root` and executes `bin/herdr-crew`, falling back to `target/release/herdr-crew` for older plugins. It preserves arguments, environment and working directory. Startup and actions invoke the runtime directly. `{{LAUNCHER}}` continues to use the canonical runtime path.
 - **Offline use.** herdr 0.9.1 and 0.9.3 fall back to their local plugin registry when no server answers [vendor, inspected 2026-10-05]. Resolution does not start a server. The runtime's `up` keeps its own server-starting behaviour.
 - **Removal.** `herdr-crew --uninstall-launcher` removes only an owned launcher, even without a registered plugin. Without an explicit directory or `CREW_BIN_DIR`, an installed launcher removes itself. `herdr plugin uninstall` removes the managed checkout separately.

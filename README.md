@@ -30,7 +30,7 @@ herdr plugin install rarce/herdr-crew
 
 herdr clones the repository and runs `sh scripts/build.sh --install-launcher`. This builds the plugin at `bin/herdr-crew` and installs a small public launcher as `~/.local/bin/herdr-crew`. Use `--ref <tag>` to pin a release.
 
-If `~/.local/bin` is not on your `PATH`, add it to your shell configuration. To choose another directory when installing, set `CREW_BIN_DIR`:
+If `~/.local/bin` is not on your `PATH`, add it to your shell configuration. To choose another directory when installing, set `CREW_BIN_DIR` to an absolute path. Relative or empty values are rejected before building because herdr installs from a temporary checkout:
 
 ```sh
 CREW_BIN_DIR="$HOME/bin" herdr plugin install rarce/herdr-crew
@@ -109,7 +109,7 @@ Remove `--dry-run` to save it. `--name` sets the workspace label and role prefix
 herdr-crew init --preset review --shared-checkout --yes
 ```
 
-Generated board files, prompts and optional `.worktrees/` entries are appended to `.gitignore`, preserving its contents. Use `--no-ignore` to manage those rules yourself. `.herdr/crew.toml` remains versionable. Calls from subdirectories or worktrees configure the main checkout; `--root DIR` selects another project.
+Generated board files, prompts and optional `.worktrees/` entries are appended to `.gitignore`, preserving its contents. Use `--no-ignore` to manage those rules yourself. `.herdr/crew.toml` remains versionable. Calls from subdirectories or worktrees configure the main checkout; `--root DIR` selects another project. Submodules and main checkouts with separate Git metadata are supported. If a linked worktree's main checkout cannot be identified safely, run setup from the main checkout instead.
 
 ## Usage
 
