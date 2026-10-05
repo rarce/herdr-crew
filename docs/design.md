@@ -50,7 +50,7 @@ That goes into the configuration file; the logic lives in one binary.
 
 ### 2.1 Name and discovery
 
-The file is `<root>/.herdr/crew.toml` and it is versioned. Projects ignore only the generated files in `.herdr/`: `status.json`, its `.tmp`, `status.schema.json` and `prompts/`.
+The file is `<root>/.herdr/crew.toml` and it is versioned. Projects ignore only the generated files in `.herdr/`: `status.json`, its `.tmp`, `status.schema.json`, `.herdr-crew-*.tmp` and `prompts/`.
 
 The root is resolved as follows; the first rule that yields a directory wins:
 
@@ -151,6 +151,7 @@ Every table is parsed with `toml` and `serde` with `deny_unknown_fields`, so an 
 | Unique names; none of the form `<extra role>-N`; `board.tab` differs from every role name                                                     | `roles[3].name "globex-dev-2" clashes with the extra instances of globex-dev` |
 | At least one role; `board.writer` is a role                                                                                                   | `board.writer "boss" is not a role in roles[]`                               |
 | `worktree = true` requires `[worktrees]`; `base` looks like `remote/branch`                                                                   | `roles[1] globex-dev asks for a worktree but [worktrees] is missing`         |
+| `board.file` and `worktrees.dir` name paths strictly inside the root, without absolute paths, `..` or `.git` components | `board.file "../status.json": must be relative to the project, without ..` |
 | `start_message` (top level and per role): no control character (so one line), at most 200 bytes, not starting with `-`                        | `.herdr/crew.toml:3:17: start_message: must be one line, without control characters` |
 | Every `{{…}}` in `common_prompt` and each `roles[i].prompt` is a known placeholder                                                            | `.herdr/crew.toml:22:9: roles[0].prompt: unknown placeholder {{LAUNCH}}`     |
 
@@ -158,6 +159,21 @@ Every table is parsed with `toml` and `serde` with `deny_unknown_fields`, so an 
 - **Placeholder positions.** An unknown placeholder is located in the source text of its prompt, so the line and column point at it inside `crew.toml`.
 - **All errors at once.** Every validation error is reported, not only the first.
 - **`herdr-crew check`.** It validates the configuration, checks that `git`, `herdr` and `claude` are on the `PATH`, prints the official installer of what is missing without running it, and prints the binary's version and location. If a herdr server answers, it also explains that `herdr` only attaches and prints the full binary path for `up --no-attach`.
+
+**Filesystem preflight.** The adapter inspects the configuration, board, schema,
+prompt directory, base prompt files and worktree directory before project mutations.
+Existing components below the checkout root must be regular files or directories,
+never symlinks (including dangling links). Root aliases such as macOS `/tmp` are
+canonicalized. `up` and `add` also validate every existing role worktree, including
+extras and stale registrations, before starting a server or changing tabs.
+
+**Generated writes.** Prompts, schema and board seeds all use exclusive temporary
+files and atomic replacement; hardlinks are replaced instead of truncated. On the
+supported Unix platforms, directory traversal, creation, temporary writes, rename
+and cleanup are relative to open directory descriptors with no symlink following.
+Replacing a parent path with a symlink cannot redirect these writes. A failed
+replacement removes its temporary file. Board updates made by the coordinating
+agent retain the separate `.tmp` protocol described in the schema.
 
 ## 3. Manifest
 
@@ -232,7 +248,7 @@ herdr is invoked as `$HERDR_BIN_PATH` when set (herdr actions), else as `herdr` 
    - without `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` or `CLAUDE_CODE_ENTRYPOINT` in its environment. A server spawned from a Claude Code session would otherwise start every `claude` as a child session without a saved transcript [verified];
    - with the three streams set to null;
    - in its own process group (Unix) or detached (Windows).
-2. **State.** It finds the workspace by `label` in the answer of `workspace list`. When it exists, it runs `herdr tab list --workspace <W>` and `herdr pane list --workspace <W>`; it always runs `herdr agent list`. That makes `HerdrState`:
+2. **State.** It finds the workspace by `label` in the answer of `workspace list`, rejecting duplicate labels. When it exists, it runs `herdr tab list --workspace <W>` and `herdr pane list --workspace <W>`; it always runs `herdr agent list`. Before planning any mutation, its first pane and all known crew panes must resolve through Git to this main checkout. Missing or foreign directories stop the command; unrelated tabs are ignored. The same guard applies to `startup`, `add` and `close`, and accepts linked worktrees of the project. That makes `HerdrState`:
    - tabs by label;
    - panes by tab, with their `agent_session` when herdr reports it;
    - live agents with `name`, `tab_id` and `pane_id`.
@@ -257,7 +273,12 @@ herdr is invoked as `$HERDR_BIN_PATH` when set (herdr actions), else as `herdr` 
    - `git -C <root> fetch --quiet <remote> <branch>`; on failure it warns and goes on with the local ref;
    - then `git -C <root> worktree add --quiet --detach <dir>/<name> <base>`.
 
-   An existing worktree is reused as it is.
+   An existing worktree is reused as it is only after checking its exact path in
+   `git worktree list --porcelain -z`, its checkout root and its shared Git directory.
+   Its regular `.git` file must have a matching private-metadata `gitdir` backlink;
+   it cannot borrow the main checkout's or a sibling worktree's index.
+   Empty folders, files, symlinks, foreign repositories and stale registrations are
+   rejected during preflight. Newly created worktrees are verified before opening a tab.
 6. **Tab** of each remaining role: `herdr tab create --workspace <W> --cwd <root or worktree> --label <name> --no-focus` → `.result.root_pane.pane_id`.
 7. **Prompt**: writes `.herdr/prompts/<name>.txt` (§2.2).
 8. **Agent**: the fixed invocation of §2.2.
@@ -266,7 +287,7 @@ herdr is invoked as `$HERDR_BIN_PATH` when set (herdr actions), else as `herdr` 
    - Any other error stops the plan. Stopping is safe because `up` is re-entrant: the next run creates only what was missing.
 9. **Board.** Before the tab itself:
    - It writes `.herdr/status.schema.json` (§5.1) when missing or when its content differs from the generated one, so that an `up` with no changes has no steps.
-   - It seeds `board.file` when missing, with empty `sessions` and `owner`, as an atomic write (`.tmp` and rename).
+   - It seeds `board.file` when missing, with empty `sessions` and `owner`, as an atomic write through an exclusive temporary and rename (§2.3).
    - **Missing tab:** it is created as in step 6.
    - **Existing tab: repair.** It takes the tab's pane and asks `herdr pane process-info --pane <P>`; the positional form `pane process-info <id>` is rejected (`unknown option`) [verified].
      - It types only if the shell itself is in the foreground; anything else (the viewer, an editor, a hung process) gets nothing typed. The typical case is a herdr restart, which restores the tab as an empty shell because it does not resume processes that are not agents [vendor].
@@ -411,6 +432,7 @@ One crate with one binary, `herdr-crew`, and subcommands:
 ```text
 herdr-plugin.toml  Cargo.toml  Cargo.lock  README.md  LICENSE  docs/design.md
 src/main.rs            arguments, dispatch, exit codes (adapter)
+src/files.rs           project paths and generated-file replacement (adapter)
 src/config.rs          parsing and validation of crew.toml (pure)
 src/prompt.rs          placeholders and the combined prompt (pure)
 src/plan.rs            HerdrState, Step and plan(config, state, env) (pure)
@@ -429,6 +451,7 @@ tests/                 fixtures, snapshots and the real test of §7.2
 | `serde`, `serde_json`        | Types of `status.json` and of herdr's answers; `deny_unknown_fields` replaces a JSON Schema validator; `json!` builds the schema.                                                                                                                                                  |
 | `toml`                       | `crew.toml`, with line and column in errors and the spans of keys and prompts.                                                                                                                                                                                                      |
 | `jiff`                       | RFC 3339 with a required offset, and conversion to local time, which `std` lacks.                                                                                                                                                                                                  |
+| `rustix` (Unix, `fs`) | Safe directory-relative operations with no symlink following for generated-file writes and cleanup. |
 
 Deliberately left out:
 
@@ -444,7 +467,7 @@ The core runs no processes and reads neither the clock nor the disk except throu
 
 - **`Config::parse(text, root) -> Result<Config, Vec<Error>>`.**
 - **`plan(&Config, &HerdrState, &Env) -> Plan`.**
-  - `Env` carries the test command, the binary's path, which worktrees exist and what runs in the foreground of the board pane.
+  - `Env` carries the test command, the binary's path, which worktrees have been verified and what runs in the foreground of the board pane.
   - `Plan` carries the verdicts and a list of `Step`: `CreateWorkspace`, `AdoptWorkspace`, `RenameTab`, `CreateWorktree`, `CreateTab`, `WritePrompt`, `StartAgent`, `RunInPane`, `SeedStatus`, `WriteSchema` and `Warn`. Focus is not a step (§4.2 step 10).
   - The workspace and pane ids in the steps are symbolic references to the result of an earlier step.
 - **`board::load(bytes, &Config) -> Result<Status, Unavailable>` and `board::view(frame, Status | Unavailable, now, path)`.**
@@ -506,6 +529,7 @@ All fixtures are synthetic: a project `acme` with four roles in the main checkou
 
   The time is fixed by argument.
 - **Board loading:** `board::load` accepts the example boards and rejects a repeated role, an unknown role, `<base role>-2` of a role without `extra`, and an unknown field.
+- **Isolation:** `tests/isolation.rs` uses real temporary Git repositories and an offline herdr stub. It checks foreign workspaces across commands, duplicate labels, missing pane directories, unsafe configuration paths, output symlinks and hardlinks, invalid or stale worktrees and reuse of valid registrations. File-writing unit tests check parent-directory replacement and temporary cleanup after failure.
 
 ### 7.2 Optional, against a real herdr isolated through XDG
 

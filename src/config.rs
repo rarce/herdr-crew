@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use toml::de::{DeTable, DeValue};
 
-use crate::prompt;
+use crate::{files, prompt};
 
 pub const CONFIG_FILE: &str = ".herdr/crew.toml";
 pub const DEFAULT_BOARD_FILE: &str = ".herdr/status.json";
@@ -160,6 +160,20 @@ impl Config {
 
         let mut errors = Vec::new();
         let mut err = |msg: String| errors.push(at(None, msg));
+
+        for (key, value) in [
+            ("board.file", raw.board.file.as_deref()),
+            (
+                "worktrees.dir",
+                raw.worktrees.as_ref().map(|w| w.dir.as_str()),
+            ),
+        ] {
+            if let Some(value) = value
+                && let Some(why) = files::relative_path_problem(value)
+            {
+                err(format!("{key} {value:?}: {why}"));
+            }
+        }
 
         if raw.version != SUPPORTED_VERSION {
             err(format!(
@@ -667,6 +681,38 @@ prompt = '''You are {{NAME}}.'''
                 .any(|m| m.ends_with("worktrees.base \"main\": must look like remote/branch")),
             "{e:?}"
         );
+    }
+
+    #[test]
+    fn generated_paths_stay_inside_the_project_and_outside_git_metadata() {
+        for path in [
+            "",
+            ".",
+            "..",
+            "../outside.json",
+            "sub/../../outside",
+            "/tmp/outside",
+            ".git/hooks/hook",
+        ] {
+            for table in ["board", "worktrees"] {
+                let text = if table == "board" {
+                    MIN.replace("[board]", &format!("[board]\nfile = {path:?}"))
+                } else {
+                    MIN.replace(
+                        "[[roles]]",
+                        &format!("[worktrees]\ndir = {path:?}\nbase = 'origin/main'\n[[roles]]"),
+                    )
+                };
+                assert!(
+                    errors(&text)
+                        .iter()
+                        .any(|e| e.contains(&format!("{table}."))),
+                    "{text}"
+                );
+            }
+        }
+        let valid = MIN.replace("[board]", "[board]\nfile = './nested/status.json'");
+        assert!(Config::parse(&valid, Path::new("/r/p")).is_ok());
     }
 
     #[test]

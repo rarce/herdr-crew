@@ -129,6 +129,7 @@ herdr-crew [--root DIR] <command>
 
 - **`cd repo && herdr`.** With no herdr server running, herdr may open an initial workspace in the repository, which the startup hook brings up. On a restore, the hook repairs only existing project workspaces: it relaunches no role and does not recreate a tab you closed. If herdr ignores the launch directory because it restored a different workspace, or if it attaches to an already-running server, use the `herdr-crew.up` action or the binary's `up` command as described above. `startup` writes to the plugin log (`herdr plugin log list --plugin herdr-crew`) and notifies when adoption fails.
 - **Where the project is.** The project root is the main checkout of the git repository around the current directory, or around `--root`, even when called from a worktree.
+- **Workspace ownership.** A matching workspace label must be unique. Its first pane and every crew-labelled pane must resolve to this project's main Git checkout, including linked worktrees. If that cannot be verified, the command stops before changing tabs or files. Rename a colliding workspace or restore the pane's project directory before retrying. Other tabs are left alone.
 - **The `herdr-crew.up` action.** It works on the workspace you have focused in herdr.
 - **Starting the server.** From a plain terminal, `up` starts a herdr server if none is running and then opens herdr. Pass `--no-attach` to skip opening it.
 - **`--dry-run`** prints each role's verdict and the steps `up` would take, without doing anything.
@@ -222,9 +223,20 @@ Add the generated files to `.gitignore`:
 ```gitignore
 /.herdr/status.json
 /.herdr/status.json.tmp
+/.herdr/.herdr-crew-*.tmp
 /.herdr/status.schema.json
 /.herdr/prompts/
 ```
+
+`board.file` and `worktrees.dir` must name paths inside the project: absolute paths,
+`..` and `.git` components are rejected. The configuration and generated-file
+locations must not be symlinks, including their parent directories inside the
+checkout. The CLI replaces generated files through exclusive temporary files;
+it does not use an existing `<file>.tmp`. Existing role directories are reused
+only when Git lists them as exact worktrees of this repository, their checkout and
+shared metadata agree, and their private metadata points back to the same checkout.
+Invalid or stale worktrees stop `up` and `add` before
+starting the server or creating tabs; repair them with Git before retrying.
 
 ## The status board
 
@@ -286,6 +298,11 @@ sh scripts/build.sh
 **Board snapshots.** Board drawings are compared with `tests/snapshots/`; `UPDATE_SNAPSHOTS=1 cargo test` rewrites them.
 
 **Setup tests.** `tests/init.rs` checks each preset, previews, cancellation, existing files, ignore updates and configuration from a worktree using temporary Git repositories. Setup never starts herdr or agents.
+
+**Isolation tests.** `tests/isolation.rs` uses temporary Git repositories and an
+offline herdr stub to check workspace collisions, unsafe paths, symlinks, hardlinks
+and invalid worktrees. File-writing unit tests also cover replacing a parent
+directory during a write and cleanup after failure. These run in the normal suite.
 
 **Real-herdr test.** `tests/real_herdr.rs` is ignored by default. It runs against a real herdr with its XDG directories in a short temporary directory. It starts its own `herdr --session crewtest` server there, uses `cat` instead of `claude`, and removes everything when it ends:
 

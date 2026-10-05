@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::git;
 use crate::plan::{Foreground, HerdrState, PaneRef, Plan, Step, WorkspaceRef, find_workspace};
+use crate::{files, git};
 
 /// A failed call: herdr's `.error.code` and `.error.message`, or the failure to run it.
 #[derive(Debug, Clone)]
@@ -118,10 +118,10 @@ impl Herdr {
     }
 
     /// The state `plan` needs, from the `.result` of `workspace list`.
-    pub fn state(&self, workspaces: &Value, label: &str) -> Result<HerdrState, String> {
+    pub fn state(&self, workspaces: &Value, c: &Config) -> Result<HerdrState, String> {
         let err = |e: CallError| e.to_string();
         let agents = self.call(&["agent", "list"]).map_err(err)?;
-        match find_workspace(workspaces, label)? {
+        match find_workspace(workspaces, &c.label)? {
             None => HerdrState::from_results(None, &agents),
             Some(id) => {
                 let tabs = self
@@ -130,7 +130,9 @@ impl Herdr {
                 let panes = self
                     .call(&["pane", "list", "--workspace", &id])
                     .map_err(err)?;
-                HerdrState::from_results(Some((id, &tabs, &panes)), &agents)
+                let state = HerdrState::from_results(Some((id, &tabs, &panes)), &agents)?;
+                verify_workspace(c, &state)?;
+                Ok(state)
             }
         }
     }
@@ -193,6 +195,52 @@ impl Herdr {
     }
 }
 
+/// The first pane anchors the workspace's project, just as in startup discovery. Known crew
+/// tabs must also belong to that repository; unrelated tabs are left alone. Use Git roots,
+/// rather than string prefixes, to distinguish nested repositories and linked worktrees.
+fn verify_workspace(c: &Config, state: &HerdrState) -> Result<(), String> {
+    let Some(workspace) = &state.workspace else {
+        return Ok(());
+    };
+    let root = c.root.canonicalize().map_err(|e| e.to_string())?;
+    let verify = |pane: &crate::plan::Pane| -> Result<(), String> {
+        let verified = pane
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| git::verify_checkout(&root, cwd).is_ok());
+        if !verified {
+            return Err(format!(
+                "workspace {:?} ({}) cannot be verified for {}: pane {} is in {}; rename the workspace or restore its project directory",
+                c.label,
+                workspace.id,
+                root.display(),
+                pane.id,
+                pane.cwd.as_deref().map_or_else(
+                    || "an unknown directory".into(),
+                    |p| p.display().to_string()
+                )
+            ));
+        }
+        Ok(())
+    };
+    verify(workspace.panes.first().ok_or_else(|| {
+        format!(
+            "workspace {:?} has no panes; cannot verify its project",
+            c.label
+        )
+    })?)?;
+    for pane in &workspace.panes {
+        if workspace
+            .tabs
+            .iter()
+            .any(|tab| tab.id == pane.tab_id && c.is_known_tab(&tab.label))
+        {
+            verify(pane)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn detach(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
@@ -234,6 +282,30 @@ pub fn execute(
     plan: &Plan,
     out: &mut Output,
 ) -> Result<Option<String>, String> {
+    files::validate_config(c)?;
+    verify_workspace(c, state)?;
+    // Check every planned output, including extra prompts, before the first mutation.
+    for step in &plan.steps {
+        match step {
+            Step::WritePrompt { path, .. }
+            | Step::WriteSchema { path, .. }
+            | Step::SeedStatus { path, .. } => {
+                files::validate(&c.root, path, files::Kind::File)?;
+            }
+            Step::CreateWorktree { path, .. } => {
+                files::validate(&c.root, path, files::Kind::Directory)?;
+            }
+            Step::CreateTab { label, cwd, .. }
+                if c.session_role(label).is_some_and(|r| r.worktree) =>
+            {
+                files::validate(&c.root, cwd, files::Kind::Directory)?;
+                if cwd.exists() {
+                    git::validate_worktree(&c.root, cwd)?;
+                }
+            }
+            _ => {}
+        }
+    }
     let mut workspace = state.workspace.as_ref().map(|w| w.id.clone());
     let mut initial: Option<(String, String)> = None; // initial tab and pane of a new workspace
     let mut panes: HashMap<String, String> = HashMap::new(); // label of a created tab -> pane
@@ -290,6 +362,7 @@ pub fn execute(
                 remote,
                 branch,
             } => {
+                files::validate(&c.root, path, files::Kind::Directory)?;
                 if let Err(e) = git::fetch(&c.root, remote, branch) {
                     out.warn(
                         herdr,
@@ -297,6 +370,7 @@ pub fn execute(
                     );
                 }
                 git::worktree_add(&c.root, path, &format!("{remote}/{branch}"))?;
+                git::validate_worktree(&c.root, path)?;
                 out.step(&format!("worktree of {name} in {}", path.display()));
             }
             Step::CreateTab {
@@ -304,6 +378,9 @@ pub fn execute(
                 label,
                 cwd,
             } => {
+                if c.session_role(label).is_some_and(|r| r.worktree) {
+                    git::validate_worktree(&c.root, cwd)?;
+                }
                 let ws = match wref {
                     WorkspaceRef::Existing(id) => id.clone(),
                     WorkspaceRef::Created => {
@@ -326,7 +403,7 @@ pub fn execute(
                     .map_err(|e| format!("could not create tab \"{label}\": {e}"))?;
                 panes.insert(label.clone(), str_at(&r, &["root_pane", "pane_id"])?);
             }
-            Step::WritePrompt { path, content, .. } => write_file(path, content, false)?,
+            Step::WritePrompt { path, content, .. } => files::write(&c.root, path, content)?,
             Step::StartAgent {
                 name,
                 pane,
@@ -350,9 +427,9 @@ pub fn execute(
                     .map_err(|e| format!("could not type in {pane}: {e}"))?;
                 out.step(&format!("typed in {pane}: {command}"));
             }
-            Step::WriteSchema { path, content } => write_file(path, content, true)?,
+            Step::WriteSchema { path, content } => files::write(&c.root, path, content)?,
             Step::SeedStatus { path, content } => {
-                write_file(path, content, true)?;
+                files::write(&c.root, path, content)?;
                 out.step(&format!("board seeded in {}", path.display()));
             }
             Step::Warn(msg) => out.warn(herdr, msg),
@@ -420,22 +497,6 @@ fn str_at(v: &Value, path: &[&str]) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| format!("herdr response without {}", path.join(".")))
-}
-
-/// Writes a file, creating its directory; `atomic` writes to `.tmp` and renames.
-pub fn write_file(path: &Path, content: &str, atomic: bool) -> Result<(), String> {
-    let fail = |e: std::io::Error| format!("could not write {}: {e}", path.display());
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(fail)?;
-    }
-    if atomic {
-        let mut tmp = path.as_os_str().to_owned();
-        tmp.push(".tmp");
-        std::fs::write(&tmp, content).map_err(fail)?;
-        std::fs::rename(&tmp, path).map_err(fail)
-    } else {
-        std::fs::write(path, content).map_err(fail)
-    }
 }
 
 #[cfg(test)]

@@ -112,10 +112,17 @@ pub fn pane_items(panes: &Value) -> Result<Vec<Pane>, String> {
 
 /// The id of the workspace with that label in the `.result` of `workspace list`.
 pub fn find_workspace(workspaces: &Value, label: &str) -> Result<Option<String>, String> {
-    Ok(workspace_items(workspaces)?
+    let matches: Vec<_> = workspace_items(workspaces)?
         .into_iter()
-        .find(|w| w.label == label)
-        .map(|w| w.workspace_id))
+        .filter(|w| w.label == label)
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [workspace] => Ok(Some(workspace.workspace_id.clone())),
+        _ => Err(format!(
+            "workspace label {label:?} is ambiguous; rename the duplicate workspaces"
+        )),
+    }
 }
 
 impl HerdrState {
@@ -884,6 +891,19 @@ mod tests {
         let panes = read_fixture("herdr-state/pane-list.json");
         let agents = read_fixture("herdr-state/agent-list.json");
         HerdrState::from_results(Some((id, &tabs, &panes)), &agents).unwrap()
+    }
+
+    #[test]
+    fn duplicate_workspace_labels_are_ambiguous() {
+        let workspaces = serde_json::json!({"workspaces": [
+            {"workspace_id": "w1", "label": "acme"},
+            {"workspace_id": "w2", "label": "acme"}
+        ]});
+        assert!(
+            find_workspace(&workspaces, "acme")
+                .unwrap_err()
+                .contains("ambiguous")
+        );
     }
 
     fn env() -> Env {

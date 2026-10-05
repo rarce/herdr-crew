@@ -4,6 +4,7 @@
 
 mod board;
 mod config;
+mod files;
 mod git;
 mod herdr;
 mod init;
@@ -183,14 +184,17 @@ fn resolve_root(flag: Option<&Path>) -> Result<PathBuf, Fail> {
 
 fn load_config(root: &Path) -> Result<Config, Fail> {
     let path = root.join(config::CONFIG_FILE);
+    files::validate(root, &path, files::Kind::File).map_err(Fail::run)?;
     let text = std::fs::read_to_string(&path).map_err(|e| Fail {
         code: 2,
         lines: vec![format!("herdr-crew: cannot read {}: {e}", path.display())],
     })?;
-    Config::parse(&text, root).map_err(|errors| Fail {
+    let config = Config::parse(&text, root).map_err(|errors| Fail {
         code: 2,
         lines: errors.iter().map(ToString::to_string).collect(),
-    })
+    })?;
+    files::validate_config(&config).map_err(Fail::run)?;
+    Ok(config)
 }
 
 fn binary() -> PathBuf {
@@ -199,20 +203,12 @@ fn binary() -> PathBuf {
         .unwrap_or_else(|_| "herdr-crew".into())
 }
 
-fn env(c: &Config, state: &HerdrState, herdr: Option<&Herdr>) -> Env {
+fn env(c: &Config, state: &HerdrState, herdr: Option<&Herdr>, worktrees: BTreeSet<String>) -> Env {
     let board_pane = state.workspace.as_ref().and_then(|w| {
         let tab = w.tabs.iter().find(|t| t.label == c.board.tab)?;
         let pane = w.panes.iter().find(|p| p.tab_id == tab.id)?;
         herdr.map(|h| h.foreground(&pane.id))
     });
-    let worktrees: BTreeSet<String> = c
-        .worktrees
-        .as_ref()
-        .and_then(|w| std::fs::read_dir(c.root.join(&w.dir)).ok())
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .collect();
     let now = Timestamp::now()
         .to_zoned(TimeZone::system())
         .strftime("%Y-%m-%dT%H:%M:%S%:z")
@@ -237,6 +233,7 @@ fn fail_notify(herdr: &Herdr, msg: String) -> Fail {
 }
 
 fn up(c: &Config, a: &Args) -> Result<(), Fail> {
+    let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
     let herdr = Herdr::from_env();
     let mut out = Output;
     let workspaces = if a.dry_run {
@@ -249,15 +246,13 @@ fn up(c: &Config, a: &Args) -> Result<(), Fail> {
         )
     };
     let state = match &workspaces {
-        Some(w) => herdr
-            .state(w, &c.label)
-            .map_err(|e| fail_notify(&herdr, e))?,
+        Some(w) => herdr.state(w, c).map_err(|e| fail_notify(&herdr, e))?,
         None => {
             println!("(no herdr server: the plan assumes an empty one)");
             HerdrState::default()
         }
     };
-    let e = env(c, &state, Some(&herdr));
+    let e = env(c, &state, Some(&herdr), worktrees);
     let p = plan::plan(c, &state, &e);
     if a.dry_run {
         print!("{}", p.dry_run());
@@ -356,7 +351,7 @@ fn bring_up(
 ) -> Result<(), Fail> {
     let c = load_config(root)?;
     let mut out = Output;
-    let state = herdr.state(workspaces, &c.label).map_err(Fail::run)?;
+    let state = herdr.state(workspaces, &c).map_err(Fail::run)?;
     let state = match plan::startup_state(state, adoption) {
         Ok(s) => s,
         Err(why) => {
@@ -365,7 +360,8 @@ fn bring_up(
         }
     };
     let adopted = state.adopt.is_some();
-    let p = plan::plan(&c, &state, &env(&c, &state, Some(herdr)));
+    let worktrees = git::existing_worktrees(&c).map_err(Fail::run)?;
+    let p = plan::plan(&c, &state, &env(&c, &state, Some(herdr), worktrees));
     // What startup saw, for the plugin log.
     print!("{}", startup_verdicts(&c.label, &p));
     let ws = herdr::execute(herdr, &c, &state, &p, &mut out).map_err(Fail::run)?;
@@ -441,13 +437,15 @@ fn current_state(c: &Config, herdr: &Herdr) -> Result<HerdrState, Fail> {
     let workspaces = herdr
         .call(&["workspace", "list"])
         .map_err(|e| Fail::run(format!("the herdr server does not answer: {e}")))?;
-    herdr.state(&workspaces, &c.label).map_err(Fail::run)
+    herdr.state(&workspaces, c).map_err(Fail::run)
 }
 
 fn add(c: &Config, role: &str) -> Result<(), Fail> {
+    let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
     let herdr = Herdr::from_env();
     let state = current_state(c, &herdr)?;
-    let (name, p) = plan::plan_add(c, &state, &env(c, &state, None), role).map_err(Fail::run)?;
+    let (name, p) =
+        plan::plan_add(c, &state, &env(c, &state, None, worktrees), role).map_err(Fail::run)?;
     let mut out = Output;
     herdr::execute(&herdr, c, &state, &p, &mut out).map_err(|e| fail_notify(&herdr, e))?;
     out.step(&format!("new instance {name}"));

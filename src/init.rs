@@ -12,6 +12,7 @@ const MAX_PREFIX: usize = 21; // Leave room for "-research-a" within a 32-byte a
 const IGNORE_RULES: &[&str] = &[
     "/.herdr/status.json",
     "/.herdr/status.json.tmp",
+    "/.herdr/.herdr-crew-*.tmp",
     "/.herdr/status.schema.json",
     "/.herdr/prompts/",
 ];
