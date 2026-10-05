@@ -607,8 +607,8 @@ fn scenario(iso: &Isolated) {
 
     // 3. Relative argv[0] and the context of an action invoked by CLI from a pane.
     let crate_dir = env!("CARGO_MANIFEST_DIR");
-    let build = Command::new(env!("CARGO"))
-        .args(["build", "--release", "--locked"])
+    let build = Command::new("sh")
+        .arg("scripts/build.sh")
         .current_dir(crate_dir)
         .status()
         .unwrap();
@@ -652,7 +652,7 @@ fn scenario(iso: &Isolated) {
 /// The `[[startup]]` hook (design §4.4): a server launched from the repository ends with only the
 /// project's workspace, and a restart repairs the board without relaunching anything.
 fn startup_scenario(iso: &mut Isolated) {
-    // The release binary was built by `scenario` step 3; the manifest's hook runs it.
+    // The plugin artifact was prepared by `scenario` step 3; the manifest's hook runs it.
     iso.result(&["plugin", "link", env!("CARGO_MANIFEST_DIR")]);
 
     // a. Like `cd repo && herdr`: herdr creates its initial workspace "repo" with tab «1», and

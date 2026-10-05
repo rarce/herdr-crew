@@ -2,6 +2,7 @@
 name = "herdr-crew"
 version = "0.1.0"
 edition = "2024"
+default-run = "herdr-crew"
 description = "herdr plugin that starts one Claude Code session per role and draws their status board"
 license = "MIT"
 repository = "https://github.com/rarce/herdr-crew"

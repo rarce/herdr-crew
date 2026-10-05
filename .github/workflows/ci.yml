@@ -22,3 +22,4 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       # The real-herdr test is #[ignore]d and needs CREW_REAL_HERDR=1, so it never runs here.
       - run: cargo test --locked
+      - run: sh scripts/build.sh

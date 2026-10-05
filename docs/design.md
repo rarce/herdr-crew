@@ -1,6 +1,6 @@
 # herdr-crew: design of a herdr plugin for role-based Claude Code sessions
 
-**Date:** 2026-09-26. **Status:** the design the code honours. Step 1 of the construction table (§11) is built: the binary, its tests and a real test against an isolated herdr. The step-1 hypotheses are verified, except the implicit `.exe` on Windows. The startup hook (§4.4) is built too.
+**Date:** 2026-09-26, updated 2026-10-05. **Status:** the design the code honours. Step 1 of the construction table (§11) is built: the binary, its tests and a real test against an isolated herdr. The step-1 hypotheses are verified, except the implicit `.exe` on Windows. The startup hook (§4.4), plugin artifact preparation and public CLI launcher (§8) are built too.
 
 Where claims come from:
 
@@ -41,7 +41,7 @@ That goes into the configuration file; the logic lives in one binary.
 2. **Idempotency.** Running `up` twice duplicates no workspace, tab or agent; the second run only creates what is missing.
 3. **Isolation between projects.** `up` only creates or changes things in the workspace with the project's label, and never reuses another project's workspace or tab. herdr agent names are global, so a live agent carrying a role's name, in any workspace, blocks that role (§10).
 4. **The main checkout.** The board and the generated files live there even when the call comes from a worktree.
-5. **Nothing global.** The binary writes nothing outside the project's repository, except the worktrees the project itself declares.
+5. **Project-local runtime.** Crew commands write nothing outside the project's repository, except the worktrees the project declares. Installation separately prepares the plugin artifact and installs its public launcher in the user-selected bin directory (§8).
 6. **Only an idle shell.** It never types into a pane that runs anything other than its shell (§4.2 step 9).
 7. **A robust viewer.** An unreadable or off-schema board is shown as such; it never brings the viewer down.
 8. **Nothing base is closed.** It never removes a worktree or closes a base role; `close` only closes the tab of an extra instance.
@@ -169,16 +169,16 @@ min_herdr_version = "0.9.1"
 platforms = ["macos", "linux"]
 
 [[build]]
-command = ["cargo", "build", "--release", "--locked"]
+command = ["sh", "scripts/build.sh", "--install-launcher"]
 
 [[startup]]
-command = ["target/release/herdr-crew", "startup"]
+command = ["bin/herdr-crew", "startup"]
 
 [[actions]]
 id = "up"
 title = "Start or complete the project's sessions"
 contexts = ["workspace", "pane"]
-command = ["target/release/herdr-crew", "up"]
+command = ["bin/herdr-crew", "up"]
 ```
 
 The id is `herdr-crew`, like the repository; the action is `herdr-crew.up`. The `[[startup]]` hook runs `startup` (§4.4).
@@ -197,7 +197,7 @@ herdr reads a linked plugin's manifest from its `manifest_path` when the server 
 
 The `command` is a path relative to the plugin directory, where herdr runs the commands [vendor]. herdr resolves a relative `argv[0]` against that directory and also uses it as the current directory [verified with `plugin link` and `plugin action invoke` in an isolated XDG: the process got an absolute `argv[0]` under `HERDR_PLUGIN_ROOT`, and that `cwd`].
 
-The manifest declares only macOS and Linux, so the marketplace card does not promise Windows (2026-09-26). The code keeps its Windows branches, and `windows` goes back into `platforms` after a Windows run confirms the following. Whether herdr finds the `.exe` without its extension on Windows remains [H] until that run. Action ids are unique even across platforms [vendor], so one action per platform is not possible. If it fails, `[[build]]` copies the binary to `bin/` with a fixed name per platform, and this paragraph is revised.
+The manifest declares only macOS and Linux. Artifact preparation uses a POSIX shell and the launcher uses Unix `exec`. The runtime keeps its Windows branches; adding Windows support requires a platform-specific build step, executable paths and lifecycle validation. Action ids are unique even across platforms [vendor], so one action per platform is not possible.
 
 ## 4. Launcher behaviour
 
@@ -535,10 +535,18 @@ It is both the integration test of step 1 and the check of the [H] (§11). It pa
 ## 8. Build and distribution
 
 - **When `[[build]]` runs.** Only on `herdr plugin install` from GitHub, never on `plugin link`, and it gets no execution context [vendor].
-- **Linking.** With `link` the binary is built by hand with `cargo build --release --locked`: before linking and after each change. An old binary keeps working with a new manifest, so `check` prints the binary's version to catch that.
-- **From a terminal.** The same binary works without any linked plugin: `target/release/herdr-crew up`.
+- **Artifact preparation.** `sh scripts/build.sh` builds both Rust binaries with the locked dependencies and copies the runtime to `bin/herdr-crew` via a temporary file and rename. The manifest points there. This runs before linking and after each development change; it installs nothing outside the checkout unless passed `--install-launcher`.
+- **Public CLI.** GitHub installation passes `--install-launcher`. It copies `herdr-crew-launcher` into `CREW_BIN_DIR` or `~/.local/bin` as `herdr-crew`. `--bin-dir DIR` overrides the environment when installing it directly. Installation replaces only a regular file carrying the launcher's ownership marker; unrelated commands and symlinks are preserved. The launcher reports a missing PATH entry without editing shell profiles.
+- **Resolution.** Every ordinary public CLI invocation runs `herdr plugin list --plugin herdr-crew --json`, reads `plugin_root` and executes `bin/herdr-crew`, falling back to `target/release/herdr-crew` for older plugins. It preserves arguments, environment and working directory. Startup and actions invoke the runtime directly. `{{LAUNCHER}}` continues to use the canonical runtime path.
+- **Offline use.** herdr 0.9.1 and 0.9.3 fall back to their local plugin registry when no server answers [vendor, inspected 2026-10-05]. Resolution does not start a server. The runtime's `up` keeps its own server-starting behaviour.
+- **Removal.** `herdr-crew --uninstall-launcher` removes only an owned launcher, even without a registered plugin. Without an explicit directory or `CREW_BIN_DIR`, an installed launcher removes itself. `herdr plugin uninstall` removes the managed checkout separately.
+- **Standalone use.** The runtime at `bin/herdr-crew` also works without plugin registration. `cargo build --release --locked` still produces the runtime in `target/release`, but does not prepare the manifest artifact or install the public launcher.
 
-Without `cargo` it cannot be installed yet. Prebuilt binaries per platform are deferred until the first user without a Rust toolchain (§11). That work means publishing them in GitHub releases and replacing `[[build]]` with a per-platform step that downloads the tagged binary and verifies its checksum, keeping `cargo build` as an alternative.
+herdr builds in a temporary checkout, then moves it and registers the plugin [vendor, inspected in 0.9.1 and 0.9.3]. A public symlink into the build directory would break. Copying a resolver instead avoids embedding that path and follows reinstalls or a linked checkout. Installation spans two destinations: a host registration failure can leave the launcher behind. It resolves the previous registered plugin when available, or reports that installation is needed; it can remove itself independently.
+
+`tests/launcher.rs` exercises installation, relocation, registry replacement, legacy binaries, forwarding, ownership and removal using temporary tools and prefixes. Its ignored real-herdr test validates offline linking and resolution under isolated XDG directories, without starting a server.
+
+Without `cargo` it cannot be installed yet. Prebuilt binaries per platform are deferred until the first user without a Rust toolchain (§11). That work means publishing them in GitHub releases and having the build step download the binary matching the chosen ref and verify its checksum, keeping compilation as an alternative.
 
 ## 9. Migrating a project from launcher scripts
 

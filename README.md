@@ -28,28 +28,47 @@ From the [herdr plugin marketplace](https://herdr.dev/plugins/):
 herdr plugin install rarce/herdr-crew
 ```
 
-herdr clones the repository and runs `cargo build --release --locked`. Pin a release with `--ref v0.1.0`.
+herdr clones the repository and runs `sh scripts/build.sh --install-launcher`. This builds the plugin at `bin/herdr-crew` and installs a small public launcher as `~/.local/bin/herdr-crew`. Use `--ref <tag>` to pin a release.
+
+If `~/.local/bin` is not on your `PATH`, add it to your shell configuration. To choose another directory when installing, set `CREW_BIN_DIR`:
+
+```sh
+CREW_BIN_DIR="$HOME/bin" herdr plugin install rarce/herdr-crew
+```
+
+The launcher asks herdr for the registered plugin location on each call, including when no server is running. Reinstalling the plugin therefore updates the CLI it runs. It also supports older installed plugins whose binary is still under `target/release/`. An existing command or symlink that is not an owned launcher is preserved; choose another directory if its name conflicts.
 
 From a checkout, for development:
 
 ```sh
 git clone https://github.com/rarce/herdr-crew
 cd herdr-crew
-cargo build --release --locked
+sh scripts/build.sh
 herdr plugin link "$PWD"
+# Optional: expose the linked plugin as herdr-crew on your PATH.
+target/release/herdr-crew-launcher --install-launcher
 ```
 
-`plugin link` does not build anything, so rebuild after each update. The binary's `check` command validates the configuration, prints its location and warns when a running herdr server means `herdr` will only attach. A plugin install does not add `herdr-crew` to your `PATH`.
+`plugin link` does not build anything, so run `sh scripts/build.sh` after each update. Without `--install-launcher`, the script only prepares the checkout. The binary's `check` command validates the configuration, prints its location and warns when a running herdr server means `herdr` will only attach.
 
-The binary also works without the plugin: `target/release/herdr-crew up` from inside the project.
+The binary also works without a registered plugin: run `/path/to/checkout/bin/herdr-crew up` from inside the project, or use `--root`.
+
+Remove the public launcher and the plugin with:
+
+```sh
+herdr-crew --uninstall-launcher
+herdr plugin uninstall herdr-crew
+```
+
+Launcher removal also works after the plugin has been uninstalled. Use `--bin-dir DIR` to select a directory explicitly; otherwise an installed launcher removes itself, with `CREW_BIN_DIR` taking precedence. `herdr-crew --launcher-help` lists these maintenance options without needing the plugin.
 
 ## Quick start
 
 1. Add `.herdr/crew.toml` to your repository (see [the format](#herdrcrewtoml) below) and the generated files to `.gitignore`.
-2. Check it from the repository with the installed binary's `check` command, or use `up --dry-run` to see the plan. Find the binary through `plugin_root` as described below.
+2. Run `herdr-crew check` from the repository, or `herdr-crew up --dry-run` to see the plan.
 3. Start herdr from the repository with no herdr server running: `cd repo && herdr`. The startup hook creates the workspace, the role tabs and the board when herdr opens its initial workspace there.
 
-If a herdr server is already running, `herdr` only attaches and its startup hook does not run. Focus this project's workspace and invoke the `herdr-crew.up` action (or run `herdr plugin action invoke herdr-crew.up`). If the project has no workspace yet, run the plugin binary from the project directory with `up --no-attach`. Find its `plugin_root` with `herdr plugin list --plugin herdr-crew --json`; the binary is at `<plugin_root>/target/release/herdr-crew`. This also covers a restored server that ignored the project's launch directory. A live agent in an unrelated tab such as `1` will prevent new roles from starting; rename that tab to its role if it belongs to the crew, or close it after saving its work.
+If a herdr server is already running, `herdr` only attaches and its startup hook does not run. Focus this project's workspace and invoke the `herdr-crew.up` action (or run `herdr plugin action invoke herdr-crew.up`). If the project has no workspace yet, run `herdr-crew up --no-attach` from its directory. This also covers a restored server that ignored the project's launch directory. Without the public launcher, find `plugin_root` with `herdr plugin list --plugin herdr-crew --json` and run `<plugin_root>/bin/herdr-crew` directly. A live agent in an unrelated tab such as `1` will prevent new roles from starting; rename that tab to its role if it belongs to the crew, or close it after saving its work.
 
 Each role's tab runs `claude` with its prompt, in the main checkout or in its own worktree, and gets the `start_message` as its first message:
 
@@ -225,6 +244,7 @@ cargo fmt --check
 cargo clippy --locked -- -D warnings
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+sh scripts/build.sh
 ```
 
 **Board snapshots.** Board drawings are compared with `tests/snapshots/`; `UPDATE_SNAPSHOTS=1 cargo test` rewrites them.
@@ -235,7 +255,13 @@ cargo test --locked
 CREW_REAL_HERDR=1 cargo test --test real_herdr -- --ignored --nocapture
 ```
 
-The test clears the environment of the processes it starts, so no `HERDR_*` or `CLAUDE*` variable reaches them. It aborts before starting anything if its socket would not be under its temporary directory, and it never touches the user's herdr configuration.
+**Launcher tests.** `tests/launcher.rs` checks install prefixes, checkout relocation, registry changes, argument forwarding and removal with temporary tools. Its optional real-herdr test checks the offline registry without starting a server:
+
+```sh
+CREW_REAL_HERDR=1 cargo test --locked --test launcher -- --ignored
+```
+
+Both real-herdr tests clear inherited `HERDR_*` and `CLAUDE*` variables and use temporary configuration. The session test also checks its socket location before starting agents; neither modifies the user's herdr configuration.
 
 ## License
 
