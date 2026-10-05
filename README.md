@@ -304,6 +304,14 @@ offline herdr stub to check workspace collisions, unsafe paths, symlinks, hardli
 and invalid worktrees. File-writing unit tests also cover replacing a parent
 directory during a write and cleanup after failure. These run in the normal suite.
 
+**Execution tests.** `tests/execution.rs` uses the stateful simulator in
+`tests/support/herdr.sh`, real temporary Git repositories and a local bare remote.
+It checks complete startup, repeated `up`, extra instances, prompt and message
+arguments, cold server startup, partial failures and recovery, and startup adoption
+and restore. The simulator records each argument separately and never executes
+agents or pane commands. These tests run with `cargo test --locked`, including
+Linux and macOS CI, without installing herdr or Claude or accessing the network.
+
 **Real-herdr test.** `tests/real_herdr.rs` is ignored by default. It runs against a real herdr with its XDG directories in a short temporary directory. It starts its own `herdr --session crewtest` server there, uses `cat` instead of `claude`, and removes everything when it ends:
 
 ```sh
@@ -317,6 +325,11 @@ CREW_REAL_HERDR=1 cargo test --locked --test launcher -- --ignored
 ```
 
 Both real-herdr tests clear inherited `HERDR_*` and `CLAUDE*` variables and use temporary configuration. The session test also checks its socket location before starting agents; neither modifies the user's herdr configuration.
+
+`.github/workflows/real-herdr.yml` runs both integrations weekly and on manual
+dispatch on Linux and macOS. It downloads herdr 0.9.3 into the runner's temporary
+directory and checks its pinned SHA-256 digest. Upgrade the version and the asset
+digests together when changing the tested host version. Claude remains simulated.
 
 ## License
 

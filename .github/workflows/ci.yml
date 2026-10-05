@@ -20,6 +20,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked -- -D warnings
       - run: cargo clippy --locked --all-targets -- -D warnings
-      # The real-herdr test is #[ignore]d and needs CREW_REAL_HERDR=1, so it never runs here.
+      # Includes stateful, offline CLI flows in tests/execution.rs on both platforms.
+      # Pinned real-herdr integration runs separately on a schedule or manual dispatch.
       - run: cargo test --locked
       - run: sh scripts/build.sh
