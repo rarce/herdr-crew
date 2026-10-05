@@ -64,7 +64,7 @@ Launcher removal also works after the plugin has been uninstalled. Use `--bin-di
 
 ## Quick start
 
-1. Add `.herdr/crew.toml` to your repository (see [the format](#herdrcrewtoml) below) and the generated files to `.gitignore`.
+1. Run `herdr-crew init` inside your Git repository to choose a workflow and create `.herdr/crew.toml`. Review the generated prompts. You can also write [the configuration](#herdrcrewtoml) yourself.
 2. Run `herdr-crew check` from the repository, or `herdr-crew up --dry-run` to see the plan.
 3. Start herdr from the repository with no herdr server running: `cd repo && herdr`. The startup hook creates the workspace, the role tabs and the board when herdr opens its initial workspace there.
 
@@ -78,10 +78,46 @@ The first time `claude` runs in a folder, it asks whether you trust it; answer i
 
 **Trust.** Plugins listed in the herdr marketplace are not reviewed. herdr-crew runs `claude`, `git` and `herdr` on your machine with the prompts in your `crew.toml`; read the source before installing it.
 
+## Configure a crew
+
+```sh
+herdr-crew init
+```
+
+The wizard asks for a project name, a workflow, worktree settings and generated-file ignore rules. It previews the complete configuration before saving. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
+
+| Preset | Agent sessions | Use it for |
+| --- | --- | --- |
+| `solo` (default) | One developer | Focused fixes and sequential implementation |
+| `review` | Lead, developer, reviewer | Explicit review and acceptance of a delivery |
+| `parallel` | Lead, two developers, reviewer | Independent components with agreed interfaces |
+| `research` | Lead, two researchers | Competing hypotheses and evidence before implementation |
+
+These presets are practical starting points, informed by [workflow research and role guidelines](docs/workflows.md). Each prompt defines ownership, evidence to deliver, review and integration. The first role writes the board. All base roles start with `up`; prompts tell them to wait for an explicit task. Communication and task assignment remain part of your team's process.
+
+Use `--yes` for non-interactive setup. Preview a parallel crew with:
+
+```sh
+herdr-crew init --preset parallel --name payments --base origin/main --yes --dry-run
+```
+
+Remove `--dry-run` to save it. `--name` sets the workspace label and role prefix: 1–21 characters, starting with a lowercase letter, followed by lowercase letters, digits, `_` or `-`. Choose a prefix unique among your projects; the default comes from the repository directory.
+
+`review` normally isolates both developer and reviewer in worktrees; `parallel` always does. The wizard suggests a locally known remote branch. `--base REMOTE/BRANCH` must name a configured remote and a valid branch; ensure that branch exists on the remote before starting sessions. No local changes are copied into new worktrees. Without a remote, use `solo`, `research`, or shared-checkout review:
+
+```sh
+herdr-crew init --preset review --shared-checkout --yes
+```
+
+Generated board files, prompts and optional `.worktrees/` entries are appended to `.gitignore`, preserving its contents. Use `--no-ignore` to manage those rules yourself. `.herdr/crew.toml` remains versionable. Calls from subdirectories or worktrees configure the main checkout; `--root DIR` selects another project.
+
 ## Usage
 
 ```text
 herdr-crew [--root DIR] <command>
+  init [--preset solo|review|parallel|research] [--name NAME]
+       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
+                                 configure a crew with the setup wizard
   up [--no-attach] [--dry-run]   start or complete the project's sessions
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
@@ -248,6 +284,8 @@ sh scripts/build.sh
 ```
 
 **Board snapshots.** Board drawings are compared with `tests/snapshots/`; `UPDATE_SNAPSHOTS=1 cargo test` rewrites them.
+
+**Setup tests.** `tests/init.rs` checks each preset, previews, cancellation, existing files, ignore updates and configuration from a worktree using temporary Git repositories. Setup never starts herdr or agents.
 
 **Real-herdr test.** `tests/real_herdr.rs` is ignored by default. It runs against a real herdr with its XDG directories in a short temporary directory. It starts its own `herdr --session crewtest` server there, uses `cat` instead of `claude`, and removes everything when it ends:
 

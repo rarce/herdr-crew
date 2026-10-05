@@ -25,6 +25,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// The main checkout that contains `dir`: the parent of the `git-common-dir`, also from a
 /// worktree (design §2.1).
 pub fn main_root(dir: &Path) -> Result<PathBuf, String> {
+    if git(dir, &["rev-parse", "--is-bare-repository"]).as_deref() == Ok("true") {
+        return Err(format!(
+            "{} is a bare repository; crew needs a working checkout",
+            dir.display()
+        ));
+    }
     let common = git(
         dir,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -47,4 +53,60 @@ pub fn worktree_add(root: &Path, path: &Path, base: &str) -> Result<(), String> 
         &["worktree", "add", "--quiet", "--detach", path, base],
     )
     .map(|_| ())
+}
+
+/// Suggest a locally known remote branch without fetching or changing Git state.
+pub fn default_base(root: &Path) -> Option<String> {
+    let refs = git(
+        root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
+    )
+    .ok()?;
+    let branches: Vec<&str> = refs.lines().filter(|r| !r.ends_with("/HEAD")).collect();
+    let upstream = git(
+        root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+    .ok();
+    let origin_head = git(
+        root,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    )
+    .ok()
+    .and_then(|r| r.strip_prefix("refs/remotes/").map(String::from));
+    upstream
+        .into_iter()
+        .chain(origin_head)
+        .chain(["origin/main".into(), "origin/master".into()])
+        .find(|candidate| branches.contains(&candidate.as_str()))
+        .or_else(|| branches.first().map(|r| r.to_string()))
+}
+
+/// Validate the remote and branch syntax used by the existing worktree planner, offline.
+pub fn validate_base(root: &Path, base: &str) -> Result<(), String> {
+    let (remote, branch) = base
+        .split_once('/')
+        .filter(|(remote, branch)| !remote.is_empty() && !branch.is_empty())
+        .ok_or("use a configured remote and branch, such as origin/main")?;
+    if remote.starts_with('-') || branch.starts_with('-') {
+        return Err("remote and branch names cannot start with -".into());
+    }
+    let remotes = git(root, &["remote"])?;
+    if !remotes.lines().any(|name| name == remote) {
+        return Err(format!(
+            "remote {remote:?} is not configured in this repository"
+        ));
+    }
+    git(root, &["check-ref-format", &format!("refs/heads/{branch}")])
+        .map_err(|_| format!("{branch:?} is not a valid Git branch name"))?;
+    Ok(())
+}
+
+pub fn has_remote(root: &Path) -> Result<bool, String> {
+    git(root, &["remote"]).map(|remotes| !remotes.is_empty())
 }

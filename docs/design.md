@@ -203,6 +203,7 @@ The manifest declares only macOS and Linux. Artifact preparation uses a POSIX sh
 
 ### 4.1 Subcommands
 
+- `init [--preset solo|review|parallel|research] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]`: initial setup without loading an existing configuration (§4.1.1).
 - `up [--no-attach] [--dry-run]`
 - `add <role>`
 - `close <name>`
@@ -211,6 +212,16 @@ The manifest declares only macOS and Linux. Artifact preparation uses a POSIX sh
 - `startup`: only herdr's `[[startup]]` hook runs it (§4.4); it takes no option, not even `--root`.
 
 Global option: `--root DIR`. `--dry-run` prints the plan (§6.2) without running it; it is meant for migrations (§9) and debugging.
+
+### 4.1.1 Initial setup
+
+`init` resolves the main Git checkout like other commands but runs before `load_config`. Its line-based wizard asks for a project prefix, one of four software workflows, an optional remote worktree base and ignore rules. `--yes` uses explicit arguments and defaults without reading stdin; `--dry-run` previews the generated configuration and missing ignore entries without writing.
+
+The generated TOML uses the existing version-1 schema and passes `Config::parse` before any write. Solo development is the default. Reviewed delivery separates coordination, implementation and review; parallel delivery uses two developers and requires worktrees; investigation uses two read-only researchers. The mappings and evidence are in [workflows.md](workflows.md). These are prompt protocols, not runtime task orchestration or messaging.
+
+Worktree defaults come from locally available remote refs, preferring the current upstream and then origin's default branch. Explicit bases require a configured remote and valid branch syntax; setup does not fetch or check the remote server. Shared-checkout review is supported, with one source-code editor and read-only review. Workers in isolated worktrees are instructed to confirm their assigned base, create a branch before committing and validate the exact delivered commit.
+
+The wizard previews the result and asks before saving. It refuses an existing configuration, including a symlink, and opens a new file with `create_new` so a concurrent file is preserved. It appends only missing generated-file ignore entries, without ignoring `crew.toml`; `--no-ignore` disables that update. Cancellation or EOF before saving creates no files. If updating `.gitignore` fails after saving, it reports the valid configuration already created and requests a manual ignore update. It starts no sessions or worktrees and changes no Git refs.
 
 herdr is invoked as `$HERDR_BIN_PATH` when set (herdr actions), else as `herdr` from the `PATH`. Every answer is read as JSON: `.result` on success, `.error.code` on error [vendor]. Some commands, such as `pane run`, print nothing on success [verified].
 
