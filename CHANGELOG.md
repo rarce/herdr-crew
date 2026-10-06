@@ -19,6 +19,8 @@ change between minor versions.
   and a comparison with other ways to run several agents) in `docs/workflows.md`, an
   end-to-end demo in `docs/demo.md`, and the operating limits in the README's quick start.
 - `CONTRIBUTING.md` and a bug report template for GitHub issues.
+- Weekly Dependabot updates for crates and GitHub Actions, and a `cargo audit` workflow
+  that checks `Cargo.lock` against RustSec on dependency changes and weekly.
 - `SECURITY.md`: private vulnerability reporting, supported versions, and what to review
   in a project's `crew.toml` before running it.
 

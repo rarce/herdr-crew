@@ -1,0 +1,21 @@
+# Weekly update pull requests for Rust crates and GitHub Actions. Minor and patch
+# updates are grouped into one pull request per ecosystem; major updates arrive
+# separately because they may need code changes.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]

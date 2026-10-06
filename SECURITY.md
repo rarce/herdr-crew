@@ -23,13 +23,21 @@ fix ships as a new release rather than a backport.
 | 0.2.x   | Yes       |
 | < 0.2   | No        |
 
+## Dependencies
+
+`Cargo.lock` is checked against the [RustSec advisory database](https://rustsec.org/) with
+`cargo audit` when dependencies change and weekly, and Dependabot proposes updates for
+crates and GitHub Actions every week. A vulnerable dependency that affects herdr-crew is
+fixed in a new release.
+
 ## What herdr-crew can do on your machine
 
 These are the boundaries a report would most likely cross:
 
 - **Files.** It writes only inside the project: `.herdr/` (board, schema, prompts, Codex
-  snapshots and bindings), `.gitignore` during `init`, and Git worktrees under
-  `worktrees.dir`. Outside the project it writes the public launcher (`~/.local/bin` or
+  snapshots and bindings), `.gitignore` during `init`, Git worktrees under
+  `worktrees.dir`, and the project lock `herdr-crew.lock` in the repository's Git
+  directory. Outside the project it writes the public launcher (`~/.local/bin` or
   `CREW_BIN_DIR`) and, only through `codex-install`, one entry in
   `$CODEX_HOME/hooks.json`. Paths that leave the project, absolute paths and symlinked
   destinations are rejected.
