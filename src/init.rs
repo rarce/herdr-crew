@@ -15,6 +15,7 @@ const IGNORE_RULES: &[&str] = &[
     "/.herdr/.herdr-crew-*.tmp",
     "/.herdr/status.schema.json",
     "/.herdr/prompts/",
+    "/.herdr/codex/",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +90,7 @@ impl Preset {
 
 #[derive(Default)]
 pub struct Options {
+    pub agent: Option<crate::agent::Kind>,
     pub preset: Option<Preset>,
     pub name: Option<String>,
     pub base: Option<String>,
@@ -107,6 +109,7 @@ enum Kind {
 }
 
 struct Selection {
+    agent: crate::agent::Kind,
     name: String,
     preset: Preset,
     base: Option<String>,
@@ -115,6 +118,8 @@ struct Selection {
 
 #[derive(Serialize)]
 struct Template {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<crate::agent::Kind>,
     version: i64,
     common_prompt: String,
     start_message: &'static str,
@@ -353,6 +358,7 @@ fn choose(
                 true,
             )?);
     Ok(Selection {
+        agent: options.agent.unwrap_or_default(),
         name,
         preset,
         base,
@@ -424,6 +430,7 @@ fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
         "No extra instances are enabled in this configuration. Reconsider the workflow and role ownership before expanding the crew."
     };
     let template = Template {
+        kind: (selection.agent == crate::agent::Kind::Codex).then_some(selection.agent),
         version: config::SUPPORTED_VERSION,
         common_prompt: format!(
             "Workflow: {workflow}\nFollow the repository's contributor instructions and discover its actual build, lint and test commands. Wait for an explicit task before changing files. A handoff includes objective, acceptance criteria, exact base and delivery commits, validation results and limitations. A 'done' report is not acceptance of the integrated result.\nOnly {coordinator} writes {{{{STATUS}}}}, following {{{{SCHEMA}}}}; other roles report status without editing the board. Write the whole board atomically through a .tmp file and rename.\nAdditional sessions cost time and tokens. {expansion}\n"
@@ -598,6 +605,9 @@ fn wizard(
         }
     }
     writeln!(output, "Created {}\nNext: review the prompts, run herdr-crew check, then herdr-crew up --dry-run.\nStart sessions with herdr or herdr-crew up --no-attach when ready.", path.display()).map_err(io_fail)?;
+    if selection.agent == crate::agent::Kind::Codex {
+        writeln!(output, "Codex setup: run herdr-crew codex-install, then review/trust the crew hook in Codex /hooks before launching roles.").map_err(io_fail)?;
+    }
     Ok(())
 }
 
@@ -621,6 +631,7 @@ mod tests {
             let base =
                 matches!(preset, Preset::Review | Preset::Parallel).then(|| "origin/main".into());
             let selection = Selection {
+                agent: crate::agent::Kind::Claude,
                 name: "a".repeat(MAX_PREFIX),
                 preset,
                 base,

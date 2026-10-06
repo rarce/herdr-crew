@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::agent::{CodexOptions, Kind};
 use crate::board::schema;
 use crate::config::{Config, extra_number};
 use crate::prompt;
@@ -54,11 +55,16 @@ pub struct Pane {
     pub tab_id: String,
     /// `agent_session.value` when herdr reports it: the Claude session that can be resumed.
     pub agent_session: Option<String>,
+    pub session_agent: Option<String>,
+    pub session_kind: Option<String>,
+    pub session_source: Option<String>,
     pub cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Agent {
+    #[serde(default, alias = "agent")]
+    pub kind: Option<String>,
     pub name: Option<String>,
     pub workspace_id: String,
     pub tab_id: String,
@@ -81,6 +87,9 @@ struct PaneItem {
 
 #[derive(Deserialize)]
 struct SessionItem {
+    agent: Option<String>,
+    kind: Option<String>,
+    source: Option<String>,
     value: String,
 }
 
@@ -104,6 +113,9 @@ pub fn pane_items(panes: &Value) -> Result<Vec<Pane>, String> {
         .map(|p| Pane {
             id: p.pane_id,
             tab_id: p.tab_id,
+            session_agent: p.agent_session.as_ref().and_then(|s| s.agent.clone()),
+            session_kind: p.agent_session.as_ref().and_then(|s| s.kind.clone()),
+            session_source: p.agent_session.as_ref().and_then(|s| s.source.clone()),
             agent_session: p.agent_session.map(|s| s.value),
             cwd: p.cwd,
         })
@@ -277,6 +289,8 @@ pub enum Step {
     /// Starts the role's agent in a tab the plan has just created; `message` is the first
     /// message of the new conversation (`start_message`).
     StartAgent {
+        kind: Kind,
+        codex: CodexOptions,
         name: String,
         pane: PaneRef,
         prompt: PathBuf,
@@ -338,7 +352,15 @@ impl fmt::Display for Step {
                 )
             }
             Step::WritePrompt { path, .. } => write!(f, "write {}", path.display()),
-            Step::StartAgent { name, pane, .. } => write!(f, "start {name} in {pane}"),
+            Step::StartAgent {
+                name,
+                pane,
+                kind: Kind::Claude,
+                ..
+            } => write!(f, "start {name} in {pane}"),
+            Step::StartAgent {
+                name, pane, codex, ..
+            } => write!(f, "start {name} (codex, {:?}) in {pane}", codex.args()),
             Step::RunInPane { pane, command, .. } => write!(f, "type in {pane}: {command}"),
             Step::WriteSchema { path, .. } => write!(f, "write {}", path.display()),
             Step::SeedStatus { path, .. } => write!(f, "seed {}", path.display()),
@@ -468,12 +490,27 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                     .push((r.name.clone(), Verdict::Occupied(describe(a))));
             } else {
                 p.verdicts.push((r.name.clone(), Verdict::NoAgent));
-                let session = ws.and_then(|w| {
+                let session_pane = ws.and_then(|w| {
                     w.panes
                         .iter()
                         .filter(|pane| same.iter().any(|t| t.id == pane.tab_id))
-                        .find_map(|pane| pane.agent_session.clone())
+                        .find(|pane| pane.agent_session.is_some())
                 });
+                if let Some(agent) = session_pane.and_then(|pane| pane.session_agent.as_deref())
+                    && Kind::parse(agent).is_none()
+                {
+                    p.steps.push(Step::Warn(format!("tab {} has no agent; its recorded {} session must be recovered with that agent\'s own resume command", r.name, agent)));
+                    continue;
+                }
+                let recorded_kind = session_pane
+                    .and_then(|p| p.session_agent.as_deref())
+                    .and_then(Kind::parse)
+                    .unwrap_or(r.kind);
+                let session = session_pane.and_then(|p| p.agent_session.clone());
+                if recorded_kind == Kind::Codex {
+                    p.steps.push(Step::Warn(format!("tab {} has no agent; use `herdr-crew codex-resume <binding>` in that tab with its saved binding from `herdr-crew codex-list` (recorded session: {})", r.name, session.as_deref().unwrap_or("unknown"))));
+                    continue;
+                }
                 p.steps.push(Step::Warn(match session {
                     Some(v) => format!(
                         "tab {} has no agent; restart it there with `claude -r {v} -n {}`",
@@ -663,6 +700,8 @@ fn agent_steps(c: &Config, e: &Env, steps: &mut Vec<Step>, name: &str) {
             new_tab: true,
         },
         None => Step::StartAgent {
+            kind: c.session_role(name).unwrap().kind,
+            codex: c.session_role(name).unwrap().codex.clone(),
             name: name.to_string(),
             pane,
             prompt: path,
@@ -936,12 +975,16 @@ mod tests {
             id: id.into(),
             tab_id: tab.into(),
             agent_session: session.map(Into::into),
+            session_agent: None,
+            session_kind: None,
+            session_source: None,
             cwd: None,
         }
     }
 
     fn agent(name: Option<&str>, ws: &str, tab: &str, pane: &str) -> Agent {
         Agent {
+            kind: None,
             name: name.map(Into::into),
             workspace_id: ws.into(),
             tab_id: tab.into(),
@@ -1243,6 +1286,31 @@ mod tests {
             "tab acme-lead has no agent; restart it there with `claude -r 0f3c -n acme-lead`"
         );
         assert_eq!(p.verdicts[0].1, Verdict::NoAgent);
+    }
+
+    #[test]
+    fn recovery_uses_the_recorded_agent_after_configuration_changes() {
+        let mut c = basic();
+        let mut s = state(&ALL, &ALL[1..4]);
+        let pane = &mut s.workspace.as_mut().unwrap().panes[0];
+        pane.agent_session = Some("saved-codex-id".into());
+        pane.session_agent = Some("codex".into());
+        let p = plan(&c, &s, &settled(&c, Foreground::Other("herdr-crew".into())));
+        let warning = p.warnings().next().unwrap();
+        assert!(warning.contains("codex-list") && warning.contains("codex-resume"));
+        assert!(!warning.contains("claude -r"));
+        assert_eq!(kinds(&p), ["warn"]);
+
+        c.roles[0].kind = Kind::Codex;
+        s.workspace.as_mut().unwrap().panes[0].session_agent = Some("claude".into());
+        let p = plan(&c, &s, &settled(&c, Foreground::Other("herdr-crew".into())));
+        assert!(
+            p.warnings()
+                .next()
+                .unwrap()
+                .contains("claude -r saved-codex-id")
+        );
+        assert_eq!(kinds(&p), ["warn"]);
     }
 
     #[test]

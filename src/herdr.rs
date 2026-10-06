@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::plan::{Foreground, HerdrState, PaneRef, Plan, Step, WorkspaceRef, find_workspace};
-use crate::{files, git};
+use crate::{agent::Kind, codex, files, git};
 
 /// A failed call: herdr's `.error.code` and `.error.message`, or the failure to run it.
 #[derive(Debug, Clone)]
@@ -45,6 +45,15 @@ impl Herdr {
         }
     }
 
+    pub fn require_codex_version(&self) -> Result<(), String> {
+        crate::process::version(
+            self.bin
+                .to_str()
+                .ok_or("Herdr executable path must be UTF-8")?,
+            (0, 9, 3),
+        )
+    }
+
     /// Runs `herdr <args>` and returns `.result` (`null` when a command prints nothing).
     pub fn call<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Value, CallError> {
         let out = Command::new(&self.bin)
@@ -69,6 +78,7 @@ impl Herdr {
                     .to_string(),
             }),
             Some(v) if v.get("result").is_some() => Ok(v["result"].clone()),
+            Some(v) if out.status.success() => Ok(v),
             _ if out.status.success() => Ok(Value::Null),
             _ => Err(CallError {
                 code: "output".into(),
@@ -98,6 +108,8 @@ impl Herdr {
             .env_remove("CLAUDECODE")
             .env_remove("CLAUDE_CODE_CHILD_SESSION")
             .env_remove("CLAUDE_CODE_ENTRYPOINT")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CREW_CODEX_BINDING")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -306,6 +318,34 @@ pub fn execute(
             _ => {}
         }
     }
+    for step in &plan.steps {
+        if let Step::StartAgent {
+            name,
+            kind: Kind::Codex,
+            codex: options,
+            ..
+        } = step
+        {
+            codex::validate_runtime(&c.root)?;
+            herdr.require_codex_version()?;
+            codex::context_prompt(c, name, &crate::prompt::render(c, name, &crate::binary()))?;
+            let cwd = if c.session_role(name).unwrap().worktree {
+                c.worktree_path(name).unwrap()
+            } else {
+                c.root.clone()
+            };
+            codex::integration::preflight(&cwd, options, &c.root)?;
+            let status = herdr
+                .call(&["status", "server", "--json"])
+                .map_err(|e| e.to_string())?;
+            if status["version"]
+                .as_str()
+                .is_none_or(|v| !codex::supported_herdr(v))
+            {
+                return Err("Codex crews require Herdr server 0.9.3 or newer".into());
+            }
+        }
+    }
     let mut workspace = state.workspace.as_ref().map(|w| w.id.clone());
     let mut initial: Option<(String, String)> = None; // initial tab and pane of a new workspace
     let mut panes: HashMap<String, String> = HashMap::new(); // label of a created tab -> pane
@@ -320,16 +360,23 @@ pub fn execute(
         match step {
             Step::CreateWorkspace { label, cwd } => {
                 let cwd = cwd.to_string_lossy();
+                let mut args: Vec<String> = [
+                    "workspace",
+                    "create",
+                    "--cwd",
+                    &cwd,
+                    "--label",
+                    label,
+                    "--no-focus",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+                if c.roles.first().is_some_and(|role| role.kind == Kind::Codex) {
+                    args.extend(codex::pane_environment()?);
+                }
                 let r = herdr
-                    .call(&[
-                        "workspace",
-                        "create",
-                        "--cwd",
-                        &cwd,
-                        "--label",
-                        label,
-                        "--no-focus",
-                    ])
+                    .call(&args)
                     .map_err(|e| format!("could not create workspace \"{label}\": {e}"))?;
                 let id = str_at(&r, &["workspace", "workspace_id"])?;
                 initial = Some((
@@ -388,18 +435,27 @@ pub fn execute(
                     }
                 };
                 let cwd = cwd.to_string_lossy();
+                let mut args: Vec<String> = [
+                    "tab",
+                    "create",
+                    "--workspace",
+                    &ws,
+                    "--cwd",
+                    &cwd,
+                    "--label",
+                    label,
+                    "--no-focus",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+                if c.session_role(label)
+                    .is_some_and(|role| role.kind == Kind::Codex)
+                {
+                    args.extend(codex::pane_environment()?);
+                }
                 let r = herdr
-                    .call(&[
-                        "tab",
-                        "create",
-                        "--workspace",
-                        &ws,
-                        "--cwd",
-                        &cwd,
-                        "--label",
-                        label,
-                        "--no-focus",
-                    ])
+                    .call(&args)
                     .map_err(|e| format!("could not create tab \"{label}\": {e}"))?;
                 panes.insert(label.clone(), str_at(&r, &["root_pane", "pane_id"])?);
             }
@@ -409,9 +465,29 @@ pub fn execute(
                 pane,
                 prompt,
                 message,
+                kind,
+                codex: options,
             } => {
                 let pane = pane_of(pane, &panes)?;
-                start_agent(herdr, name, &pane, prompt, message.as_deref(), out)?;
+                if *kind == Kind::Codex {
+                    let rendered = std::fs::read_to_string(prompt).map_err(|e| e.to_string())?;
+                    codex::prepare(herdr, c, name, &pane, &rendered, options)?;
+                }
+                let native = if *kind == Kind::Claude {
+                    vec![
+                        "-n".into(),
+                        name.clone(),
+                        "--append-system-prompt-file".into(),
+                        prompt.display().to_string(),
+                    ]
+                } else {
+                    let mut effective = options.clone();
+                    effective.resolve_dirs(&c.root)?;
+                    let mut args = effective.args();
+                    args.extend(["-c".into(), "features.hooks=true".into()]);
+                    args
+                };
+                start_agent(herdr, name, &pane, *kind, &native, message.as_deref(), out)?;
             }
             Step::RunInPane {
                 pane,
@@ -442,29 +518,28 @@ fn start_agent(
     herdr: &Herdr,
     name: &str,
     pane: &str,
-    prompt: &Path,
+    kind: Kind,
+    native: &[String],
     message: Option<&str>,
     out: &mut Output,
 ) -> Result<(), String> {
-    let prompt = prompt.to_string_lossy();
-    let mut args = vec![
+    let mut args: Vec<String> = [
         "agent",
         "start",
         name,
         "--kind",
-        "claude",
+        kind.as_str(),
         "--pane",
         pane,
         "--timeout",
         "60000",
         "--",
-        "-n",
-        name,
-        "--append-system-prompt-file",
-        &prompt,
-    ];
-    // The initial prompt, a positional argument that herdr quotes like the others.
-    args.extend(message);
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    args.extend_from_slice(native);
+    args.extend(message.map(str::to_string));
     let start = Instant::now();
     loop {
         match herdr.call(&args) {
@@ -476,7 +551,7 @@ fn start_agent(
             Err(e) if e.code == "agent_pane_busy" && start.elapsed() < Duration::from_secs(30) => {
                 sleep(Duration::from_secs(1));
             }
-            // Claude runs but waits for an answer (e.g. trusting the folder).
+            // The agent runs but waits for an answer (e.g. trusting the folder).
             Err(e) if e.code == "agent_not_ready" => {
                 out.warn(
                     herdr,

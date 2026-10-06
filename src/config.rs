@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use toml::de::{DeTable, DeValue};
 
+use crate::agent::{CODEX_KEYS, CodexOptions, Kind};
 use crate::{files, prompt};
 
 pub const CONFIG_FILE: &str = ".herdr/crew.toml";
@@ -36,6 +37,8 @@ impl fmt::Display for Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub root: PathBuf,
+    pub kind: Kind,
+    pub codex: CodexOptions,
     pub label: String,
     pub board: Board,
     pub worktrees: Option<Worktrees>,
@@ -64,6 +67,8 @@ pub struct Worktrees {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Role {
+    pub kind: Kind,
+    pub codex: CodexOptions,
     pub name: String,
     pub prompt: String,
     pub worktree: bool,
@@ -75,6 +80,10 @@ pub struct Role {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    #[serde(default)]
+    kind: Kind,
+    #[serde(default)]
+    codex: CodexOptions,
     version: i64,
     workspace: RawWorkspace,
     board: RawBoard,
@@ -109,6 +118,8 @@ struct RawWorktrees {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRole {
+    kind: Option<Kind>,
+    codex: Option<CodexOptions>,
     name: String,
     prompt: String,
     #[serde(default)]
@@ -121,6 +132,8 @@ struct RawRole {
 /// Known keys per table; checked before `serde` so that all of them are reported at once.
 const ROOT_KEYS: &[&str] = &[
     "version",
+    "kind",
+    "codex",
     "workspace",
     "board",
     "worktrees",
@@ -129,11 +142,20 @@ const ROOT_KEYS: &[&str] = &[
     "roles",
 ];
 const TABLE_KEYS: &[(&str, &[&str])] = &[
+    ("codex", CODEX_KEYS),
     ("workspace", &["label"]),
     ("board", &["tab", "file", "writer"]),
     ("worktrees", &["dir", "base"]),
 ];
-const ROLE_KEYS: &[&str] = &["name", "prompt", "worktree", "extra", "start_message"];
+const ROLE_KEYS: &[&str] = &[
+    "name",
+    "prompt",
+    "worktree",
+    "extra",
+    "start_message",
+    "kind",
+    "codex",
+];
 
 impl Config {
     /// Parses and validates `text`, the content of `<root>/.herdr/crew.toml`.
@@ -185,7 +207,18 @@ impl Config {
         if raw.roles.is_empty() {
             err("roles[] is empty: at least one role is needed".to_string());
         }
+        for problem in raw.codex.problems() {
+            err(format!("codex.{problem}"));
+        }
         for (i, r) in raw.roles.iter().enumerate() {
+            if let Some(options) = &r.codex {
+                if r.kind.unwrap_or(raw.kind) != Kind::Codex {
+                    err(format!("roles[{i}].codex requires kind = \"codex\""));
+                }
+                for problem in options.problems() {
+                    err(format!("roles[{i}].codex.{problem}"));
+                }
+            }
             if !is_agent_name(&r.name) {
                 err(format!(
                     "roles[{i}].name \"{}\": must match [a-z][a-z0-9_-]{{0,31}}",
@@ -273,6 +306,8 @@ impl Config {
         }
         Ok(Config {
             root: root.to_path_buf(),
+            kind: raw.kind,
+            codex: raw.codex.clone(),
             label: raw.workspace.label,
             board: Board {
                 tab: raw.board.tab,
@@ -289,6 +324,8 @@ impl Config {
                 .roles
                 .into_iter()
                 .map(|r| Role {
+                    kind: r.kind.unwrap_or(raw.kind),
+                    codex: r.codex.unwrap_or_default().inherit(&raw.codex),
                     name: r.name,
                     prompt: r.prompt,
                     worktree: r.worktree,
@@ -395,6 +432,11 @@ fn unknown_keys(root: &DeTable<'_>) -> Vec<(Range<usize>, String)> {
             for (i, item) in items.iter().enumerate() {
                 if let DeValue::Table(t) = item.get_ref() {
                     check(t, ROLE_KEYS, &format!("roles[{i}]"));
+                    if let Some(value) = t.get("codex")
+                        && let DeValue::Table(options) = value.get_ref()
+                    {
+                        check(options, CODEX_KEYS, &format!("roles[{i}].codex"));
+                    }
                 }
             }
         }
@@ -402,7 +444,7 @@ fn unknown_keys(root: &DeTable<'_>) -> Vec<(Range<usize>, String)> {
     out
 }
 
-/// Why a `start_message` cannot be passed as `claude`'s initial prompt, if it cannot: herdr types
+/// Why a `start_message` cannot be passed as an agent's initial prompt, if it cannot: herdr types
 /// the command into the pane's shell, which rejects newlines, so no control character is
 /// accepted, and a leading `-` would read as an option. An empty value is allowed: in a role it
 /// means no message.
@@ -412,7 +454,7 @@ fn start_message_problem(m: &str) -> Option<String> {
     } else if m.len() > MAX_START_MESSAGE {
         Some(format!("{} bytes, at most {MAX_START_MESSAGE}", m.len()))
     } else if m.starts_with('-') {
-        Some("must not start with \"-\", which claude would read as an option".into())
+        Some("must not start with \"-\", which the agent would read as an option".into())
     } else {
         None
     }
@@ -567,11 +609,53 @@ prompt = '''You are {{NAME}}.'''
     }
 
     #[test]
-    fn kind_and_args_are_unknown_keys() {
+    fn args_remain_unsupported() {
         let e = errors(&format!("{MIN}kind = \"codex\"\nargs = [\"-x\"]\n"));
-        assert_eq!(e.len(), 2);
-        assert!(e[0].ends_with("unknown key \"kind\" in roles[0]"), "{e:?}");
-        assert!(e[1].ends_with("unknown key \"args\" in roles[0]"), "{e:?}");
+        assert_eq!(e.len(), 1);
+        assert!(e[0].ends_with("unknown key \"args\" in roles[0]"), "{e:?}");
+    }
+
+    #[test]
+    fn agent_defaults_role_overrides_and_extras() {
+        let text = WORKTREES
+            .replace("version = 1", "version = 1\nkind = \"codex\"")
+            .replace(
+                "[workspace]",
+                "[codex]\nmodel = \"account-model\"\nadditional_dirs = [\"/board\"]\n[workspace]",
+            )
+            .replace(
+                "name = \"globex-lead\"",
+                "name = \"globex-lead\"\nkind = \"claude\"",
+            );
+        let c = Config::parse(&text, Path::new("/r/globex")).unwrap();
+        assert_eq!(c.roles[0].kind, Kind::Claude);
+        assert_eq!(c.roles[1].kind, Kind::Codex);
+        assert_eq!(
+            c.session_role("globex-dev-2")
+                .unwrap()
+                .codex
+                .model
+                .as_deref(),
+            Some("account-model")
+        );
+        assert!(basic().roles.iter().all(|role| role.kind == Kind::Claude));
+    }
+
+    #[test]
+    fn codex_options_require_a_codex_role_and_unknown_keys_have_positions() {
+        assert!(
+            errors(&format!("{MIN}[roles.codex]\nmodel = \"custom\"\n"))
+                .iter()
+                .any(|error| error.contains("requires kind"))
+        );
+        let errors = errors(&format!(
+            "{MIN}kind = \"codex\"\n[roles.codex]\nmodle = \"custom\"\n"
+        ));
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].contains(":12:1: unknown key \"modle\" in roles[0].codex"),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -794,7 +878,7 @@ prompt = '''You are {{NAME}}.'''
         let dash = format!("{MIN}start_message = '--help'\n");
         assert!(
             errors(&dash)[0]
-                .ends_with("must not start with \"-\", which claude would read as an option")
+                .ends_with("must not start with \"-\", which the agent would read as an option")
         );
     }
 

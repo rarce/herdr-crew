@@ -18,12 +18,25 @@ jobs:
     timeout-minutes: 20
     env:
       HERDR_VERSION: 0.9.3
+      CODEX_VERSION: 0.160.1
       CREW_REAL_HERDR: '1'
+      CREW_REAL_CODEX: '1'
       # Short socket paths also fit macOS's 104-byte sun_path limit.
       TMPDIR: /tmp
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned Codex for local protocol inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/codex-tools"
+          npm install --no-audit --no-fund --prefix "$tools" "@openai/codex@$CODEX_VERSION"
+          "$tools/node_modules/.bin/codex" --version
+          printf '%s\n' "$tools/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Install pinned herdr in the runner's temporary directory
         shell: bash
         run: |
@@ -52,5 +65,7 @@ jobs:
           chmod +x "$tools/herdr"
           "$tools/herdr" --version
           printf '%s\n' "$tools" >> "$GITHUB_PATH"
-      - name: Test isolated sessions, startup and offline launcher resolution
-        run: cargo test --locked --test real_herdr --test launcher -- --ignored --nocapture
+      - name: Test isolated sessions, startup, configured Codex restoration and launcher resolution
+        run: cargo test --locked --test real_herdr --test codex_herdr --test launcher -- --ignored --nocapture
+      - name: Inspect real Codex developer context using a local mock provider
+        run: cargo test --locked --test execution real_codex_sends -- --ignored --nocapture

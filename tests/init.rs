@@ -11,6 +11,27 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const CREW: &str = env!("CARGO_BIN_EXE_herdr-crew");
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn codex_setup_selects_agent_without_installing_hooks_or_starting_it() {
+    let repo = Repo::new(false);
+    success(
+        repo.command()
+            .args(["init", "--agent", "codex", "--yes"])
+            .output()
+            .unwrap(),
+    );
+    let text = fs::read_to_string(repo.root.join(".herdr/crew.toml")).unwrap();
+    let config: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(config["kind"].as_str(), Some("codex"));
+    assert!(!repo.root.join(".codex").exists());
+    assert!(!repo.root.join("unexpected-agent-call").exists());
+    assert!(
+        fs::read_to_string(repo.root.join(".gitignore"))
+            .unwrap()
+            .contains("/.herdr/codex/")
+    );
+}
+
 struct Repo {
     root: PathBuf,
 }

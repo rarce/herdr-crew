@@ -1,8 +1,8 @@
 # herdr-crew
 
-**Bring up a team of Claude Code sessions, one per role, from a file you keep in the repository.**
+**Bring up a team of Claude Code and Codex sessions, one per role, from a file you keep in the repository.**
 
-herdr-crew is a [herdr](https://herdr.dev/) plugin. You describe the project's roles once in `.herdr/crew.toml`: their prompts, whether each works in its own git worktree, and which one coordinates. After that, `cd repo && herdr` opens the project's workspace with a tab per role running `claude`, plus a tab with a live status board.
+herdr-crew is a [herdr](https://herdr.dev/) plugin. You describe the project's roles once in `.herdr/crew.toml`: their prompts, whether each works in its own git worktree, and which one coordinates. After that, `cd repo && herdr` opens the project's workspace with a tab per role running its selected coding agent, plus a tab with a live status board.
 
 ![The status board of an example project, tinylink: one box per role with what it is doing now and next, what the sessions are waiting on from you, and recent events](docs/images/board.png)
 
@@ -18,7 +18,8 @@ The design, with its decisions and the herdr behaviour they rely on, is in [docs
 
 - herdr 0.9.1 or later, on macOS or Linux
 - Rust (stable) with `cargo`: herdr builds the plugin from source when it installs it
-- `git` and `claude` (Claude Code) on the `PATH`
+- `git` and the selected agents (`claude`, `codex`, or both) on the `PATH`
+- Codex roles require herdr 0.9.3+, Codex CLI 0.160.1+, the public crew launcher, and the trusted crew hook described below
 
 ## Install
 
@@ -45,17 +46,19 @@ git clone https://github.com/rarce/herdr-crew
 cd herdr-crew
 sh scripts/build.sh
 herdr plugin link "$PWD"
-# Optional: expose the linked plugin as herdr-crew on your PATH.
+# Expose the linked plugin on PATH (required for Codex hook and recovery).
 target/release/herdr-crew-launcher --install-launcher
 ```
 
 `plugin link` does not build anything, so run `sh scripts/build.sh` after each update. Without `--install-launcher`, the script only prepares the checkout. The binary's `check` command validates the configuration, prints its location and warns when a running herdr server means `herdr` will only attach.
 
-The binary also works without a registered plugin: run `/path/to/checkout/bin/herdr-crew up` from inside the project, or use `--root`.
+For Claude crews, the binary also works without a registered plugin: run `/path/to/checkout/bin/herdr-crew up` from inside the project, or use `--root`.
 
 Remove the public launcher and the plugin with:
 
 ```sh
+# If you installed the Codex crew hook, remove it first:
+herdr-crew codex-uninstall
 herdr-crew --uninstall-launcher
 herdr plugin uninstall herdr-crew
 ```
@@ -70,13 +73,76 @@ Launcher removal also works after the plugin has been uninstalled. Use `--bin-di
 
 If a herdr server is already running, `herdr` only attaches and its startup hook does not run. Focus this project's workspace and invoke the `herdr-crew.up` action (or run `herdr plugin action invoke herdr-crew.up`). If the project has no workspace yet, run `herdr-crew up --no-attach` from its directory. This also covers a restored server that ignored the project's launch directory. Without the public launcher, find `plugin_root` with `herdr plugin list --plugin herdr-crew --json` and run `<plugin_root>/bin/herdr-crew` directly. A live agent in an unrelated tab such as `1` will prevent new roles from starting; rename that tab to its role if it belongs to the crew, or close it after saving its work.
 
-Each role's tab runs `claude` with its prompt, in the main checkout or in its own worktree, and gets the `start_message` as its first message:
+Each role's tab runs its selected agent with its prompt, in the main checkout or in its own worktree, and gets the `start_message` as its first message:
 
 ![The tinylink-dev tab: Claude Code started in .worktrees/tinylink-dev, confirming its role](docs/images/role-dev.png)
 
 The first time `claude` runs in a folder, it asks whether you trust it; answer in each new tab, including each new worktree. The `start_message` is sent anyway and runs once you answer.
 
-**Trust.** Plugins listed in the herdr marketplace are not reviewed. herdr-crew runs `claude`, `git` and `herdr` on your machine with the prompts in your `crew.toml`; read the source before installing it.
+**Trust.** Plugins listed in the herdr marketplace are not reviewed. herdr-crew runs the selected agent, `git` and `herdr` on your machine with the prompts in your `crew.toml`; read the source before installing it.
+
+## Codex and mixed crews
+
+Initialize a Codex crew with:
+
+```sh
+herdr-crew init --agent codex --yes
+herdr-crew codex-install
+```
+
+Open Codex with your usual login and use `/hooks` to review and trust `herdr-crew codex-hook`. Then run `herdr-crew check` and `herdr-crew up --no-attach`. Hook trust is required before launch; crew never bypasses it. Installation merges one stable `SessionStart` handler into `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), preserving native Herdr hooks, other events, user configuration and credentials. `init` and normal crew commands do not install it. Remove only the crew handler with `codex-uninstall`.
+
+The configuration defaults to Claude when `kind` is absent. Set `kind = "codex"` at the top level for a project default, and override it on individual roles:
+
+```toml
+version = 1
+kind = "codex"
+
+[codex]
+sandbox = "workspace-write"
+approval_policy = "on-request"
+
+[workspace]
+label = "payments"
+[board]
+tab = "payments-status"
+writer = "payments-lead"
+
+[[roles]]
+name = "payments-lead"
+kind = "claude"
+prompt = "Coordinate the delivery and maintain the board."
+
+[[roles]]
+name = "payments-dev"
+prompt = "Implement only the assigned component."
+extra = true
+
+[roles.codex]
+profile = "development"
+```
+
+`[codex]` sets defaults; `[roles.codex]` overrides individual options. Extra instances inherit their base role's effective kind and options. Model and profile choices are optional and remain yours. Profiles must already exist as `$CODEX_HOME/<name>.config.toml`. Keep hook configuration and trust in the base `config.toml` or `hooks.json`: Codex 0.160.1 does not support profiles on its inspection server, so crew rejects profiles containing `[hooks]` rather than inspecting different hooks from those the session would use.
+
+| Codex option | Values |
+| --- | --- |
+| `model` | An available model ID; otherwise inherit the user's configuration |
+| `profile` | Existing profile name, using letters, digits, `_` and `-` |
+| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; the selected model must support it |
+| `sandbox` | `read-only`, `workspace-write`, `danger-full-access` |
+| `approval_policy` | `on-request`, `never` |
+| `search` | `disabled`, `cached`, `live` |
+| `additional_dirs` | Existing directories, absolute or relative to the main checkout; `[]` clears inherited additional roots |
+
+Absent options inherit Codex settings. Codex-only role options on a Claude role are errors, and arbitrary `args` are unsupported. Crew starts the interactive CLI through native Herdr `agent start`, using `--no-daemon` to keep each pane's hook context local.
+
+Role context is additive; crew does not replace Codex's built-in instructions or edit shared repository `AGENTS.md` files. The complete rendered context, including absolute board guidance, is capped at 64 KiB; larger prompts fail before launching. The handler disables Codex's default context spilling within that bound. See [Codex hooks](https://learn.chatgpt.com/docs/hooks).
+
+Each activation saves instructions, explicit options, working directory and Codex home under `.herdr/codex/`. `init` adds `/.herdr/codex/` to `.gitignore`; add that rule when upgrading an existing crew. A conversation keeps its snapshot across resume, clear and compaction, even when `crew.toml` changes. Herdr persists a short command that invokes the public launcher to recover the conversation with its saved settings. Keep those runtime files and the main checkout available for restoration. Deleted or incompatible snapshots produce an error rather than a new conversation.
+
+For manual recovery, find the binding with `herdr-crew codex-list`, then run `herdr-crew codex-resume <binding>` inside the matching role tab and checkout. Recovery never resends `start_message`. Renamed tabs/workspaces and duplicate session ownership are rejected. Following a Herdr restart, crew's `startup` continues to repair only the board.
+
+Codex sandbox permissions remain in effect. Git metadata can require approvals even in workspace-write mode. If a board writer uses a worktree, explicitly include the main checkout's `.herdr` directory in `additional_dirs` when it needs to write the board. Crew supplies absolute board/schema paths and does not automatically grant access to the entire main checkout. `check` validates only the agents selected by the crew; repairing an existing board does not require a working Codex installation or trusted hook.
 
 ## Configure a crew
 
@@ -115,7 +181,7 @@ Generated board files, prompts and optional `.worktrees/` entries are appended t
 
 ```text
 herdr-crew [--root DIR] <command>
-  init [--preset solo|review|parallel|research] [--name NAME]
+  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex]
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
   up [--no-attach] [--dry-run]   start or complete the project's sessions
@@ -123,6 +189,10 @@ herdr-crew [--root DIR] <command>
   close <name>                   close the tab of an extra instance (keeps its worktree)
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
+  codex-install                  install the crew hook; review it in Codex /hooks
+  codex-uninstall                remove only the crew hook
+  codex-list                     list saved role bindings and Codex session IDs
+  codex-resume <binding>          recover a saved Codex session in its role tab
   check                          validate the configuration and the dependencies
   startup                        herdr's startup hook: bring up or repair the projects in herdr
 ```
@@ -182,6 +252,10 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
 
 | Key                | Required         | Meaning                                                                                                                                                                                             |
 | ------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kind`             | no               | Project agent default: `claude` or `codex`; absent means Claude. |
+| `codex`            | no               | Typed defaults for Codex roles, described above. |
+| `roles[].kind`     | no               | Overrides the project agent default. |
+| `roles[].codex`    | no               | Overrides individual Codex defaults. Requires an effective Codex kind. |
 | `version`          | yes              | Always `1`.                                                                                                                                                                                         |
 | `common_prompt`    | no               | Text appended to every role's prompt.                                                                                                                                                               |
 | `start_message`    | no               | The first message of each new conversation, one line of at most 200 bytes. Sent only when a tab is created (`up`, the startup hook's first bring-up, `add`), never on a resume or a repair. It costs one request per role on every fresh start, so it should not ask for changes to the tree. |
@@ -209,7 +283,7 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
   | `{{SCHEMA}}`   | `.herdr/status.schema.json`             |
   | `{{LAUNCHER}}` | the binary's absolute path              |
 
-- The result is written to `.herdr/prompts/<name>.txt` and passed with `claude --append-system-prompt-file`.
+- The result is written to `.herdr/prompts/<name>.txt`. Claude receives it with `--append-system-prompt-file`; Codex receives a saved copy through the crew hook as additional developer context.
 - Use literal strings (`'''…'''`): they keep backslashes as written. Basic strings (`"""…"""`) are accepted too.
 
 **Validation.** Unknown keys and unknown placeholders are errors, and every error is reported at once with its line and column:
@@ -226,6 +300,7 @@ Add the generated files to `.gitignore`:
 /.herdr/.herdr-crew-*.tmp
 /.herdr/status.schema.json
 /.herdr/prompts/
+/.herdr/codex/
 ```
 
 `board.file` and `worktrees.dir` must name paths inside the project: absolute paths,
@@ -324,13 +399,25 @@ CREW_REAL_HERDR=1 cargo test --test real_herdr -- --ignored --nocapture
 CREW_REAL_HERDR=1 cargo test --locked --test launcher -- --ignored
 ```
 
-Both real-herdr tests clear inherited `HERDR_*` and `CLAUDE*` variables and use temporary configuration. The session test also checks its socket location before starting agents; neither modifies the user's herdr configuration.
+The real-herdr tests clear inherited `HERDR_*` and `CLAUDE*` variables and use temporary configuration. The session test also checks its socket location before starting agents; neither modifies the user's herdr configuration.
 
 `.github/workflows/real-herdr.yml` runs both integrations weekly and on manual
 dispatch on Linux and macOS. It downloads herdr 0.9.3 into the runner's temporary
 directory and checks its pinned SHA-256 digest. Upgrade the version and the asset
-digests together when changing the tested host version. Claude remains simulated.
+digests together when changing the tested host version. Claude and Codex remain simulated. The Codex lifecycle test verifies exact hook context, native-hook coexistence, persisted custom recovery, and options/instructions after an isolated server restart:
+
+```sh
+CREW_REAL_HERDR=1 cargo test --locked --test codex_herdr -- --ignored --nocapture
+```
+
+A separate opt-in test uses the installed Codex 0.160.1+ CLI, a temporary Codex home and a local mock Responses provider to verify that a large crew hook output reaches the outgoing request as developer guidance while built-in instructions remain intact:
+
+```sh
+CREW_REAL_CODEX=1 cargo test --locked --test execution real_codex_sends -- --ignored --nocapture
+```
+
+It trusts only the exact hook the test itself installs in its temporary home. It uses no real credentials or external model. Normal tests exercise both agents, mixed crews, option inheritance, hook trust, context ownership, clear/compact, renamed panes, deleted snapshots and configured recovery. The two hook/RPC tests bind temporary Unix sockets.
 
 ## License
 
-[MIT](LICENSE). herdr-crew is an independent project, not affiliated with herdr or Anthropic.
+[MIT](LICENSE). herdr-crew is an independent project, not affiliated with herdr, Anthropic or OpenAI.

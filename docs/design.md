@@ -1,6 +1,6 @@
-# herdr-crew: design of a herdr plugin for role-based Claude Code sessions
+# herdr-crew: design of a herdr plugin for role-based coding-agent sessions
 
-**Date:** 2026-09-26, updated 2026-10-05. **Status:** the design the code honours. Step 1 of the construction table (§11) is built: the binary, its tests and a real test against an isolated herdr. The step-1 hypotheses are verified, except the implicit `.exe` on Windows. The startup hook (§4.4), plugin artifact preparation and public CLI launcher (§8) are built too.
+**Date:** 2026-09-26, updated 2026-10-06. **Status:** the design the code honours. Step 1 of the construction table (§11) is built: the binary, its tests and a real test against an isolated herdr. The step-1 hypotheses are verified, except the implicit `.exe` on Windows. The startup hook (§4.4), plugin artifact preparation and public CLI launcher (§8) are built too.
 
 Where claims come from:
 
@@ -13,7 +13,7 @@ Where claims come from:
 
 `herdr-crew` is a Rust binary packaged as a herdr plugin. It reads one versioned file in each repository, `.herdr/crew.toml`, and does two things:
 
-- it starts, in a herdr workspace, one tab per Claude Code session with its role prompt;
+- it starts, in a herdr workspace, one tab per Claude Code or Codex session with its role prompt;
 - it draws the `.herdr/status.json` board in another tab.
 
 It replaces the per-project launcher scripts and board viewers that teams tend to copy from project to project. Those copies diverge: role order, schema, one flavour per shell. What really differs between projects is data:
@@ -28,12 +28,12 @@ That goes into the configuration file; the logic lives in one binary.
 
 **Out of scope:**
 
-- **Installing dependencies.** The plugin runs inside herdr and only needs `git` and `claude`; `check` reports what is missing with its install command, without running it.
+- **Installing dependencies.** The plugin runs inside herdr and needs `git` and the configured agent CLIs; `check` reports what is missing with its install command, without running it.
 - **Writing the board.** Only the coordinating role writes it, as its role prompt says.
 - **Reading agent state for the board.**
-- **Agents other than Claude Code.**
+- **Agents other than Claude Code and Codex.**
 - **Touching `~/.config/herdr/config.toml` or `plugins.json`.** Linking or installing the plugin is the user's decision.
-- **`[[events]]` and `[[link_handlers]]`.** The only hook is `[[startup]]` (§4.4).
+- **`[[events]]` and `[[link_handlers]]`.** The Herdr plugin hook is `[[startup]]` (§4.4); Codex additionally uses an explicitly installed session hook.
 
 **Invariants:**
 
@@ -41,7 +41,7 @@ That goes into the configuration file; the logic lives in one binary.
 2. **Idempotency.** Running `up` twice duplicates no workspace, tab or agent; the second run only creates what is missing.
 3. **Isolation between projects.** `up` only creates or changes things in the workspace with the project's label, and never reuses another project's workspace or tab. herdr agent names are global, so a live agent carrying a role's name, in any workspace, blocks that role (§10).
 4. **The main checkout.** The board and the generated files live there even when the call comes from a worktree.
-5. **Project-local runtime.** Crew commands write nothing outside the project's repository, except the worktrees the project declares. Installation separately prepares the plugin artifact and installs its public launcher in the user-selected bin directory (§8).
+5. **Project-local runtime.** Crew commands write nothing outside the project's repository, except the worktrees the project declares. Explicit `codex-install`/`codex-uninstall` also manage the crew entry in the user's Codex hooks file. Installation separately prepares the plugin artifact and installs its public launcher in the user-selected bin directory (§8).
 6. **Only an idle shell.** It never types into a pane that runs anything other than its shell (§4.2 step 9).
 7. **A robust viewer.** An unreadable or off-schema board is shown as such; it never brings the viewer down.
 8. **Nothing base is closed.** It never removes a worktree or closes a base role; `close` only closes the tab of an extra instance.
@@ -50,7 +50,7 @@ That goes into the configuration file; the logic lives in one binary.
 
 ### 2.1 Name and discovery
 
-The file is `<root>/.herdr/crew.toml` and it is versioned. Projects ignore only the generated files in `.herdr/`: `status.json`, its `.tmp`, `status.schema.json`, `.herdr-crew-*.tmp` and `prompts/`.
+The file is `<root>/.herdr/crew.toml` and it is versioned. Projects ignore only the generated files in `.herdr/`: `status.json`, its `.tmp`, `status.schema.json`, `.herdr-crew-*.tmp` and `prompts/`, plus `codex/` activation snapshots and bindings.
 
 The root is resolved as follows; the first rule that yields a directory wins:
 
@@ -62,7 +62,7 @@ The root is resolved as follows; the first rule that yields a directory wins:
    - Agents, scripts and any other project use the binary directly (`{{LAUNCHER}} up`), never `plugin action invoke`.
 3. Outside an action, the current directory.
 
-From that directory, Git's absolute `git-dir` and `git-common-dir` distinguish a main checkout from a linked worktree. Main checkouts, including submodules and repositories with separate metadata, use `git rev-parse --show-toplevel`. For a linked worktree, the parent of the common directory is a candidate only: its working checkout must use that same common directory as its own Git directory. If it cannot be verified, the command fails and asks to run from the main checkout rather than writing in metadata or an unrelated repository. Bare repositories are rejected. Without a git repository it fails, because worktrees require one. Except for `init`, a missing `<root>/.herdr/crew.toml` fails naming the path it looked for.
+From that directory, Git's absolute `git-dir` and `git-common-dir` distinguish a main checkout from a linked worktree. Main checkouts, including submodules and repositories with separate metadata, use `git rev-parse --show-toplevel`. For a linked worktree, the parent of the common directory is a candidate only: its working checkout must use that same common directory as its own Git directory. If it cannot be verified, the command fails and asks to run from the main checkout rather than writing in metadata or an unrelated repository. Bare repositories are rejected. Without a git repository it fails, because worktrees require one. For ordinary project commands other than `init`, a missing `<root>/.herdr/crew.toml` fails naming the path it looked for.
 
 ### 2.2 Schema
 
@@ -107,7 +107,7 @@ A project without worktrees uses the same schema without `[worktrees]`, `worktre
 
 - Examples use TOML literal strings (`'''…'''`) because basic strings (`"""…"""`) process backslash escapes, for example in a Windows path. Basic strings are still accepted.
 - The session's prompt is its role's prompt, then `common_prompt`, separated by a blank line, with the placeholders replaced.
-- The result is written to `.herdr/prompts/<name>.txt` (ignored) and passed as a file, not inline. herdr starts the agent by typing the command into the pane's shell: an inline prompt of about 1.7 KB was cut mid-quote there, and herdr rejects newlines outright [verified].
+- The result is written to `.herdr/prompts/<name>.txt` (ignored). Claude receives that file; Codex receives a saved copy through its context hook. herdr starts the agent by typing the command into the pane's shell: an inline prompt of about 1.7 KB was cut mid-quote there, and herdr rejects newlines outright [verified].
 - An extra instance uses its base role's prompt.
 
 **First message: `start_message`.** Optional, at the top level and per role; a role's value replaces the top-level one, and an empty role value means none for that role. Extra instances use their base role's.
@@ -137,7 +137,7 @@ Placeholders:
 | `{{SCHEMA}}`   | `.herdr/status.schema.json` (§5.1)                                                                |
 | `{{LAUNCHER}}` | the binary's absolute path, so that a coordinating role can run `{{LAUNCHER}} add <role>` itself |
 
-**Agent invocation, fixed in the code:** `herdr agent start <name> --kind claude --pane <P> --timeout 60000 -- -n <name> --append-system-prompt-file <file> [<start_message>]`. There are no `kind` or `args` keys; they come when a project has a role that is not Claude Code (§11).
+**Claude invocation:** `herdr agent start <name> --kind claude --pane <P> --timeout 60000 -- -n <name> --append-system-prompt-file <file> [<start_message>]`. `kind` is optional at the project and role levels; absent means Claude. Codex uses native `--kind codex`, typed options, additive hook context and configured recovery. Arbitrary `args` remain unsupported. See [Codex support](codex-support.md) for its protocol, compatibility requirements and tests.
 
 ### 2.3 Validation and messages
 
@@ -492,7 +492,7 @@ All fixtures are synthetic: a project `acme` with four roles in the main checkou
   - both example `crew.toml` are accepted;
   - one case per row of the §2.3 table, checking the message and, for placeholders, the line and column;
   - the default of `board.file`;
-  - `kind` and `args` are unknown keys;
+  - project/role `kind` inheritance and typed Codex options; `args` remains unknown;
   - a prompt given as a file list is rejected;
   - basic strings are accepted too;
   - `start_message` at the top level and per role (an empty role value means none), with accents and «»; a newline, a tab, an escape or a DEL, more than 200 bytes of accented text and a leading `-` are errors with their line and column.
@@ -659,7 +659,7 @@ A project that runs role sessions with its own scripts migrates in one change:
 | Step 3   | Windows in CI                                                                                                                                                                                                                                                       | The first migration done                                             |
 | Deferred | A picker pane for `add`/`close`                                                                                                                                                                                                                                          | A user wants to add or close instances from a shortcut               |
 | Deferred | Prebuilt binaries (§8)                                                                                                                                                                                                                                                   | The first user without a Rust toolchain                              |
-| Deferred | `kind` and `args` keys per role                                                                                                                                                                                                                                          | A role that is not Claude Code                                       |
+| Built    | Project/role `kind`, typed Codex options, trusted context hook and snapshot-based recovery                                                                                                                                                                                                                                          | Arbitrary `args` remain unsupported                                  |
 | Deferred | `worktree_prompt`: text appended only to roles with `worktree = true`                                                                                                                                                                                                    | A project asks for it                                                |
 | Deferred | Validating the board against the generated schema (`jsonschema` or an equivalence test)                                                                                                                                                                                 | A real divergence between schema and viewer that affects the writer  |
 | Deferred | Scrolling in the board                                                                                                                                                                                                                                                   | A project's board does not fit its tab                               |

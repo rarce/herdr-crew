@@ -1,14 +1,17 @@
-//! herdr-crew: starts one Claude Code session per role in a herdr workspace, each with its role
+//! herdr-crew: starts one coding agent session per role in a herdr workspace, each with its role
 //! prompt, and draws the `.herdr/status.json` board. Arguments, root, dispatch and exit codes
 //! (adapter). Design: docs/design.md.
 
+mod agent;
 mod board;
+mod codex;
 mod config;
 mod files;
 mod git;
 mod herdr;
 mod init;
 mod plan;
+mod process;
 mod prompt;
 
 use std::collections::BTreeSet;
@@ -26,7 +29,7 @@ use herdr::{Herdr, Output};
 use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, WorkspaceItem};
 
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
-  init [--preset solo|review|parallel|research] [--name NAME]
+  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex]
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
   up [--no-attach] [--dry-run]   start or complete the project's sessions
@@ -34,6 +37,10 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   close <name>                   close the tab of an extra instance (keeps its worktree)
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
+  codex-install                  install the crew hook; review it in Codex /hooks
+  codex-uninstall                remove only the crew hook
+  codex-list                     list saved role bindings and Codex session IDs
+  codex-resume <binding>          recover a saved Codex session in its role tab
   check                          validate the configuration and the dependencies
   startup                        herdr's startup hook: bring up or repair the projects in herdr";
 
@@ -99,6 +106,12 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
                     Fail::usage("--preset must be solo, review, parallel or research")
                 })?);
             }
+            "--agent" => {
+                a.init.agent = Some(
+                    agent::Kind::parse(&value("--agent")?)
+                        .ok_or_else(|| Fail::usage("--agent must be claude or codex"))?,
+                )
+            }
             "--name" => a.init.name = Some(value("--name")?),
             "--base" => a.init.base = Some(value("--base")?),
             "--shared-checkout" => a.init.shared_checkout = true,
@@ -113,6 +126,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
     }
     let allowed: &[&str] = match a.command.as_str() {
         "init" => &[
+            "agent",
             "preset",
             "name",
             "base",
@@ -122,7 +136,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "dry_run",
         ],
         "up" => &["no_attach", "dry_run"],
-        "add" | "close" | "check" | "startup" => &[],
+        "add" | "close" | "check" | "startup" | "codex-install" | "codex-uninstall"
+        | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" => &[],
         "board" => &["file", "once", "interval"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
@@ -133,6 +148,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ("once", a.once),
         ("file", a.file.is_some()),
         ("interval", a.interval.is_some()),
+        ("agent", a.init.agent.is_some()),
         ("preset", a.init.preset.is_some()),
         ("name", a.init.name.is_some()),
         ("base", a.init.base.is_some()),
@@ -147,7 +163,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             name.replace('_', "-")
         )));
     }
-    let arity = if matches!(a.command.as_str(), "add" | "close") {
+    let arity = if matches!(a.command.as_str(), "add" | "close" | "codex-resume") {
         1
     } else {
         0
@@ -533,6 +549,9 @@ fn check(c: &Config) -> Result<(), Fail> {
     };
     let mut missing = Vec::new();
     for (program, install) in installers {
+        if program == "claude" && !c.roles.iter().any(|r| r.kind == agent::Kind::Claude) {
+            continue;
+        }
         if on_path(program) || (program == "herdr" && std::env::var_os("HERDR_BIN_PATH").is_some())
         {
             println!("herdr-crew: {program} is on the PATH");
@@ -542,7 +561,39 @@ fn check(c: &Config) -> Result<(), Fail> {
             ));
         }
     }
+    if c.roles.iter().any(|r| r.kind == agent::Kind::Codex) {
+        if let Err(error) = Herdr::from_env().require_codex_version() {
+            missing.push(format!("herdr-crew: {error}"));
+        }
+        if !on_path("codex") {
+            missing.push(
+                "herdr-crew: codex is missing (install: npm install -g @openai/codex)".into(),
+            );
+        } else {
+            println!("herdr-crew: codex is on the PATH");
+            for role in c.roles.iter().filter(|r| r.kind == agent::Kind::Codex) {
+                let cwd = if role.worktree {
+                    c.worktree_path(&role.name).unwrap()
+                } else {
+                    c.root.clone()
+                };
+                if let Err(error) = codex::integration::preflight(&cwd, &role.codex, &c.root) {
+                    missing.push(format!("herdr-crew: {}: {error}", role.name));
+                }
+            }
+        }
+    }
     if Herdr::from_env().call(&["workspace", "list"]).is_ok() {
+        if c.roles.iter().any(|r| r.kind == agent::Kind::Codex) {
+            match Herdr::from_env().call(&["status", "server", "--json"]) {
+                Ok(status)
+                    if status["version"]
+                        .as_str()
+                        .is_some_and(codex::supported_herdr) => {}
+                _ => missing
+                    .push("herdr-crew: Codex crews require Herdr server 0.9.3 or newer".into()),
+            }
+        }
         let path = binary().to_string_lossy().replace('\'', "'\\''");
         println!(
             "herdr-crew: a herdr server is already running; `herdr` only attaches and does not \
@@ -570,6 +621,26 @@ fn run() -> Result<(), Fail> {
         return Ok(());
     }
     let a = parse_args(raw)?;
+    match a.command.as_str() {
+        "codex-install" | "codex-uninstall" => {
+            if a.root.is_some() {
+                return Err(Fail::usage("Codex integration setup does not take --root"));
+            }
+            return codex::integration::install(a.command == "codex-uninstall").map_err(Fail::run);
+        }
+        "codex-protocol" => {
+            println!("1");
+            return Ok(());
+        }
+        "codex-hook" => {
+            codex::hook();
+            return Ok(());
+        }
+        "codex-resume" => {
+            return codex::resume(&a.positional[0], a.root.as_deref()).map_err(Fail::run);
+        }
+        _ => {}
+    }
     if a.command == "startup" {
         if a.root.is_some() {
             return Err(Fail::usage("startup does not take --root"));
@@ -577,6 +648,9 @@ fn run() -> Result<(), Fail> {
         return startup();
     }
     let root = resolve_root(a.root.as_deref())?;
+    if a.command == "codex-list" {
+        return codex::list(&root).map_err(Fail::run);
+    }
     if a.command == "init" {
         return init::run(&root, &a.init, a.dry_run);
     }

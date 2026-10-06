@@ -64,6 +64,17 @@ new_tab() {
 }
 
 case "${1-} ${2-}" in
+    '--version ')
+        printf 'herdr %s\n' "${CREW_TEST_HERDR_VERSION:-0.9.3}"
+        ;;
+    'status server')
+        printf '{"version":"0.9.3","socket":%s}\n' "$(quote "${CREW_TEST_SOCKET:-/offline-herdr.sock}")"
+        ;;
+    'pane get')
+        t=$(tab_for_pane "$3")
+        w=${t#workspaces/}; w=${w%%/*}
+        printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-%s","workspace_id":"%s","tab_id":"%s","cwd":%s}}}\n' "$3" "$3" "$w" "${t##*/}" "$(cat "$t/cwd")"
+        ;;
     'server ')
         # ensure_server must remove the nesting markers before spawning the server.
         printf '%s|%s|%s' "${CLAUDECODE-unset}" "${CLAUDE_CODE_CHILD_SESSION-unset}" "${CLAUDE_CODE_ENTRYPOINT-unset}" > server-env
@@ -102,8 +113,8 @@ case "${1-} ${2-}" in
             if [ "$1" = tab ]; then
                 printf '%s{"tab_id":"%s","label":%s}' "$sep" "${t##*/}" "$(cat "$t/label")"
             else
-                printf '%s{"pane_id":"%s","tab_id":"%s","cwd":%s' "$sep" "$(cat "$t/pane")" "${t##*/}" "$(cat "$t/cwd")"
-                if [ -f "$t/session" ]; then printf ',"agent_session":{"value":"%s"}' "$(cat "$t/session")"; fi
+                printf '%s{"pane_id":"%s","terminal_id":"term-%s","workspace_id":"%s","tab_id":"%s","cwd":%s' "$sep" "$(cat "$t/pane")" "$(cat "$t/pane")" "$w" "${t##*/}" "$(cat "$t/cwd")"
+                if [ -f "$t/session" ]; then printf ',"agent_session":{"value":"%s","agent":"%s","kind":"id","source":"herdr:%s"}' "$(cat "$t/session")" "$(cat "$t/kind" 2>/dev/null || echo claude)" "$(cat "$t/kind" 2>/dev/null || echo claude)"; fi
                 printf '}'
             fi
             sep=,
@@ -139,9 +150,13 @@ case "${1-} ${2-}" in
         pane=$(option --pane "$@")
         t=$(tab_for_pane "$pane")
         w=${t#workspaces/}; w=${w%%/*}
-        prompt=$(option --append-system-prompt-file "$@")
-        [ -s "$prompt" ] || { echo 'prompt missing at agent start' >&2; exit 99; }
-        printf '{"name":%s,"workspace_id":"%s","tab_id":"%s","pane_id":"%s"}' "$(quote "$3")" "$w" "${t##*/}" "$pane" > "$t/agent"
+        kind=$(option --kind "$@")
+        if [ "$kind" = claude ]; then
+            prompt=$(option --append-system-prompt-file "$@")
+            [ -s "$prompt" ] || { echo 'prompt missing at agent start' >&2; exit 99; }
+        fi
+        printf '%s' "$kind" > "$t/kind"
+        printf '{"name":%s,"kind":"%s","workspace_id":"%s","tab_id":"%s","pane_id":"%s"}' "$(quote "$3")" "$kind" "$w" "${t##*/}" "$pane" > "$t/agent"
         printf 'session-%s' "$pane" > "$t/session"
         touch "$t/running"
         if [ "$injection" = agent_not_ready ]; then error agent_not_ready; fi
