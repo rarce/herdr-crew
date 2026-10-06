@@ -223,7 +223,7 @@ The manifest declares only macOS and Linux. Artifact preparation uses a POSIX sh
 - `up [--no-attach] [--dry-run]`
 - `add <role>`
 - `close <name>`
-- `board [--file PATH] [--once] [--interval S]`
+- `board [--file PATH] [--once] [--interval S]`: `S` is a finite number of seconds above 0 and at most 3600 that does not round to a zero duration; anything else is a usage error (exit 2).
 - `check`
 - `startup`: only herdr's `[[startup]]` hook runs it (§4.4); it takes no option, not even `--root`.
 

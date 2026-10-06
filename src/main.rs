@@ -76,8 +76,19 @@ struct Args {
     dry_run: bool,
     once: bool,
     file: Option<PathBuf>,
-    interval: Option<f64>,
+    interval: Option<Duration>,
     init: init::Options,
+}
+
+/// The longest `board --interval`; the board ages its timestamps, so slower refreshes help no one.
+const MAX_INTERVAL_SECS: u64 = 3600;
+
+/// A `--interval` in seconds: finite, at most `MAX_INTERVAL_SECS`, and not rounding to zero.
+fn interval(v: &str) -> Option<Duration> {
+    let secs: f64 = v.parse().ok()?;
+    Duration::try_from_secs_f64(secs)
+        .ok()
+        .filter(|d| !d.is_zero() && *d <= Duration::from_secs(MAX_INTERVAL_SECS))
 }
 
 fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
@@ -93,9 +104,10 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "--file" => a.file = Some(value("--file")?.into()),
             "--interval" => {
                 let v = value("--interval")?;
-                a.interval = Some(v.parse().ok().filter(|s: &f64| *s > 0.0).ok_or_else(|| {
+                a.interval = Some(interval(&v).ok_or_else(|| {
                     Fail::usage(format!(
-                        "--interval \"{v}\": must be a number of seconds above 0"
+                        "--interval \"{v}\": must be a number of seconds above 0 and at most \
+                         {MAX_INTERVAL_SECS}"
                     ))
                 })?);
             }
@@ -492,7 +504,7 @@ fn board(c: &Config, a: &Args) -> Result<(), Fail> {
     let result = if a.once {
         board::tui::once(&path, c)
     } else {
-        board::tui::run(&path, c, Duration::from_secs_f64(a.interval.unwrap_or(1.5)))
+        board::tui::run(&path, c, a.interval.unwrap_or(Duration::from_millis(1500)))
     };
     result.map_err(|e| Fail::run(format!("board: {e}")))
 }
@@ -700,7 +712,7 @@ mod tests {
         assert_eq!(init.init.base.as_deref(), Some("upstream/trunk"));
         assert!(init.init.yes && init.init.no_ignore && init.dry_run);
         let a = args("board --file /f --once --interval 2").unwrap();
-        assert!(a.once && a.interval == Some(2.0));
+        assert!(a.once && a.interval == Some(Duration::from_secs(2)));
     }
 
     #[test]
@@ -727,6 +739,13 @@ mod tests {
             "add",
             "close a b",
             "board --interval 0",
+            "board --interval -1",
+            "board --interval inf",
+            "board --interval NaN",
+            "board --interval 1e30",
+            "board --interval 3600.5",
+            "board --interval 1e-300",
+            "board --interval two",
             "up --x",
             "board --file",
             "startup now",
