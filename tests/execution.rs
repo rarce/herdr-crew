@@ -46,6 +46,18 @@ impl Fixture {
         fs::write(self.repo.join(".herdr/crew.toml"), config).unwrap();
     }
 
+    /// A fake `claude` in the test PATH that answers `--version` with `mode` permissions.
+    fn claude_tool(&self, mode: u32) {
+        let tools = self.root.join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        fs::write(
+            tools.join("claude"),
+            "#!/bin/sh\necho '2.1.0 (Claude Code)'\n",
+        )
+        .unwrap();
+        fs::set_permissions(tools.join("claude"), fs::Permissions::from_mode(mode)).unwrap();
+    }
+
     fn snapshots(&self) -> Vec<Value> {
         fs::read_dir(self.repo.join(".herdr/codex/snapshots"))
             .unwrap()
@@ -441,6 +453,89 @@ fn codex_only_check_does_not_require_claude_and_bad_profiles_explain_the_failure
             .unwrap(),
         "0.9.3 or newer is required",
     );
+}
+
+#[test]
+fn check_reports_versions_base_and_what_it_did_not_check() {
+    let f = Fixture::new();
+    f.claude_tool(0o755);
+    let checked = success(f.crew(&["check"]));
+    for expected in [
+        "herdr-crew: git ",
+        &format!("herdr-crew: herdr 0.9.3 at {}", f.herdr.display()),
+        "herdr-crew: claude 2.1.0 at ",
+        "worktrees.base origin/main is known locally",
+        "0 existing role worktree(s) are valid",
+        "not checked: network access to origin, agent sign-in and model access",
+    ] {
+        assert!(checked.contains(expected), "{expected:?} in {checked}");
+    }
+    f.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+    let checked = success(f.crew(&["check"]));
+    assert!(
+        checked.contains("origin/main is not fetched yet; `up` fetches it"),
+        "{checked}"
+    );
+}
+
+#[test]
+fn check_rejects_unusable_tools() {
+    let f = Fixture::new();
+    f.claude_tool(0o644);
+    failure(
+        f.crew(&["check"]),
+        "tools/claude is on the PATH but not executable",
+    );
+    f.claude_tool(0o755);
+    failure(
+        f.command(CREW)
+            .arg("check")
+            .env("CREW_TEST_HERDR_VERSION", "0.9.0")
+            .output()
+            .unwrap(),
+        "is too old: 0.9.1 or newer is required",
+    );
+    failure(
+        f.command(CREW)
+            .arg("check")
+            .env("HERDR_BIN_PATH", f.root.join("no-herdr"))
+            .output()
+            .unwrap(),
+        "HERDR_BIN_PATH: ",
+    );
+    let not_executable = f.root.join("herdr-copy");
+    fs::copy(&f.herdr, &not_executable).unwrap();
+    fs::set_permissions(&not_executable, fs::Permissions::from_mode(0o644)).unwrap();
+    failure(
+        f.command(CREW)
+            .arg("check")
+            .env("HERDR_BIN_PATH", &not_executable)
+            .output()
+            .unwrap(),
+        "herdr-copy is not an executable file",
+    );
+}
+
+#[test]
+fn invalid_base_fails_check_and_up_before_any_change() {
+    let f = Fixture::new();
+    f.claude_tool(0o755);
+    for (base, reason) in [
+        ("missing/main", "remote \"missing\" is not configured"),
+        ("origin/invalid..branch", "is not a valid Git branch name"),
+    ] {
+        let config = f
+            .read(".herdr/crew.toml")
+            .replace("base = \"origin/main\"", &format!("base = \"{base}\""));
+        fs::write(f.repo.join(".herdr/crew.toml"), &config).unwrap();
+        failure(f.crew(&["check"]), reason);
+        failure(f.crew(&["up", "--no-attach"]), reason);
+        assert_eq!(f.count(&["workspace", "create"]), 0, "{base}");
+        f.no_generated_files();
+        assert!(!f.repo.join(".worktrees").exists(), "{base}");
+        let restored = config.replace(&format!("base = \"{base}\""), "base = \"origin/main\"");
+        fs::write(f.repo.join(".herdr/crew.toml"), restored).unwrap();
+    }
 }
 
 /// Native Herdr RPC simulator for the hook and resume subprocesses. This tests the wire

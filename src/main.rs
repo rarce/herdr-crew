@@ -509,20 +509,59 @@ fn board(c: &Config, a: &Args) -> Result<(), Fail> {
     result.map_err(|e| Fail::run(format!("board: {e}")))
 }
 
-fn on_path(program: &str) -> bool {
+/// Where `program` runs from: `configured` (a path or a bare name, like `HERDR_BIN_PATH`)
+/// or else the `PATH`. Only an executable file counts.
+fn executable(program: &str, configured: Option<&std::ffi::OsStr>) -> Result<PathBuf, String> {
+    let wanted = configured.unwrap_or(program.as_ref());
+    if Path::new(wanted).components().count() > 1 {
+        let path = PathBuf::from(wanted);
+        return if is_executable(&path) {
+            Ok(path)
+        } else {
+            Err(format!("{} is not an executable file", path.display()))
+        };
+    }
+    let wanted = wanted.to_string_lossy();
     let names: Vec<String> = if cfg!(windows) {
         vec![
-            format!("{program}.exe"),
-            format!("{program}.cmd"),
-            program.to_string(),
+            format!("{wanted}.exe"),
+            format!("{wanted}.cmd"),
+            wanted.to_string(),
         ]
     } else {
-        vec![program.to_string()]
+        vec![wanted.to_string()]
     };
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|dir| names.iter().any(|n| dir.join(n).is_file())))
-        .unwrap_or(false)
+    let found: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| {
+            std::env::split_paths(&p)
+                .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
+                .filter(|path| path.is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    match found.iter().find(|path| is_executable(path)) {
+        Some(path) => Ok(path.clone()),
+        None if found.is_empty() => Err(format!("{wanted} is not on the PATH")),
+        None => Err(format!(
+            "{} is on the PATH but not executable",
+            found[0].display()
+        )),
+    }
 }
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    path.is_file()
+}
+
+/// The lowest herdr that runs any crew; Codex roles need more (README, Requirements).
+const MIN_HERDR: (u32, u32, u32) = (0, 9, 1);
 
 fn check(c: &Config) -> Result<(), Fail> {
     println!(
@@ -560,27 +599,70 @@ fn check(c: &Config) -> Result<(), Fail> {
         ]
     };
     let mut missing = Vec::new();
+    let herdr_bin = std::env::var_os("HERDR_BIN_PATH");
     for (program, install) in installers {
         if program == "claude" && !c.roles.iter().any(|r| r.kind == agent::Kind::Claude) {
             continue;
         }
-        if on_path(program) || (program == "herdr" && std::env::var_os("HERDR_BIN_PATH").is_some())
-        {
-            println!("herdr-crew: {program} is on the PATH");
-        } else {
-            missing.push(format!(
-                "herdr-crew: {program} is missing (install it with: {install})"
-            ));
+        let configured = herdr_bin.as_deref().filter(|_| program == "herdr");
+        let path = match executable(program, configured) {
+            Ok(path) => path,
+            Err(why) if configured.is_some() => {
+                missing.push(format!("herdr-crew: HERDR_BIN_PATH: {why}"));
+                continue;
+            }
+            Err(why) => {
+                missing.push(format!(
+                    "herdr-crew: {program} is missing: {why} (install it with: {install})"
+                ));
+                continue;
+            }
+        };
+        match process::detect(&path) {
+            Ok((a, b, v)) if program == "herdr" && (a, b, v) < MIN_HERDR => {
+                missing.push(format!(
+                    "herdr-crew: herdr {a}.{b}.{v} at {} is too old: {}.{}.{} or newer is required",
+                    path.display(),
+                    MIN_HERDR.0,
+                    MIN_HERDR.1,
+                    MIN_HERDR.2
+                ));
+            }
+            Ok((a, b, v)) => println!("herdr-crew: {program} {a}.{b}.{v} at {}", path.display()),
+            Err(e) => missing.push(format!(
+                "herdr-crew: {program} at {} does not run `--version`: {e}",
+                path.display()
+            )),
+        }
+    }
+    if let Some(w) = &c.worktrees {
+        let base = format!("{}/{}", w.remote, w.branch);
+        match git::validate_base(&c.root, &base) {
+            Err(e) => missing.push(format!("herdr-crew: worktrees.base \"{base}\": {e}")),
+            Ok(()) if git::knows_remote_branch(&c.root, &w.remote, &w.branch) => {
+                println!("herdr-crew: worktrees.base {base} is known locally");
+            }
+            Ok(()) => println!(
+                "herdr-crew: worktrees.base {base} is not fetched yet; `up` fetches it before \
+                 creating a worktree"
+            ),
+        }
+        match git::existing_worktrees(c) {
+            Ok(existing) => println!(
+                "herdr-crew: {} existing role worktree(s) are valid",
+                existing.len()
+            ),
+            Err(e) => missing.push(format!("herdr-crew: {e}")),
         }
     }
     if c.roles.iter().any(|r| r.kind == agent::Kind::Codex) {
         if let Err(error) = Herdr::from_env().require_codex_version() {
             missing.push(format!("herdr-crew: {error}"));
         }
-        if !on_path("codex") {
-            missing.push(
-                "herdr-crew: codex is missing (install: npm install -g @openai/codex)".into(),
-            );
+        if let Err(why) = executable("codex", None) {
+            missing.push(format!(
+                "herdr-crew: codex is missing: {why} (install: npm install -g @openai/codex)"
+            ));
         } else {
             println!("herdr-crew: codex is on the PATH");
             for role in c.roles.iter().filter(|r| r.kind == agent::Kind::Codex) {
@@ -612,6 +694,12 @@ fn check(c: &Config) -> Result<(), Fail> {
              run plugin startup. From this project, run `'{path}' up --no-attach`"
         );
     }
+    let remote = c
+        .worktrees
+        .as_ref()
+        .map(|w| format!("network access to {}, ", w.remote))
+        .unwrap_or_default();
+    println!("herdr-crew: not checked: {remote}agent sign-in and model access");
     if missing.is_empty() {
         Ok(())
     } else {

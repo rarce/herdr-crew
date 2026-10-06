@@ -304,8 +304,15 @@ pub fn execute(
             | Step::SeedStatus { path, .. } => {
                 files::validate(&c.root, path, files::Kind::File)?;
             }
-            Step::CreateWorktree { path, .. } => {
+            Step::CreateWorktree {
+                path,
+                remote,
+                branch,
+                ..
+            } => {
                 files::validate(&c.root, path, files::Kind::Directory)?;
+                git::validate_base(&c.root, &format!("{remote}/{branch}"))
+                    .map_err(|e| format!("worktrees.base \"{remote}/{branch}\": {e}"))?;
             }
             Step::CreateTab { label, cwd, .. }
                 if c.session_role(label).is_some_and(|r| r.worktree) =>

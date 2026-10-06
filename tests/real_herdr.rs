@@ -367,12 +367,13 @@ fn prepare(prefix: &str, session: &'static str) -> Isolated {
     );
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // The fake `claude`: writes its arguments, one per line, and waits like an agent.
+    // The fake `claude`: answers `check`'s `--version`; otherwise writes its arguments, one per
+    // line, and waits like an agent.
     let fake = dir.join("bin/claude");
     write(
         fake.clone(),
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\n[ \"$*\" = --version ] && {{ echo '2.1.0 (Claude Code)'; exit 0; }}\nprintf '%s\\n' \"$@\" > '{}'\nwhile :; do sleep 1; done\n",
             dir.join("claude-args").display()
         ),
     );

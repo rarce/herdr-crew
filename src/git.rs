@@ -251,6 +251,20 @@ pub fn validate_base(root: &Path, base: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `<remote>/<branch>` is already known locally, without fetching.
+pub fn knows_remote_branch(root: &Path, remote: &str, branch: &str) -> bool {
+    git(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{remote}/{branch}^{{commit}}"),
+        ],
+    )
+    .is_ok()
+}
+
 pub fn has_remote(root: &Path) -> Result<bool, String> {
     git(root, &["remote"]).map(|remotes| !remotes.is_empty())
 }

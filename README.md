@@ -50,7 +50,7 @@ herdr plugin link "$PWD"
 target/release/herdr-crew-launcher --install-launcher
 ```
 
-`plugin link` does not build anything, so run `sh scripts/build.sh` after each update. Without `--install-launcher`, the script only prepares the checkout. The binary's `check` command validates the configuration, prints its location and warns when a running herdr server means `herdr` will only attach.
+`plugin link` does not build anything, so run `sh scripts/build.sh` after each update. Without `--install-launcher`, the script only prepares the checkout. The binary's `check` command validates the configuration, prints its location, checks that `git`, `herdr` and the configured agents are executable and prints their versions, validates `worktrees.base` offline, and warns when a running herdr server means `herdr` will only attach. It lists what it does not check: network access to the remote and agent sign-in.
 
 For Claude crews, the binary also works without a registered plugin: run `/path/to/checkout/bin/herdr-crew up` from inside the project, or use `--root`.
 

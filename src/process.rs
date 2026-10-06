@@ -1,5 +1,6 @@
 //! Bounded local CLI inspection. Drop always stops and reaps the inspection process.
 
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -131,11 +132,12 @@ impl Drop for Inspector {
     }
 }
 
-pub fn version(program: &str, minimum: (u32, u32, u32)) -> Result<(), String> {
-    let mut process = Inspector::spawn(Command::new(program).arg("--version"))?;
+/// The first `X.Y.Z` that `<program> --version` prints, within the inspection deadline.
+pub fn detect(program: impl AsRef<OsStr>) -> Result<(u32, u32, u32), String> {
+    let name = program.as_ref().to_string_lossy().into_owned();
+    let mut process = Inspector::spawn(Command::new(program.as_ref()).arg("--version"))?;
     let line = process.line()?;
-    let actual = line
-        .split_whitespace()
+    line.split_whitespace()
         .find_map(|word| {
             let parts: Vec<_> = word.split('.').map(str::parse::<u32>).collect();
             match parts.as_slice() {
@@ -143,8 +145,11 @@ pub fn version(program: &str, minimum: (u32, u32, u32)) -> Result<(), String> {
                 _ => None,
             }
         })
-        .ok_or_else(|| format!("cannot determine {program} version"))?;
-    if actual < minimum {
+        .ok_or_else(|| format!("cannot determine {name} version"))
+}
+
+pub fn version(program: &str, minimum: (u32, u32, u32)) -> Result<(), String> {
+    if detect(program)? < minimum {
         return Err(format!(
             "{program} {}.{}.{} or newer is required",
             minimum.0, minimum.1, minimum.2
