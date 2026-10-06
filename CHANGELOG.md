@@ -8,6 +8,12 @@ behavior; such changes are listed under **Changed**.
 herdr-crew is experimental: configurations, commands and the board format may still
 change between minor versions.
 
+## [Unreleased]
+
+### Added
+
+- `CONTRIBUTING.md` and a bug report template for GitHub issues.
+
 ## [0.2.0] - 2026-10-06
 
 ### Added
@@ -69,5 +75,6 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/rarce/herdr-crew/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rarce/herdr-crew/releases/tag/v0.1.0

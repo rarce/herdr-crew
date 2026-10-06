@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: herdr itself
+    url: https://github.com/herdrdev/herdr/issues
+    about: Problems with herdr's panes, sessions or plugin system that also happen without herdr-crew.

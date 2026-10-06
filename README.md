@@ -362,6 +362,8 @@ When the file is missing, has invalid JSON or does not match the schema, the boa
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to propose changes, the checks to run and pull request expectations.
+
 ```sh
 cargo fmt --check
 cargo clippy --locked -- -D warnings
