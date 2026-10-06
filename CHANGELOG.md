@@ -15,6 +15,9 @@ change between minor versions.
 - `up`, `add` and `close` wait for each other on a per-project lock instead of racing,
   and the startup hook leaves a locked project to the command holding it. The lock is an
   OS file lock in the repository's Git directory, released automatically even after a crash.
+- Documentation: how sessions collaborate (channels between sessions, a handoff protocol
+  and a comparison with other ways to run several agents) in `docs/workflows.md`, an
+  end-to-end demo in `docs/demo.md`, and the operating limits in the README's quick start.
 - `CONTRIBUTING.md` and a bug report template for GitHub issues.
 - `SECURITY.md`: private vulnerability reporting, supported versions, and what to review
   in a project's `crew.toml` before running it.

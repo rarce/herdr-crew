@@ -35,9 +35,76 @@ An assignment specifies the objective, acceptance criteria, exact base commit, o
 
 For research, deliver observations, rejected hypotheses, source locations and uncertainty. Researchers need not produce patches. For parallel work, one person owns shared schemas, models and lockfiles; assign dependent tasks after their prerequisites.
 
-## How this maps to herdr-crew
+## How sessions collaborate
 
-`up` starts every configured role, including reviewers who are initially waiting. Only the first role writes the board. Prompts define the work protocol; init configures no automatic routing, task graph or communication transport. Report to the coordinator through an available session channel or ask the user to relay the handoff.
+herdr-crew sets up the team; it does not run it. It gives you persistent sessions with role prompts, optional worktrees, a shared status board and a versioned configuration. It has no message transport, task queue, automatic assignment or task graph of its own: sessions hand work to each other through the channels below, following the protocol in their prompts, and you stay in the loop.
+
+What herdr-crew provides:
+
+- **Roles that survive.** Each role is a named herdr agent in its own tab. The sessions keep their context across tasks, herdr restores them after a restart, and `up` repairs what is missing without starting duplicates.
+- **Isolation where it matters.** Roles with `worktree = true` edit their own checkout, so a developer and a reviewer never step on each other's files.
+- **One shared picture.** The coordinator writes `.herdr/status.json`; the board tab shows every session's state, what each waits on, and what is waiting on you.
+- **A team definition you can review.** `crew.toml` is versioned with the code, so the whole team, prompts included, changes through normal review.
+
+### Channels between sessions
+
+| Channel | How | Notes |
+| --- | --- | --- |
+| **You relay** | Copy the handoff from one tab and paste it in another. | Always works, for any agent. Slowest, but you see and approve every handoff. |
+| **Claude Code messaging** | In a Claude role, ask the session to message another by role name, for example "send the delivery to @tl-reviewer". | Claude Code 2.1.224+ messages your other local sessions directly ([cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)). herdr-crew starts each Claude role with `-n <role>`, so the role name is the session name. Only between Claude sessions; each session's own permissions and prompts still apply. |
+| **herdr agent commands** | The coordinator runs `herdr agent prompt <role> "<text>" --wait --timeout 600000`, and `herdr agent read <role> --source recent-unwrapped --lines 120` to read a reply. | Works for Claude and Codex roles, because every role is a herdr agent named after it. The command needs shell access to the herdr socket, which a sandboxed Codex session may not have and which your agent may ask you to approve. herdr rejects a prompt to an agent waiting at an approval dialog. Not exercised by herdr-crew's tests. |
+| **Git** | Developers commit on a task branch; reviewers and the coordinator read that exact commit. | Worktrees share the repository's refs, so a commit is visible to every session at once, without pushing. The commit, not a description of it, is what gets reviewed and integrated. |
+| **The board** | The coordinator records state, queues and decisions for you. | Status, not messages: other roles report to the coordinator instead of editing it. |
+
+Whatever the channel, a session never answers another session's approval prompt or grants it permissions: approvals stay with you in the tab that asks.
+
+### A handoff, step by step
+
+This is the `review` preset's protocol; the others follow the same shape.
+
+1. **You give the coordinator a task.** Talk to the lead tab as you would to any agent, including what "done" means for you.
+2. **The coordinator assigns it** to a developer with the objective, acceptance criteria, the exact base commit, the files it owns and a stopping condition, and updates the board.
+3. **The developer delivers a commit**, with the commands it ran, their results and remaining limitations, to the coordinator.
+4. **The coordinator asks the reviewer** to review that exact commit against the acceptance criteria.
+5. **The reviewer accepts or requests changes** with findings that name files, consequences and reproduction steps. Corrections go back to the developer, then to review again.
+6. **The coordinator integrates** accepted commits in dependency order, validates the combined result, updates the board and reports to you.
+
+Example handoffs, short enough to relay by hand:
+
+```text
+Assignment for tl-dev: #12 expiring links. Base: origin/main 3f2a1c9.
+Accept when: links accept an optional expiry; expired links return 410; tests cover both.
+You own: src/links.rs, tests/links.rs. Stop and ask if the storage format must change.
+```
+
+```text
+Delivery from tl-dev: #12 on feat/12-expiry, commit 8d41e07 (base 3f2a1c9).
+cargo test: 48 passed. New tests: expired_link_returns_410, link_without_expiry_never_expires.
+Limitation: the expiry is checked at read time; no cleanup job.
+```
+
+```text
+Review of 8d41e07 by tl-reviewer: changes requested.
+src/links.rs:88 compares the expiry with the local clock instead of UTC; a link created
+in UTC-3 expires three hours late. Reproduce: TZ=America/Santiago cargo test expired_link.
+```
+
+See [the end-to-end demo](demo.md) for a full round, the board at each step, and recovering a stopped session.
+
+### Compared with other ways to run several agents
+
+| | Several manual tabs | herdr-crew | Claude Code agent teams | One agent session |
+| --- | --- | --- | --- | --- |
+| Setup | By hand, every time | `crew.toml` in the repository; `up` or herdr's startup | A request to the lead session; experimental flag | None |
+| Agents | Any | Claude Code and Codex, mixed per role | Claude Code | Any |
+| Sessions after a restart | Start them again | herdr restores the tabs and resumes the agents; `up` repairs what is missing | In-process teammates are not restored on resume | Resume the one session |
+| Isolation | Up to you | Optional worktree per role | One checkout; split files by owner | One checkout |
+| Coordination | You | Role prompts, the board, and the channels above | Shared task list and direct messages | Not needed |
+| Cost | One session per tab | One session per role, all running | One session per teammate | Lowest |
+
+herdr-crew fits when the same roles come back task after task on a project, when you want them visible as tabs that survive restarts, or when you mix Claude Code and Codex. For one-off parallel exploration within a single Claude Code session, [agent teams](https://code.claude.com/docs/en/agent-teams) or subagents are lighter. For a localized fix, one session is usually best.
+
+### Worktrees and the base branch
 
 Reviewed delivery uses developer and reviewer worktrees by default. Shared-checkout review is available with `--shared-checkout`: only the developer edits, and the reviewer does not switch or reset the shared checkout. New worktrees start detached from `worktrees.base`, not from local lead changes. Check the assigned base, create a task branch before committing and validate the delivered commit in the reviewer's worktree. Existing worktrees are reused.
 

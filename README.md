@@ -12,7 +12,7 @@ herdr-crew is a [herdr](https://herdr.dev/) plugin. You describe the project's r
 - **A status board.** `board` draws `.herdr/status.json`, which the coordinating role keeps up to date, and validates it with the same rules as the JSON Schema it generates from `crew.toml`.
 - **Checked configuration.** Unknown keys and placeholders are errors reported with line and column, all at once.
 
-The design, with its decisions and the herdr behaviour they rely on, is in [docs/design.md](docs/design.md).
+See [the end-to-end demo](docs/demo.md) for one task going from assignment to review, integration and recovery, and [how sessions collaborate](docs/workflows.md#how-sessions-collaborate) for what herdr-crew does and does not coordinate. The design, with its decisions and the herdr behaviour they rely on, is in [docs/design.md](docs/design.md).
 
 ## Requirements
 
@@ -80,6 +80,16 @@ Each role's tab runs its selected agent with its prompt, in the main checkout or
 The first time `claude` runs in a folder, it asks whether you trust it; answer in each new tab, including each new worktree. The `start_message` is sent anyway and runs once you answer.
 
 **Trust.** Plugins listed in the herdr marketplace are not reviewed. herdr-crew runs the selected agent, `git` and `herdr` on your machine with the prompts in your `crew.toml`; read the source before installing it. Treat a project's `crew.toml` like code: it chooses the agents, their prompts and, for Codex, their sandbox and approval policy, so read it before running `up` in a repository you did not write. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+### Know the limits before you start
+
+- **How the crew starts depends on herdr.** With no server running, `cd repo && herdr` brings the project up through the startup hook. With a server already running, `herdr` only attaches: run `herdr-crew up --no-attach` or the `herdr-crew.up` action. After a herdr restart, herdr resumes the sessions and the hook repairs only the board; a tab whose agent stopped gets a resume command from `up`, never a second agent.
+- **Sessions do not message each other on their own.** herdr-crew starts the roles with their prompts, worktrees and board; handoffs go through you, Claude Code's cross-session messaging or `herdr agent` commands, as described in [how sessions collaborate](docs/workflows.md#how-sessions-collaborate).
+- **Worktrees start from the remote base.** New role worktrees are created with a detached HEAD from `worktrees.base` (for example `origin/main`). Your uncommitted or unpushed local changes are not in them, so commit and push what the crew needs first. Each session creates a task branch before committing; existing worktrees are reused as they are.
+- **Agent names are global to the herdr server.** A live agent named like one of your roles, in any workspace or project, blocks that role. `init` prefixes role names with the project name to avoid collisions.
+- **Every role is a running agent.** Each session has its own context and usage, and a crew multiplies both. Start with the smallest preset that can produce a verifiable result.
+- **Codex roles need setup.** Install and trust the crew hook (`herdr-crew codex-install`, then `/hooks` in Codex). Codex's sandbox and approvals stay in effect, and a Codex board writer in a worktree needs the main checkout's `.herdr` in `additional_dirs`.
+- **One command at a time per project.** `up`, `add` and `close` on the same project wait for each other instead of racing.
 
 ## Codex and mixed crews
 
