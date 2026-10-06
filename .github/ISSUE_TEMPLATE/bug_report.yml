@@ -5,7 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting. Please remove credentials, tokens, private repository names and anything else you would not post publicly from every field below, including logs and `crew.toml`.
+        Thanks for reporting. For a security vulnerability, do not use this form: report it privately as described in [SECURITY.md](https://github.com/rarce/herdr-crew/blob/main/SECURITY.md).
+
+        Please remove credentials, tokens, private repository names and anything else you would not post publicly from every field below, including logs and `crew.toml`.
 
   - type: textarea
     id: what-happened

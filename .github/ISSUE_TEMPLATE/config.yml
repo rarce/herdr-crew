@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Security vulnerability
+    url: https://github.com/rarce/herdr-crew/security/advisories/new
+    about: Report security problems privately; see SECURITY.md. Please do not open a public issue.
   - name: herdr itself
     url: https://github.com/herdrdev/herdr/issues
     about: Problems with herdr's panes, sessions or plugin system that also happen without herdr-crew.

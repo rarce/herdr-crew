@@ -13,6 +13,8 @@ change between minor versions.
 ### Added
 
 - `CONTRIBUTING.md` and a bug report template for GitHub issues.
+- `SECURITY.md`: private vulnerability reporting, supported versions, and what to review
+  in a project's `crew.toml` before running it.
 
 ## [0.2.0] - 2026-10-06
 

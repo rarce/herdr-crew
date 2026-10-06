@@ -5,6 +5,8 @@ small, focused changes with tests are the easiest to review and merge.
 
 ## Before you start
 
+- **Security problems:** report them privately as described in [SECURITY.md](SECURITY.md),
+  not in a public issue.
 - **Bugs:** open an issue with the bug report template. A reproduction and the output of
   `herdr-crew check` save a lot of back and forth.
 - **Small fixes** (typos, clearer messages, a missing test): open a pull request directly.

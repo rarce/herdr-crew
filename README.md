@@ -79,7 +79,7 @@ Each role's tab runs its selected agent with its prompt, in the main checkout or
 
 The first time `claude` runs in a folder, it asks whether you trust it; answer in each new tab, including each new worktree. The `start_message` is sent anyway and runs once you answer.
 
-**Trust.** Plugins listed in the herdr marketplace are not reviewed. herdr-crew runs the selected agent, `git` and `herdr` on your machine with the prompts in your `crew.toml`; read the source before installing it.
+**Trust.** Plugins listed in the herdr marketplace are not reviewed. herdr-crew runs the selected agent, `git` and `herdr` on your machine with the prompts in your `crew.toml`; read the source before installing it. Treat a project's `crew.toml` like code: it chooses the agents, their prompts and, for Codex, their sandbox and approval policy, so read it before running `up` in a repository you did not write. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## Codex and mixed crews
 
