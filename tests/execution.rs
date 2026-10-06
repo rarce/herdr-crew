@@ -479,6 +479,9 @@ impl RpcHost {
                     }
                     Err(error) => panic!("{error}"),
                 };
+                // On macOS an accepted socket inherits the listener's O_NONBLOCK, which would
+                // make the read below fail with WouldBlock instead of waiting for the request.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                     .unwrap();
@@ -800,6 +803,8 @@ fn real_codex_sends_exact_crew_hook_context_as_additive_developer_guidance() {
                 }
                 Err(_) => return,
             };
+            // Blocking again: macOS accepted sockets inherit the listener's O_NONBLOCK.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
