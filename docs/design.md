@@ -312,6 +312,12 @@ herdr is invoked as `$HERDR_BIN_PATH` when set (herdr actions), else as `herdr` 
 
 **Test variable:** `CREW_AGENT_CMD` replaces `agent start` with `herdr pane run <P> <cmd>` (for example `cat`). The real test isolates herdr through XDG (§7.2), where a test `crew.toml` with its own label is enough.
 
+### 4.2.1 One command at a time per project
+
+`up` (except `--dry-run`), `add` and `close` take the project's lock before reading any state, so each plan starts from what the previous command left. The lock is an OS file lock (`File::try_lock`) on `herdr-crew.lock` in the repository's common Git directory: the main checkout and its worktrees share it, it never appears in `git status`, and the operating system releases it when the process exits, even after a crash, so no stale lock needs cleaning. A second command prints that it is waiting and retries for up to 120 s, then fails (exit 1, with a notification as an action). `up` releases the lock before attaching, since attaching lasts until the user detaches.
+
+`startup` never waits: when the lock is taken it leaves the project to the command holding it and logs so. Waiting could deadlock, because a cold `up` starts the server that runs startup while holding the lock. Codex runtime files keep their own short lock under `.herdr/codex/`, which the session hook also takes.
+
 ### 4.3 Reporting failures
 
 - **Output.** Each step is printed on stdout (`herdr-crew: globex-dev in w3:p7`), and each warning or error on stderr.
@@ -442,6 +448,7 @@ src/board/view.rs      drawing into a ratatui::Frame (pure)
 src/board/tui.rs       event loop and polling (adapter)
 src/herdr.rs           runs the herdr CLI, reads its JSON, runs Steps (adapter)
 src/git.rs             main root, fetch and worktree add (adapter)
+src/lock.rs            one changing command at a time per project (adapter)
 tests/                 fixtures, snapshots and the real test of §7.2
 ```
 
@@ -617,9 +624,7 @@ A project that runs role sessions with its own scripts migrates in one change:
 - **Global registry.** herdr's plugin registry is global to the user (`~/.config/herdr/plugins.json`) [vendor]. The global part holds no project data, and linking is the user's decision.
 - **Permissions.** The plugin runs with all of the user's permissions and can type into sessions [vendor].
 - **Windows unverified.** The implicit `.exe` on Windows is still [H] (§3), and so is the PowerShell quoting of `pane run`; Windows is not tested yet. The other step-1 hypotheses were verified on 2026-09-26 (§2.1, §3, §4.2, §7.2): relative `argv[0]`, the context of a CLI-invoked action, the foreground of `pane process-info`, the name reservation and XDG on macOS.
-- **Concurrent `up` or `add`** (two invocations at once on the same project): there is no lock.
-  - Live agent names are unique in herdr [vendor], so the second `agent start` with the same name fails, and so does the second `git worktree add` on the same path.
-  - What is left is an orphan tab without an agent; the user closes it and the next `up` reports it.
+- **Concurrent commands on one project.** `up`, `add` and `close` serialize on the project's lock (§4.2.1). Commands on different projects still run in parallel, and a manual `herdr` action outside herdr-crew is not serialized. Live agent names are unique in herdr [vendor], which still guards against two projects claiming the same role name.
   - herdr reserves the name as soon as it accepts `agent start`: a second `agent start` with the same name, 0.3 s later and with the first one still pending, failed with `agent_name_taken` [verified].
 - **Unstable ratatui feature.** A box with wrapped text gets its height from `Paragraph::line_count`, which needs ratatui's unstable `unstable-rendered-line-info` feature. If that changes, the text is wrapped by hand [E].
 - **Name clashes across projects.** A live agent with a role's name in another project blocks that role (invariant 3). Project-prefixed names avoid it; validation does not enforce them.
@@ -665,7 +670,7 @@ A project that runs role sessions with its own scripts migrates in one change:
 | Deferred | Configurable `owner` sections and board texts                                                                                                                                                                                                                            | A project with other sections                                        |
 | Deferred | Relaunching a role automatically with `claude -r` and the session herdr knows. It would go through `herdr agent start <role> … -- --resume <id>`, never text typed into a shell, and it would change the step-3 rule that a tab without an agent only warns. The recorded id drifts after `/clear` or `/resume` inside the session, and a session without a first request has no transcript (§10). | Tabs without an agent after restarts become frequent                 |
 | Deferred | `up` leaving the bring-up to startup when it has just started the server (§4.4, cold `up`)                                                                                                                                            | herdr's headless server creates an initial workspace                 |
-| Deferred | A lock against concurrent `up`/`add`                                                                                                                                                                                                                                     | An orphan tab caused by concurrency in real use                      |
+| Built    | Project lock (2026-10-06): `up`, `add` and `close` wait for each other on an OS file lock in the common Git directory; `startup` skips a locked project (§4.2.1). | —                                                                    |
 
 ## 12. Open questions
 

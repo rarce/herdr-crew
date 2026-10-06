@@ -203,6 +203,7 @@ herdr-crew [--root DIR] <command>
 - **The `herdr-crew.up` action.** It works on the workspace you have focused in herdr.
 - **Starting the server.** From a plain terminal, `up` starts a herdr server if none is running and then opens herdr. Pass `--no-attach` to skip opening it.
 - **`--dry-run`** prints each role's verdict and the steps `up` would take, without doing anything.
+- **One command at a time.** `up`, `add` and `close` on the same project wait for each other (up to two minutes) instead of racing; the startup hook leaves a project another command is changing to that command. The lock is released automatically, even after a crash.
 
 **No-parameter actions.** herdr actions take no parameters, so `add` and `close` are not actions. There is also a trap: an action invoked with `herdr plugin action invoke` acts on whichever workspace is focused, not on the caller's. So agents and scripts run the binary directly: `{{LAUNCHER}} up` or `{{LAUNCHER}} add <role>` in a prompt (see `{{LAUNCHER}}` below), never `plugin action invoke`.
 

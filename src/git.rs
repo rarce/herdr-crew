@@ -26,6 +26,15 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// The repository's common Git directory, shared by the main checkout and its worktrees.
+pub fn common_dir(root: &Path) -> Result<PathBuf, String> {
+    git(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .map(PathBuf::from)
+}
+
 /// Resolve the main working checkout without treating Git metadata as a project directory.
 pub fn main_root(dir: &Path) -> Result<PathBuf, String> {
     if git(dir, &["rev-parse", "--is-bare-repository"]).as_deref() == Ok("true") {

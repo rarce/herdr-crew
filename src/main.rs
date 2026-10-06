@@ -10,6 +10,7 @@ mod files;
 mod git;
 mod herdr;
 mod init;
+mod lock;
 mod plan;
 mod process;
 mod prompt;
@@ -26,6 +27,7 @@ use serde_json::Value;
 
 use config::Config;
 use herdr::{Herdr, Output};
+use lock::{Busy, ProjectLock};
 use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, WorkspaceItem};
 
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
@@ -260,9 +262,39 @@ fn fail_notify(herdr: &Herdr, msg: String) -> Fail {
     Fail::run(msg)
 }
 
+/// How long `up`, `add` and `close` wait while another command changes the same project.
+const LOCK_WAIT: Duration = Duration::from_secs(120);
+
+/// The project's lock for a command that changes it. Taken before reading any state, so the
+/// plan always starts from what the previous command left.
+fn lock_project(c: &Config, herdr: &Herdr) -> Result<ProjectLock, Fail> {
+    ProjectLock::acquire(&c.root, LOCK_WAIT, || {
+        eprintln!(
+            "herdr-crew: another herdr-crew command is changing {}; waiting up to {} s",
+            c.root.display(),
+            LOCK_WAIT.as_secs()
+        );
+    })
+    .map_err(|busy| match busy {
+        Busy::Held => fail_notify(
+            herdr,
+            format!(
+                "another herdr-crew command is still changing {}; run this again when it finishes",
+                c.root.display()
+            ),
+        ),
+        Busy::Error(e) => fail_notify(herdr, e),
+    })
+}
+
 fn up(c: &Config, a: &Args) -> Result<(), Fail> {
-    let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
     let herdr = Herdr::from_env();
+    let lock = if a.dry_run {
+        None
+    } else {
+        Some(lock_project(c, &herdr)?)
+    };
+    let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
     let mut out = Output;
     let workspaces = if a.dry_run {
         herdr.call(&["workspace", "list"]).ok()
@@ -290,6 +322,8 @@ fn up(c: &Config, a: &Args) -> Result<(), Fail> {
     if p.actions().next().is_none() {
         out.step("nothing to do");
     }
+    // Attaching lasts until the user detaches; other commands may change the project meanwhile.
+    drop(lock);
     if let Some(ws) = ws {
         herdr
             .focus_and_attach(&ws, &c.root, !a.no_attach)
@@ -357,6 +391,20 @@ fn startup() -> Result<(), Fail> {
 /// One project for `startup`. On the adoption path the user is watching herdr open, so an error
 /// is also shown as a notification; warnings, and everything on a restore, stay in the log.
 fn startup_root(herdr: &Herdr, root: &Path, context: Option<&str>) -> Result<(), Fail> {
+    // Never wait: a cold `up` starts the server that runs this hook while holding the lock, and
+    // whichever command holds it is already bringing the project up.
+    let _lock = match ProjectLock::acquire(root, Duration::ZERO, || {}) {
+        Ok(lock) => lock,
+        Err(Busy::Held) => {
+            println!(
+                "herdr-crew: {}: another herdr-crew command is changing it; startup leaves it \
+                 to that command",
+                root.display()
+            );
+            return Ok(());
+        }
+        Err(Busy::Error(e)) => return Err(Fail::run(e)),
+    };
     // Read again for every root: an earlier one may have renamed a workspace.
     let workspaces = herdr
         .call(&["workspace", "list"])
@@ -469,8 +517,9 @@ fn current_state(c: &Config, herdr: &Herdr) -> Result<HerdrState, Fail> {
 }
 
 fn add(c: &Config, role: &str) -> Result<(), Fail> {
-    let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
     let herdr = Herdr::from_env();
+    let _lock = lock_project(c, &herdr)?;
+    let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
     let state = current_state(c, &herdr)?;
     let (name, p) =
         plan::plan_add(c, &state, &env(c, &state, None, worktrees), role).map_err(Fail::run)?;
@@ -482,6 +531,7 @@ fn add(c: &Config, role: &str) -> Result<(), Fail> {
 
 fn close(c: &Config, name: &str) -> Result<(), Fail> {
     let herdr = Herdr::from_env();
+    let _lock = lock_project(c, &herdr)?;
     let state = current_state(c, &herdr)?;
     let close = plan::plan_close(c, &state, name).map_err(Fail::run)?;
     herdr

@@ -12,6 +12,9 @@ change between minor versions.
 
 ### Added
 
+- `up`, `add` and `close` wait for each other on a per-project lock instead of racing,
+  and the startup hook leaves a locked project to the command holding it. The lock is an
+  OS file lock in the repository's Git directory, released automatically even after a crash.
 - `CONTRIBUTING.md` and a bug report template for GitHub issues.
 - `SECURITY.md`: private vulnerability reporting, supported versions, and what to review
   in a project's `crew.toml` before running it.

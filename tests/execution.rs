@@ -1388,6 +1388,102 @@ fn query_transport_and_malformed_responses_stop_before_project_mutations() {
     }
 }
 
+/// The project's lock as another herdr-crew command would hold it.
+fn hold_project_lock(f: &Fixture) -> fs::File {
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(f.repo.join(".git/herdr-crew.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    lock
+}
+
+#[test]
+fn up_waits_for_another_command_before_reading_any_state() {
+    use std::process::Stdio;
+    let f = Fixture::new();
+    let lock = hold_project_lock(&f);
+    let mut up = f
+        .command(CREW)
+        .args(["up", "--no-attach"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Wait for up to announce that it is waiting; a fresh binary can be slow to start.
+    let stderr = up.stderr.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut rest = String::new();
+        for line in std::io::BufReader::new(stderr).lines() {
+            let line = line.unwrap();
+            if line.contains("waiting up to 120 s") {
+                send.send(()).unwrap();
+            } else {
+                rest.push_str(&line);
+                rest.push('\n');
+            }
+        }
+        rest
+    });
+    receive
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("up announces that it waits for the lock");
+    assert!(
+        up.try_wait().unwrap().is_none(),
+        "up must wait for the lock"
+    );
+    assert!(f.calls().is_empty(), "no herdr call before the lock");
+    f.no_generated_files();
+    drop(lock);
+    let status = up.wait().unwrap();
+    let rest = reader.join().unwrap();
+    assert!(status.success(), "{rest}");
+    assert_eq!(f.labels(), ["dev", "lead", "status"]);
+    assert_eq!(f.agents(), ["dev", "lead"]);
+    // The lock is free again for the next command.
+    assert!(f.up().contains("nothing to do"));
+}
+
+#[test]
+fn startup_leaves_a_locked_project_to_the_command_holding_it() {
+    let f = Fixture::new();
+    let w = f.result(&[
+        "workspace",
+        "create",
+        "--cwd",
+        f.repo.to_str().unwrap(),
+        "--label",
+        "repo",
+        "--no-focus",
+    ]);
+    let id = w["workspace"]["workspace_id"].as_str().unwrap();
+    let lock = hold_project_lock(&f);
+    let out = f
+        .command(CREW)
+        .arg("startup")
+        .env("HERDR_PLUGIN_ID", "herdr-crew")
+        .env(
+            "HERDR_PLUGIN_CONTEXT_JSON",
+            json!({"workspace_id": id}).to_string(),
+        )
+        .output()
+        .unwrap();
+    let stdout = success(out);
+    assert!(
+        stdout.contains("another herdr-crew command is changing it"),
+        "{stdout}"
+    );
+    assert_eq!(f.count(&["workspace", "rename"]), 0);
+    assert_eq!(f.count(&["tab", "create"]), 0);
+    assert_eq!(f.count(&["agent", "start"]), 0);
+    f.no_generated_files();
+    drop(lock);
+}
+
 #[test]
 fn startup_adopts_initial_workspace_then_repairs_only_board_on_restore() {
     let f = Fixture::new();
