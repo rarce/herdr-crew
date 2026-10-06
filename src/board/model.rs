@@ -1,8 +1,7 @@
 //! `status.json`: types, validation, order and age (design §5.1 and §5.2). Pure.
 
 use jiff::Timestamp;
-use serde::Deserialize;
-use serde::de::IgnoredAny;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::config::Config;
@@ -74,8 +73,8 @@ pub enum Unavailable {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RawStatus {
-    #[serde(rename = "$schema")]
-    _schema: Option<IgnoredAny>,
+    #[serde(rename = "$schema", default, deserialize_with = "present")]
+    _schema: Option<String>,
     version: Value,
     updated_at: String,
     updated_by: String,
@@ -92,8 +91,15 @@ struct RawSession {
     state: State,
     now: String,
     next: Vec<String>,
+    #[serde(default, deserialize_with = "present")]
     note: Option<String>,
+    #[serde(default, deserialize_with = "present")]
     updated_at: Option<String>,
+}
+
+/// An optional field that, when present, has its type: the schema allows no `null`.
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -111,7 +117,8 @@ pub fn load(bytes: &[u8], c: &Config) -> Result<Status, Unavailable> {
         .map_err(|e| Unavailable::Schema(vec![format!("(root): {e}")]))?;
     let mut errors = Vec::new();
 
-    if raw.version != 1 {
+    // JSON Schema compares numbers by value, so `1.0` is the `const` 1 too.
+    if raw.version.as_f64() != Some(1.0) {
         errors.push(format!("version: must be 1, not {}", raw.version));
     }
     let updated_at = date(&mut errors, "updatedAt", &raw.updated_at);

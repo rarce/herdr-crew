@@ -9,7 +9,7 @@ herdr-crew is a [herdr](https://herdr.dev/) plugin. You describe the project's r
 - **One command, idempotent.** `up` creates the workspace, the role tabs and their worktrees, and starts each agent with its prompt. Run it again and it only fills in what is missing; it never starts a second agent for a live role.
 - **Starts with herdr.** With the plugin installed, herdr's startup hook brings the project up in the workspace herdr opens. After a herdr restart it repairs only the board and leaves the resumed sessions alone.
 - **More hands on demand.** `add` and `close` add or remove extra instances of a role (`dev-2`, `dev-3`…), each in its own worktree if the role asks for one.
-- **A status board.** `board` draws `.herdr/status.json`, which the coordinating role keeps up to date, and validates it against a schema generated from `crew.toml`.
+- **A status board.** `board` draws `.herdr/status.json`, which the coordinating role keeps up to date, and validates it with the same rules as the JSON Schema it generates from `crew.toml`.
 - **Checked configuration.** Unknown keys and placeholders are errors reported with line and column, all at once.
 
 The design, with its decisions and the herdr behaviour they rely on, is in [docs/design.md](docs/design.md).

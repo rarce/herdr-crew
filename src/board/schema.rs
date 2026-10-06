@@ -162,6 +162,7 @@ pub fn seed(c: &Config, now: &str) -> String {
 mod tests {
     use super::*;
     use crate::board::model::load;
+    use crate::board::model::tests::fixture;
     use crate::config::tests::{basic, worktrees};
 
     #[test]
@@ -192,5 +193,79 @@ mod tests {
         let s = load(seed(&c, "2026-09-26T10:00:00-03:00").as_bytes(), &c).unwrap();
         assert!(s.sessions.is_empty());
         assert_eq!(s.updated_by, "globex-lead");
+    }
+
+    /// The viewer enforces every presence, type and emptiness rule the generated schema states
+    /// for the fields of each object, so a writer that follows the schema is never surprised.
+    /// Dates, `updatedBy`, roles and repeated roles have their own tests in `model`.
+    #[test]
+    fn viewer_enforces_the_schema_rules() {
+        let c = worktrees();
+        let schema: Value = serde_json::from_str(&generate(&c)).unwrap();
+        let mut board: Value = serde_json::from_slice(&fixture("status-worktrees.json")).unwrap();
+        board["sessions"][0]["note"] = json!("a note");
+        let accepts = |b: &Value| load(b.to_string().as_bytes(), &c).is_ok();
+        assert!(accepts(&board));
+        let with = |at: &str, change: &dyn Fn(&mut Value)| {
+            let mut b = board.clone();
+            change(b.pointer_mut(at).unwrap());
+            b
+        };
+
+        let objects = [
+            ("", &schema),
+            ("/owner", &schema["properties"]["owner"]),
+            ("/sessions/0", &schema["$defs"]["session"]),
+            ("/recent/0", &schema["properties"]["recent"]["items"]),
+        ];
+        for (at, object) in objects {
+            assert_eq!(object["additionalProperties"], false, "{at}");
+            let b = with(at, &|o| o["unknown"] = json!(1));
+            assert!(!accepts(&b), "{at}: unknown field");
+            let required = object["required"].as_array().unwrap();
+            let properties = object["properties"].as_object().unwrap();
+            assert!(
+                required
+                    .iter()
+                    .all(|r| properties.contains_key(r.as_str().unwrap()))
+            );
+            for (key, property) in properties {
+                let path = format!("{at}/{key}");
+                let b = with(at, &|o| {
+                    o.as_object_mut().unwrap().remove(key);
+                });
+                assert_eq!(
+                    accepts(&b),
+                    !required.contains(&json!(key)),
+                    "{path}: absent"
+                );
+                for wrong in [
+                    json!(null),
+                    json!(true),
+                    json!(123),
+                    json!({}),
+                    json!([123]),
+                ] {
+                    let b = with(&path, &|v| *v = wrong.clone());
+                    assert!(!accepts(&b), "{path}: {wrong}");
+                }
+                if property["type"] == "string" {
+                    let empty_allowed = property.get("minLength").is_none();
+                    let b = with(&path, &|v| *v = json!(""));
+                    assert_eq!(
+                        accepts(&b),
+                        empty_allowed && property.get("format").is_none(),
+                        "{path}: empty"
+                    );
+                }
+                if property["items"]["type"] == "string" {
+                    assert_eq!(property["items"]["minLength"], 1, "{path}");
+                    let b = with(&path, &|v| *v = json!([""]));
+                    assert!(!accepts(&b), "{path}: empty item");
+                }
+            }
+        }
+        let b = with("/version", &|v| *v = json!(1.0));
+        assert!(accepts(&b), "the const 1 compares by value");
     }
 }
