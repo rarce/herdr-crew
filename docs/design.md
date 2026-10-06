@@ -146,7 +146,7 @@ Every table is parsed with `toml` and `serde` with `deny_unknown_fields`, so an 
 | Rule                                                                                                                                          | Message (example)                                                            |
 | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | Valid TOML and known keys                                                                                                                     | `.herdr/crew.toml:14:1: unknown key "worktre" in roles[1]`                   |
-| `version = 1`                                                                                                                                 | `version 2 is not supported by herdr-crew 0.1.0 (supports 1)`                |
+| `version = 1`                                                                                                                                 | `version 2 is not supported by herdr-crew 0.2.0 (supports 1)`                |
 | A role name has the shape of a herdr agent name, `[a-z][a-z0-9_-]{0,31}` [vendor]; with `extra`, at most 29 characters to leave room for `-NN` | `roles[0].name "Lead_1": must match [a-z][a-z0-9_-]{0,31}`                   |
 | Unique names; none of the form `<extra role>-N`; `board.tab` differs from every role name                                                     | `roles[3].name "globex-dev-2" clashes with the extra instances of globex-dev` |
 | At least one role; `board.writer` is a role                                                                                                   | `board.writer "boss" is not a role in roles[]`                               |
@@ -180,7 +180,7 @@ agent retain the separate `.tmp` protocol described in the schema.
 ```toml
 id = "herdr-crew"
 name = "herdr crew"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.1"
 platforms = ["macos", "linux"]
 

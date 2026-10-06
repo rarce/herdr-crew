@@ -679,9 +679,11 @@ prompt = '''You are {{NAME}}.'''
     fn version() {
         assert_eq!(
             errors(&MIN.replace("version = 1", "version = 2")),
-            [
-                "herdr-crew: /r/p/.herdr/crew.toml: version 2 is not supported by herdr-crew 0.1.0 (supports 1)"
-            ]
+            [format!(
+                "herdr-crew: /r/p/.herdr/crew.toml: version 2 is not supported by herdr-crew {} \
+                 (supports 1)",
+                env!("CARGO_PKG_VERSION")
+            )]
         );
     }
 
