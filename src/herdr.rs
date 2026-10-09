@@ -347,59 +347,69 @@ pub fn execute(
             _ => {}
         }
     }
-    let pi_roles: Vec<&str> = plan
+    // The prompts this plan writes, as the agents will read them.
+    let prompts: HashMap<&str, &str> = plan
         .steps
         .iter()
         .filter_map(|step| match step {
+            Step::WritePrompt { name, content, .. } => Some((name.as_str(), content.as_str())),
+            _ => None,
+        })
+        .collect();
+    let prompt_of = |name: &str| {
+        prompts
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("the plan writes no prompt for {name}"))
+    };
+    let mut pi_roles = Vec::new();
+    let mut codex_roles = Vec::new();
+    for step in &plan.steps {
+        match step {
             Step::StartAgent {
                 name,
                 agent: AgentOptions::Pi(_),
                 ..
-            } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
+            } => pi_roles.push(name.as_str()),
+            Step::StartAgent {
+                name,
+                agent: AgentOptions::Codex(options),
+                ..
+            } => codex_roles.push((name.as_str(), options)),
+            _ => {}
+        }
+    }
     if !pi_roles.is_empty() {
         crate::pi::preflight()?;
         crate::pi::require_version("pi")?;
     }
-    // Once per plan: every Codex and pi role needs the same herdr.
-    let native = plan.steps.iter().find_map(|step| match step {
-        Step::StartAgent {
-            agent: AgentOptions::Codex(_),
-            ..
-        } => Some("Codex"),
-        Step::StartAgent {
-            agent: AgentOptions::Pi(_),
-            ..
-        } => Some("pi"),
-        _ => None,
-    });
+    if !codex_roles.is_empty() {
+        codex::validate_runtime(&c.root)?;
+    }
+    // Every Codex and pi role needs the same herdr.
+    let native = if !codex_roles.is_empty() {
+        Some("Codex")
+    } else if !pi_roles.is_empty() {
+        Some("pi")
+    } else {
+        None
+    };
     if let Some(kind) = native {
         herdr.require_native_server(kind)?;
     }
     for name in pi_roles {
-        let rendered = crate::prompt::render(c, name, &crate::binary());
-        if let Some(problem) = crate::pi::prompt_problem(name, &rendered) {
+        if let Some(problem) = crate::pi::prompt_problem(name, prompt_of(name)?) {
             return Err(problem);
         }
     }
-    for step in &plan.steps {
-        if let Step::StartAgent {
-            name,
-            agent: AgentOptions::Codex(options),
-            ..
-        } = step
-        {
-            codex::validate_runtime(&c.root)?;
-            codex::context_prompt(c, name, &crate::prompt::render(c, name, &crate::binary()))?;
-            let cwd = if c.session_role(name).unwrap().worktree {
-                c.worktree_path(name).unwrap()
-            } else {
-                c.root.clone()
-            };
-            codex::integration::preflight(&cwd, options, &c.root)?;
-        }
+    for (name, options) in codex_roles {
+        codex::context_prompt(c, name, prompt_of(name)?)?;
+        let cwd = if c.session_role(name).unwrap().worktree {
+            c.worktree_path(name).unwrap()
+        } else {
+            c.root.clone()
+        };
+        codex::integration::preflight(&cwd, options, &c.root)?;
     }
     let mut workspace = state.workspace.as_ref().map(|w| w.id.clone());
     let mut initial: Option<(String, String)> = None; // initial tab and pane of a new workspace
@@ -524,8 +534,7 @@ pub fn execute(
             } => {
                 let pane = pane_of(pane, &panes)?;
                 if let AgentOptions::Codex(options) = agent {
-                    let rendered = std::fs::read_to_string(prompt).map_err(|e| e.to_string())?;
-                    codex::prepare(herdr, c, name, &pane, &rendered, options)?;
+                    codex::prepare(herdr, c, name, &pane, prompt_of(name)?, options)?;
                 }
                 let native = match agent {
                     AgentOptions::Claude => vec![

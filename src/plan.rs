@@ -443,20 +443,37 @@ impl Plan {
     }
 }
 
-/// `s` single-quoted as one POSIX shell word.
-pub fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
+/// `s` single-quoted as one word of the shell the user types in: PowerShell on Windows, POSIX
+/// elsewhere.
+pub fn shell_quote(s: &str, windows: bool) -> String {
+    if windows {
+        format!("'{}'", s.replace('\'', "''"))
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 
-/// `s` as one POSIX shell word, quoted only when it needs it, for a command the user copies.
-fn shell_word(s: &str) -> String {
+/// `program` quoted at the start of a command; PowerShell runs a quoted path only after `&`.
+pub fn shell_program(program: &str, windows: bool) -> String {
+    let quoted = shell_quote(program, windows);
+    if windows {
+        format!("& {quoted}")
+    } else {
+        quoted
+    }
+}
+
+/// `s` as one shell word, quoted only when it needs it, for a command the user copies. `@`, `=`
+/// and `,` are left out of the plain set: zsh expands a leading `=`, and PowerShell reads `@` and
+/// `,` as operators.
+fn shell_word(s: &str, windows: bool) -> String {
     if !s.is_empty()
         && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"/._-+:@=,".contains(&b))
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-+:".contains(&b))
     {
         s.to_string()
     } else {
-        shell_quote(s)
+        shell_quote(s, windows)
     }
 }
 
@@ -533,7 +550,7 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                         Some(v) => format!(
                             "tab {} has no agent; restart it there with `pi --session {}`",
                             r.name,
-                            shell_word(&v)
+                            shell_word(&v, e.windows)
                         ),
                         None => format!(
                             "tab {} has no agent and herdr knows no session; close the tab and \
@@ -547,8 +564,8 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                     Some(v) => format!(
                         "tab {} has no agent; restart it there with `claude -r {} -n {}`",
                         r.name,
-                        shell_word(&v),
-                        shell_word(&r.name)
+                        shell_word(&v, e.windows),
+                        r.name
                     ),
                     // Roles start with `-n <role>`: the picker lists the conversations with that
                     // name, possibly older ones, and the user picks one.
@@ -556,8 +573,7 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                         "tab {} has no agent and herdr knows no session; restart it there with \
                          `claude -r {}` and pick its conversation, or, if it never had one, close \
                          the tab and run `herdr-crew up`",
-                        r.name,
-                        shell_word(&r.name)
+                        r.name, r.name
                     ),
                 }));
             }
@@ -735,14 +751,7 @@ fn agent_steps(c: &Config, e: &Env, steps: &mut Vec<Step>, name: &str) {
             new_tab: true,
         },
         None => Step::StartAgent {
-            agent: {
-                let role = c.session_role(name).unwrap();
-                match role.kind {
-                    Kind::Claude => AgentOptions::Claude,
-                    Kind::Codex => AgentOptions::Codex(role.codex.clone()),
-                    Kind::Pi => AgentOptions::Pi(role.pi.clone()),
-                }
-            },
+            agent: c.session_role(name).unwrap().agent(),
             name: name.to_string(),
             pane,
             prompt: path,
@@ -756,18 +765,13 @@ pub fn board_command(c: &Config, e: &Env) -> String {
     let bin = e.binary.display().to_string();
     let root = c.root.display().to_string();
     let file = c.board_path().display().to_string();
-    if e.windows {
-        let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
-        format!(
-            "& {} board --root {} --file {}",
-            q(&bin),
-            q(&root),
-            q(&file)
-        )
-    } else {
-        let q = shell_quote;
-        format!("{} board --root {} --file {}", q(&bin), q(&root), q(&file))
-    }
+    let q = |s: &str| shell_quote(s, e.windows);
+    format!(
+        "{} board --root {} --file {}",
+        shell_program(&bin, e.windows),
+        q(&root),
+        q(&file)
+    )
 }
 
 /// Label of the only tab of a workspace herdr has just created.
@@ -1887,9 +1891,15 @@ mod tests {
 
     #[test]
     fn shell_words_are_quoted_only_when_needed() {
-        assert_eq!(shell_word("acme-lead"), "acme-lead");
-        assert_eq!(shell_word(""), "''");
-        assert_eq!(shell_word("a b"), "'a b'");
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_word("acme-lead", false), "acme-lead");
+        assert_eq!(shell_word("", false), "''");
+        assert_eq!(shell_word("a b", false), "'a b'");
+        assert_eq!(shell_word("=abc", false), "'=abc'");
+        assert_eq!(shell_word("a,b", true), "'a,b'");
+        assert_eq!(shell_word("@x", true), "'@x'");
+        assert_eq!(shell_quote("it's", false), r"'it'\''s'");
+        assert_eq!(shell_quote("it's", true), "'it''s'");
+        assert_eq!(shell_program(r"C:\crew.exe", true), r"& 'C:\crew.exe'");
+        assert_eq!(shell_program("/crew", false), "'/crew'");
     }
 }
