@@ -317,6 +317,13 @@ fn choose(
         ));
     }
     // Flag combinations are checked first, so an invalid command line fails before asking.
+    let flags_need_worktrees = preset == Preset::Parallel
+        || (preset == Preset::Review
+            && !options.shared_checkout
+            && (options.base.is_some() || options.yes));
+    if flags_need_worktrees && !git::has_remote(root).map_err(Fail::run)? {
+        return Err(no_remote());
+    }
     let agent = if let Some(agent) = options.agent {
         agent
     } else if options.yes {
@@ -351,10 +358,9 @@ fn choose(
         _ => false,
     };
     let base = if isolated {
+        // Also reached after the interactive review answers yes to worktrees.
         if !git::has_remote(root).map_err(Fail::run)? {
-            return Err(Fail::usage(
-                "worktrees require a configured Git remote; configure one first, or use solo, research, or review --shared-checkout",
-            ));
+            return Err(no_remote());
         }
         writeln!(output, "Worktrees start from a remote branch, not uncommitted local changes. No fetch runs during setup.").map_err(io_fail)?;
         // An explicit base, from --base or the --yes default, is used once; the prompt
@@ -407,6 +413,12 @@ fn choose(
         base,
         ignore,
     })
+}
+
+fn no_remote() -> Fail {
+    Fail::usage(
+        "worktrees require a configured Git remote; configure one first, or use solo, research, or review --shared-checkout",
+    )
 }
 
 fn unfetched(base: &str) -> String {
@@ -872,6 +884,38 @@ mod tests {
         let (selection, output) = choose_with(&root, &interactive, "\n\n\n\n\n");
         assert_eq!(selection.base.as_deref(), Some("origin/main"));
         assert!(output.contains("Use origin/mian anyway? [y/N]"), "{output}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn worktree_presets_without_a_remote_fail_before_the_agent_question() {
+        let root = git::test_repo("init-no-remote");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["remote", "remove", "origin"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for options in [
+            Options {
+                preset: Some(Preset::Parallel),
+                ..Options::default()
+            },
+            Options {
+                preset: Some(Preset::Review),
+                yes: true,
+                ..Options::default()
+            },
+        ] {
+            let mut output = Vec::new();
+            let result = choose(&root, &options, &mut &b"\n"[..], &mut output);
+            let output = String::from_utf8(output).unwrap();
+            assert!(
+                matches!(&result, Err(Fail { code: 2, lines }) if lines[0].contains("configured Git remote"))
+            );
+            assert!(!output.contains("Agent ("), "{output}");
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 
