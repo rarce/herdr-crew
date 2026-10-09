@@ -1,9 +1,9 @@
 [package]
 name = "herdr-crew"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 default-run = "herdr-crew"
-description = "herdr plugin that starts Claude Code or Codex sessions per role and draws their status board"
+description = "herdr plugin that starts Claude Code, Codex or pi sessions per role and draws their status board"
 license = "MIT"
 repository = "https://github.com/rarce/herdr-crew"
 publish = false

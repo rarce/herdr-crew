@@ -10,8 +10,26 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-09
+
 ### Added
 
+- **pi support alongside Claude Code and Codex.** `kind = "pi"` per project or per
+  role, with typed `[pi]` / `[roles.pi]` options (`provider`, `model`, `thinking`) that
+  follow the same validation and inheritance as Codex. Roles start through herdr's native
+  `agent start --kind pi`, and herdr resumes them after a restart.
+- **`pi-install` / `pi-uninstall`.** One global pi extension (`herdr-crew.ts` in
+  `$PI_CODING_AGENT_DIR/extensions`) keeps the role prompt with each conversation. It
+  saves the prompt in the session file, names the session after the role and appends the
+  prompt to pi's system prompt on every turn, so a resumed session keeps its role.
+  `/new` and `/fork` carry the role over; `/resume` or `/reload` of an unrelated session
+  leaves it alone. If the prompt file cannot be read, the extension stops pi instead of
+  running the role without its prompt. The commands never overwrite or remove a file they
+  did not write. pi roles need herdr 0.9.3+ and pi 1.1.0+
+  (`@earendil-works/pi-coding-agent`), and `up` and `check` verify both and the
+  installed extension before any change.
+- `init --agent pi`, and `check` reports pi's version, the extension's status and pi
+  prompts over the 64 KiB cap, including those of extra instances.
 - `up`, `add` and `close` wait for each other on a per-project lock instead of racing,
   and the startup hook leaves a locked project to the command holding it. The lock is an
   OS file lock in the repository's Git directory, released automatically even after a crash.
@@ -85,6 +103,7 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/rarce/herdr-crew/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rarce/herdr-crew/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rarce/herdr-crew/releases/tag/v0.1.0
