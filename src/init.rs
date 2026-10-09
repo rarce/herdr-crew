@@ -9,18 +9,25 @@ use serde::Serialize;
 use crate::{Fail, config, git};
 
 const MAX_PREFIX: usize = 21; // Leave room for "-research-a" within a 32-byte agent name.
-/// Each generated-file rule with a path it must ignore, to ask Git whether the repository
-/// already decides that path with rules of its own. Directory rules use the directory, so
-/// that a rule for some of its files, such as `*.txt`, does not count for all of them.
-const IGNORE_RULES: &[(&str, &str)] = &[
-    ("/.herdr/status.json", ".herdr/status.json"),
-    ("/.herdr/status.json.tmp", ".herdr/status.json.tmp"),
-    ("/.herdr/.herdr-crew-*.tmp", ".herdr/.herdr-crew-1-0.tmp"),
-    ("/.herdr/status.schema.json", ".herdr/status.schema.json"),
-    ("/.herdr/prompts/", ".herdr/prompts/"),
-    ("/.herdr/codex/", ".herdr/codex/"),
+/// Each generated-file rule with the paths it must ignore, to ask Git whether the repository
+/// already covers them with rules of its own. A directory rule needs both the directory, so
+/// that a rule for some of its files such as `*.txt` is not enough, and a file of the shape
+/// setup writes there, so that a whitelist's `*` does not hide a re-included `!*.txt`.
+const IGNORE_RULES: &[(&str, &[&str])] = &[
+    ("/.herdr/status.json", &[".herdr/status.json"]),
+    ("/.herdr/status.json.tmp", &[".herdr/status.json.tmp"]),
+    ("/.herdr/.herdr-crew-*.tmp", &[".herdr/.herdr-crew-1-0.tmp"]),
+    ("/.herdr/status.schema.json", &[".herdr/status.schema.json"]),
+    (
+        "/.herdr/prompts/",
+        &[".herdr/prompts/", ".herdr/prompts/role.txt"],
+    ),
+    (
+        "/.herdr/codex/",
+        &[".herdr/codex/", ".herdr/codex/bindings/role.json"],
+    ),
 ];
-const WORKTREES_RULE: (&str, &str) = ("/.worktrees/", ".worktrees/");
+const WORKTREES_RULE: (&str, &[&str]) = ("/.worktrees/", &[".worktrees/", ".worktrees/role/file"]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
@@ -297,6 +304,19 @@ fn choose(
             writeln!(output, "Enter 1-4 or solo, review, parallel, research.").map_err(io_fail)?;
         }
     };
+    if options.shared_checkout && preset != Preset::Review {
+        return Err(Fail::usage(
+            "--shared-checkout applies only to the review preset; parallel requires worktrees",
+        ));
+    }
+    if options.base.is_some()
+        && (options.shared_checkout || !matches!(preset, Preset::Review | Preset::Parallel))
+    {
+        return Err(Fail::usage(
+            "--base requires a review or parallel preset using worktrees",
+        ));
+    }
+    // Flag combinations are checked first, so an invalid command line fails before asking.
     let agent = if let Some(agent) = options.agent {
         agent
     } else if options.yes {
@@ -317,18 +337,6 @@ fn choose(
             writeln!(output, "Enter one of: {}.", names.join(", ")).map_err(io_fail)?;
         }
     };
-    if options.shared_checkout && preset != Preset::Review {
-        return Err(Fail::usage(
-            "--shared-checkout applies only to the review preset; parallel requires worktrees",
-        ));
-    }
-    if options.base.is_some()
-        && (options.shared_checkout || !matches!(preset, Preset::Review | Preset::Parallel))
-    {
-        return Err(Fail::usage(
-            "--base requires a review or parallel preset using worktrees",
-        ));
-    }
     let suggested_base = git::default_base(root);
     let isolated = match preset {
         Preset::Parallel => true,
@@ -349,35 +357,36 @@ fn choose(
             ));
         }
         writeln!(output, "Worktrees start from a remote branch, not uncommitted local changes. No fetch runs during setup.").map_err(io_fail)?;
-        if let Some(base) = &options.base {
-            git::validate_base(root, base).map_err(Fail::usage)?;
-            if !fetched(root, base) {
-                writeln!(output, "{}", unfetched(base)).map_err(io_fail)?;
-            }
-            Some(base.clone())
-        } else if options.yes {
-            let base = suggested_base.ok_or_else(|| Fail::usage("no remote branch found; set --base REMOTE/BRANCH, or use review --shared-checkout"))?;
-            git::validate_base(root, &base).map_err(Fail::usage)?;
-            Some(base)
-        } else {
-            loop {
-                let base = ask(
+        // An explicit base, from --base or the --yes default, is used once; the prompt
+        // follows when it is declined. Without --yes, an unfetched base needs confirmation.
+        let mut given = options.base.clone();
+        if given.is_none() && options.yes {
+            given = Some(suggested_base.clone().ok_or_else(|| Fail::usage("no remote branch found; set --base REMOTE/BRANCH, or use review --shared-checkout"))?);
+        }
+        loop {
+            let explicit = given.take();
+            let base = match &explicit {
+                Some(base) => base.clone(),
+                None => ask(
                     input,
                     output,
                     "Worktree base (configured remote/branch)",
                     suggested_base.as_deref(),
-                )?;
-                if let Err(error) = git::validate_base(root, &base) {
-                    writeln!(output, "{error}").map_err(io_fail)?;
-                    continue;
+                )?,
+            };
+            if let Err(error) = git::validate_base(root, &base) {
+                if explicit.is_some() {
+                    return Err(Fail::usage(error));
                 }
-                if fetched(root, &base) {
-                    break Some(base);
-                }
-                writeln!(output, "{}", unfetched(&base)).map_err(io_fail)?;
-                if yes_no(input, output, &format!("Use {base} anyway?"), false)? {
-                    break Some(base);
-                }
+                writeln!(output, "{error}").map_err(io_fail)?;
+                continue;
+            }
+            if git::knows_base(root, &base) {
+                break Some(base);
+            }
+            writeln!(output, "{}", unfetched(&base)).map_err(io_fail)?;
+            if options.yes || yes_no(input, output, &format!("Use {base} anyway?"), false)? {
+                break Some(base);
             }
         }
     } else {
@@ -398,12 +407,6 @@ fn choose(
         base,
         ignore,
     })
-}
-
-/// Whether a validated `REMOTE/BRANCH` base is already known locally.
-fn fetched(root: &Path, base: &str) -> bool {
-    base.split_once('/')
-        .is_some_and(|(remote, branch)| git::knows_remote_branch(root, remote, branch))
 }
 
 fn unfetched(base: &str) -> String {
@@ -560,34 +563,58 @@ fn ignore_check(root: &Path, worktrees: bool, ignore: bool) -> Result<IgnoreChec
             rules.push(WORKTREES_RULE);
         }
     }
-    let mut samples: Vec<&str> = rules.iter().map(|(_, sample)| *sample).collect();
+    let mut samples: Vec<&str> = rules
+        .iter()
+        .flat_map(|(_, samples)| *samples)
+        .copied()
+        .collect();
     samples.push(config::CONFIG_FILE);
-    let mut decided = git::ignore_rules(root, &samples)
-        .unwrap_or_else(|_| samples.iter().map(|_| None).collect());
-    let warning = decided.pop().flatten().filter(git::IgnoreRule::ignores).map(|rule| {
-        format!(
-            "Warning: {}:{} ignores {} with {:?}. Git will not version the crew until that rule changes.",
-            rule.source,
-            rule.line,
-            config::CONFIG_FILE,
-            rule.pattern
-        )
-    });
+    let answer = git::ignore_rules(root, &samples).ok();
+    let warning = answer
+        .as_ref()
+        .and_then(|decided| decided.last()?.as_ref())
+        .filter(|rule| rule.ignores())
+        .map(|rule| {
+            format!(
+                "Warning: {}:{} ignores {} with {:?}. Git will not version the crew until that rule changes.",
+                rule.source,
+                rule.line,
+                config::CONFIG_FILE,
+                rule.pattern
+            )
+        });
+    let shared = answer
+        .as_ref()
+        .map(|decided| git::shared_rules(root, decided));
     // A shared .gitignore rule that ignores the path, such as `.herdr/`, already covers it.
     // A negation counts only when it names this rule's path: the team chose to version that
     // file on purpose, while a broad `!*.json` in a whitelist was never meant for the board.
-    // Git does not report negated directories, so a line naming the rule counts too. Local
-    // and global excludes do not count: other clones lack them.
+    // Git does not report negated directories, so a `!` line naming the rule counts too.
+    // Otherwise Git's answer decides, even over an exact line that a later negation undoes.
+    // Local and global excludes do not count: other clones lack them. Without an answer from
+    // Git, setup falls back to exact lines.
+    let mut next = 0;
     let missing: Vec<&str> = rules
         .iter()
-        .zip(&decided)
-        .filter(|((rule, _), decided)| {
-            let covered = decided.as_ref().is_some_and(|decided| {
-                decided.shared(root) && (decided.ignores() || same_path(&decided.pattern, rule))
-            });
-            !covered && !contents.lines().any(|line| same_path(line, rule))
+        .filter(|(rule, rule_samples)| {
+            let range = next..next + rule_samples.len();
+            next = range.end;
+            let covered = match (&answer, &shared) {
+                (Some(decided), Some(shared)) => {
+                    range.clone().all(|i| {
+                        shared[i]
+                            && decided[i].as_ref().is_some_and(|decided| {
+                                decided.ignores() || same_path(&decided.pattern, rule)
+                            })
+                    }) || contents
+                        .lines()
+                        .any(|line| line.trim().starts_with('!') && same_path(line, rule))
+                }
+                _ => contents.lines().any(|line| same_path(line, rule)),
+            };
+            !covered
         })
-        .map(|((rule, _), _)| *rule)
+        .map(|(rule, _)| *rule)
         .collect();
     let addition = if missing.is_empty() {
         String::new()
@@ -838,6 +865,29 @@ mod tests {
         let (selection, output) = choose_with(&root, &flag, "");
         assert_eq!(selection.base.as_deref(), Some("origin/mian"));
         assert!(output.contains("Warning: origin/mian"), "{output}");
+
+        // Without --yes, the flag's value needs the same confirmation as a typed one, and
+        // declining it falls back to the prompt.
+        let interactive = Options { yes: false, ..flag };
+        let (selection, output) = choose_with(&root, &interactive, "\n\n\n\n\n");
+        assert_eq!(selection.base.as_deref(), Some("origin/main"));
+        assert!(output.contains("Use origin/mian anyway? [y/N]"), "{output}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn flag_combinations_fail_before_the_agent_question() {
+        let root = git::test_repo("init-flags");
+        let options = Options {
+            preset: Some(Preset::Solo),
+            base: Some("origin/main".into()),
+            ..Options::default()
+        };
+        let mut output = Vec::new();
+        let result = choose(&root, &options, &mut &b"\n"[..], &mut output);
+        let output = String::from_utf8(output).unwrap();
+        assert!(matches!(result, Err(Fail { code: 2, .. })));
+        assert!(!output.contains("Agent ("), "{output}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -889,9 +939,21 @@ mod tests {
         std::fs::write(&gitignore, "*\n!*/\n!*.json\n!*.toml\n").unwrap();
         assert_eq!(
             addition(&root, false),
-            "\n# Generated crew files\n/.herdr/status.json\n/.herdr/status.schema.json\n"
+            "\n# Generated crew files\n/.herdr/status.json\n/.herdr/status.schema.json\n/.herdr/codex/\n"
         );
         assert!(warning(&root).is_none());
+
+        // A whitelist's `*` reports the directory as ignored while `!*.txt` re-includes
+        // the prompt files inside it.
+        std::fs::write(&gitignore, "*\n!*/\n!*.txt\n").unwrap();
+        assert_eq!(
+            addition(&root, false),
+            "\n# Generated crew files\n/.herdr/prompts/\n"
+        );
+
+        // An exact line does not count when a later negation re-includes the file.
+        std::fs::write(&gitignore, "/.herdr/status.json\n!*.json\n").unwrap();
+        assert!(addition(&root, false).contains("\n/.herdr/status.json\n"));
 
         // Local excludes do not count: other clones lack them.
         std::fs::remove_file(&gitignore).unwrap();

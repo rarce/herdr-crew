@@ -214,8 +214,10 @@ pub fn existing_worktrees(c: &Config) -> Result<BTreeSet<String>, String> {
 /// The base is saved in a versioned `crew.toml`, so it prefers a default branch over the
 /// current branch's upstream: a feature branch would become the base of every future
 /// worktree. The upstream wins only when it is its remote's recorded default branch, or is
-/// named `main` or `master` on a remote without one (a fork's `upstream/main`, say), and
-/// otherwise is just a fallback before an arbitrary branch.
+/// named `main` or `master` on a remote without one (a fork's `upstream/main`, say). Next come
+/// the upstream remote's recorded default, origin's, `origin/main` and `origin/master`, any
+/// remote's recorded default or `main`/`master`, and only then the upstream itself or an
+/// arbitrary branch. Remote names are not assumed to be `origin`.
 pub fn default_base(root: &Path) -> Option<String> {
     let refs = git(
         root,
@@ -252,28 +254,38 @@ pub fn default_base(root: &Path) -> Option<String> {
         ],
     )
     .ok();
-    let looks_default = |base: &String| {
-        match heads.iter().find(|(remote, _)| {
-            base.strip_prefix(remote.as_str())
-                .is_some_and(|rest| rest.starts_with('/'))
-        }) {
-            // A recorded default, such as `develop`, beats a stale or release `master`.
-            Some((_, default)) => default == base,
-            None => base
-                .split_once('/')
-                .is_some_and(|(_, branch)| matches!(branch, "main" | "master")),
-        }
+    let recorded = |base: &str| {
+        heads
+            .iter()
+            .find(|(remote, _)| {
+                base.strip_prefix(remote.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .map(|(_, default)| default.clone())
     };
-    let origin_head = heads
-        .iter()
-        .find(|(remote, _)| remote == "origin")
-        .map(|(_, default)| default.clone());
-    upstream
-        .iter()
-        .filter(|u| looks_default(u))
+    let named_default = |base: &String| {
+        base.split_once('/')
+            .is_some_and(|(_, branch)| matches!(branch, "main" | "master"))
+    };
+    // A recorded default, such as `develop`, beats a stale or release `master`.
+    let upstream_default = upstream.as_deref().and_then(recorded);
+    let upstream_wins = upstream.iter().find(|u| match &upstream_default {
+        Some(default) => default == *u,
+        None => named_default(u),
+    });
+    upstream_wins
         .cloned()
-        .chain(origin_head)
+        .into_iter()
+        .chain(upstream_default.clone())
+        .chain(
+            heads
+                .iter()
+                .find(|(remote, _)| remote == "origin")
+                .map(|(_, default)| default.clone()),
+        )
         .chain(["origin/main".into(), "origin/master".into()])
+        .chain(heads.iter().map(|(_, default)| default.clone()))
+        .chain(branches.iter().filter(|b| named_default(b)).cloned())
         .chain(upstream.clone())
         .find(|candidate| branches.contains(candidate))
         .or_else(|| branches.first().cloned())
@@ -281,10 +293,8 @@ pub fn default_base(root: &Path) -> Option<String> {
 
 /// Validate the remote and branch syntax used by the existing worktree planner, offline.
 pub fn validate_base(root: &Path, base: &str) -> Result<(), String> {
-    let (remote, branch) = base
-        .split_once('/')
-        .filter(|(remote, branch)| !remote.is_empty() && !branch.is_empty())
-        .ok_or("use a configured remote and branch, such as origin/main")?;
+    let (remote, branch) =
+        split_base(base).ok_or("use a configured remote and branch, such as origin/main")?;
     if remote.starts_with('-') || branch.starts_with('-') {
         return Err("remote and branch names cannot start with -".into());
     }
@@ -297,6 +307,17 @@ pub fn validate_base(root: &Path, base: &str) -> Result<(), String> {
     git(root, &["check-ref-format", &format!("refs/heads/{branch}")])
         .map_err(|_| format!("{branch:?} is not a valid Git branch name"))?;
     Ok(())
+}
+
+/// `REMOTE/BRANCH`, split at the first `/` like the worktree planner does.
+fn split_base(base: &str) -> Option<(&str, &str)> {
+    base.split_once('/')
+        .filter(|(remote, branch)| !remote.is_empty() && !branch.is_empty())
+}
+
+/// Whether a `REMOTE/BRANCH` base is already known locally, without fetching.
+pub fn knows_base(root: &Path, base: &str) -> bool {
+    split_base(base).is_some_and(|(remote, branch)| knows_remote_branch(root, remote, branch))
 }
 
 /// Whether `<remote>/<branch>` is already known locally, without fetching.
@@ -333,22 +354,53 @@ impl IgnoreRule {
         !self.pattern.starts_with('!')
     }
 
-    /// Whether the rule lives in a `.gitignore` that the repository shares, as opposed to
-    /// `.git/info/exclude` or an excludes file that other clones do not have. Git reports a
-    /// relative `core.excludesFile` relative too, so only the root `.gitignore`, which setup
-    /// itself writes, or a tracked `.gitignore` in a subdirectory counts.
-    pub fn shared(&self, root: &Path) -> bool {
+    /// Whether the rule comes from a `.gitignore` inside the repository: the root one, which
+    /// setup itself writes, or one in a subdirectory, which counts only when tracked. Git
+    /// reports a relative `core.excludesFile` relative too, so `..` sources never count.
+    fn in_repository(&self) -> bool {
         let source = Path::new(&self.source);
-        if source.file_name() != Some(".gitignore".as_ref())
-            || !source
+        source.file_name() == Some(".gitignore".as_ref())
+            && source
                 .components()
                 .all(|c| matches!(c, std::path::Component::Normal(_)))
-        {
-            return false;
-        }
-        source == Path::new(".gitignore")
-            || git(root, &["ls-files", "--error-unmatch", "--", &self.source]).is_ok()
     }
+}
+
+/// For each rule, whether it lives in a `.gitignore` that the repository shares, as opposed
+/// to `.git/info/exclude` or an excludes file that other clones do not have. One `ls-files`
+/// covers every subdirectory `.gitignore` involved.
+pub fn shared_rules(root: &Path, rules: &[Option<IgnoreRule>]) -> Vec<bool> {
+    let mut nested: Vec<&str> = rules
+        .iter()
+        .flatten()
+        .filter(|rule| rule.in_repository() && rule.source != ".gitignore")
+        .map(|rule| rule.source.as_str())
+        .collect();
+    nested.sort_unstable();
+    nested.dedup();
+    let tracked: BTreeSet<String> = if nested.is_empty() {
+        BTreeSet::new()
+    } else {
+        let mut args = vec!["ls-files", "-z", "--"];
+        args.extend(&nested);
+        git(root, &args)
+            .map(|out| {
+                out.split('\0')
+                    .filter(|p| !p.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    rules
+        .iter()
+        .map(|rule| {
+            rule.as_ref().is_some_and(|rule| {
+                rule.in_repository()
+                    && (rule.source == ".gitignore" || tracked.contains(&rule.source))
+            })
+        })
+        .collect()
 }
 
 /// The rule deciding each of `paths` (relative to `root`), or `None` when no rule matches.
@@ -557,23 +609,67 @@ mod tests {
     }
 
     #[test]
+    fn a_feature_upstream_loses_to_its_remotes_default_whatever_the_remote_name() {
+        let root = test_repo("base-named");
+        git(&root, &["remote", "remove", "origin"]).unwrap();
+        git(
+            &root,
+            &["remote", "add", "github", "https://example.invalid/r.git"],
+        )
+        .unwrap();
+        test_remote_branch(&root, "github/trunk");
+        test_remote_branch(&root, "github/feature-x");
+        git(
+            &root,
+            &["branch", "--quiet", "--set-upstream-to", "github/feature-x"],
+        )
+        .unwrap();
+        // Without a recorded default, a `main` or `master` would still beat the upstream.
+        test_remote_branch(&root, "github/main");
+        assert_eq!(default_base(&root).as_deref(), Some("github/main"));
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/github/HEAD",
+                "refs/remotes/github/trunk",
+            ],
+        )
+        .unwrap();
+        assert_eq!(default_base(&root).as_deref(), Some("github/trunk"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn only_the_root_or_a_tracked_gitignore_is_shared() {
         let root = test_repo("ignore-shared");
-        let rule = |source: &str| IgnoreRule {
-            source: source.into(),
-            line: "1".into(),
-            pattern: ".herdr/".into(),
+        let rule = |source: &str| {
+            Some(IgnoreRule {
+                source: source.into(),
+                line: "1".into(),
+                pattern: ".herdr/".into(),
+            })
         };
-        assert!(rule(".gitignore").shared(&root));
-        // A relative core.excludesFile is reported relative to the root.
-        assert!(!rule("../.gitignore").shared(&root));
-        assert!(!rule(".git/info/exclude").shared(&root));
-        assert!(!rule("/home/user/.gitignore").shared(&root));
         std::fs::create_dir(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/.gitignore"), "*\n").unwrap();
-        assert!(!rule("sub/.gitignore").shared(&root));
+        let rules = [
+            rule(".gitignore"),
+            // A relative core.excludesFile is reported relative to the root.
+            rule("../.gitignore"),
+            rule(".git/info/exclude"),
+            rule("/home/user/.gitignore"),
+            rule("sub/.gitignore"),
+            None,
+        ];
+        assert_eq!(
+            shared_rules(&root, &rules),
+            [true, false, false, false, false, false]
+        );
         git(&root, &["add", "--force", "sub/.gitignore"]).unwrap();
-        assert!(rule("sub/.gitignore").shared(&root));
+        assert_eq!(
+            shared_rules(&root, &rules),
+            [true, false, false, false, true, false]
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -596,16 +692,17 @@ mod tests {
             panic!("{rules:?}")
         };
         let status = status.as_ref().unwrap();
-        assert!(status.ignores() && status.shared(&root));
+        assert!(status.ignores());
         assert_eq!(
             (status.line.as_str(), status.pattern.as_str()),
             ("1", "/.herdr/*")
         );
         let config = config.as_ref().unwrap();
-        assert!(!config.ignores() && config.shared(&root));
+        assert!(!config.ignores());
         let notes = notes.as_ref().unwrap();
-        assert!(notes.ignores() && !notes.shared(&root), "{notes:?}");
+        assert!(notes.ignores(), "{notes:?}");
         assert_eq!(source, &None);
+        assert_eq!(shared_rules(&root, &rules), [true, true, false, false]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

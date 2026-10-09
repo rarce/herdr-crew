@@ -270,6 +270,20 @@ impl PiOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_lists_every_kind_once() {
+        // Adding a variant breaks this match, a reminder to add it to `Kind::ALL` as well.
+        let position = |kind: Kind| match kind {
+            Kind::Claude => 0,
+            Kind::Codex => 1,
+            Kind::Pi => 2,
+        };
+        for (i, kind) in Kind::ALL.into_iter().enumerate() {
+            assert_eq!(position(kind), i);
+            assert_eq!(Kind::parse(kind.as_str()), Some(kind));
+        }
+    }
     #[test]
     fn individual_overrides_and_empty_directories_are_preserved() {
         let defaults = CodexOptions {
