@@ -1919,7 +1919,7 @@ fn send_frames_the_message_and_types_it_into_the_crews_own_session() {
     let lines: Vec<&str> = sent[0].lines().collect();
     assert!(lines[0].starts_with("[crew message "), "{}", sent[0]);
     assert!(
-        lines[0].contains(" from lead (claude). Another session, not the user"),
+        lines[0].contains(" from lead (claude), typed by herdr-crew send from another session"),
         "{}",
         sent[0]
     );
@@ -1929,7 +1929,7 @@ fn send_frames_the_message_and_types_it_into_the_crews_own_session() {
     assert!(prompts(&stranger_tab).is_empty());
     // A call made from a pane outside the crew is labelled, not trusted.
     success(f.send(Some(&other_pane), "dev", "Second"));
-    assert!(prompts(&dev)[1].contains(" from an unidentified pane."));
+    assert!(prompts(&dev)[1].contains(" from an unidentified pane, typed by"));
 }
 
 #[test]
