@@ -155,6 +155,10 @@ case "${1-} ${2-}" in
             prompt=$(option --append-system-prompt-file "$@")
             [ -s "$prompt" ] || { echo 'prompt missing at agent start' >&2; exit 99; }
         fi
+        if [ "$kind" = pi ]; then
+            prompt=$(option --herdr-crew-prompt "$@")
+            [ -s "$prompt" ] || { echo 'prompt missing at agent start' >&2; exit 99; }
+        fi
         printf '%s' "$kind" > "$t/kind"
         printf '{"name":%s,"kind":"%s","workspace_id":"%s","tab_id":"%s","pane_id":"%s"}' "$(quote "$3")" "$kind" "$w" "${t##*/}" "$pane" > "$t/agent"
         printf 'session-%s' "$pane" > "$t/session"

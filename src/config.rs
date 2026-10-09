@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use toml::de::{DeTable, DeValue};
 
-use crate::agent::{CODEX_KEYS, CodexOptions, Kind};
+use crate::agent::{CODEX_KEYS, CodexOptions, Kind, PI_KEYS, PiOptions};
 use crate::{files, prompt};
 
 pub const CONFIG_FILE: &str = ".herdr/crew.toml";
@@ -39,6 +39,7 @@ pub struct Config {
     pub root: PathBuf,
     pub kind: Kind,
     pub codex: CodexOptions,
+    pub pi: PiOptions,
     pub label: String,
     pub board: Board,
     pub worktrees: Option<Worktrees>,
@@ -69,6 +70,7 @@ pub struct Worktrees {
 pub struct Role {
     pub kind: Kind,
     pub codex: CodexOptions,
+    pub pi: PiOptions,
     pub name: String,
     pub prompt: String,
     pub worktree: bool,
@@ -84,6 +86,8 @@ struct RawConfig {
     kind: Kind,
     #[serde(default)]
     codex: CodexOptions,
+    #[serde(default)]
+    pi: PiOptions,
     version: i64,
     workspace: RawWorkspace,
     board: RawBoard,
@@ -120,6 +124,7 @@ struct RawWorktrees {
 struct RawRole {
     kind: Option<Kind>,
     codex: Option<CodexOptions>,
+    pi: Option<PiOptions>,
     name: String,
     prompt: String,
     #[serde(default)]
@@ -134,6 +139,7 @@ const ROOT_KEYS: &[&str] = &[
     "version",
     "kind",
     "codex",
+    "pi",
     "workspace",
     "board",
     "worktrees",
@@ -143,6 +149,7 @@ const ROOT_KEYS: &[&str] = &[
 ];
 const TABLE_KEYS: &[(&str, &[&str])] = &[
     ("codex", CODEX_KEYS),
+    ("pi", PI_KEYS),
     ("workspace", &["label"]),
     ("board", &["tab", "file", "writer"]),
     ("worktrees", &["dir", "base"]),
@@ -155,6 +162,7 @@ const ROLE_KEYS: &[&str] = &[
     "start_message",
     "kind",
     "codex",
+    "pi",
 ];
 
 impl Config {
@@ -210,6 +218,9 @@ impl Config {
         for problem in raw.codex.problems() {
             err(format!("codex.{problem}"));
         }
+        for problem in raw.pi.problems() {
+            err(format!("pi.{problem}"));
+        }
         for (i, r) in raw.roles.iter().enumerate() {
             if let Some(options) = &r.codex {
                 if r.kind.unwrap_or(raw.kind) != Kind::Codex {
@@ -218,6 +229,26 @@ impl Config {
                 for problem in options.problems() {
                     err(format!("roles[{i}].codex.{problem}"));
                 }
+            }
+            if let Some(options) = &r.pi {
+                if r.kind.unwrap_or(raw.kind) != Kind::Pi {
+                    err(format!("roles[{i}].pi requires kind = \"pi\""));
+                }
+                for problem in options.problems() {
+                    err(format!("roles[{i}].pi.{problem}"));
+                }
+            }
+            // pi reads a positional argument that starts with "@" as a file to attach.
+            if r.kind.unwrap_or(raw.kind) == Kind::Pi
+                && r.start_message
+                    .as_deref()
+                    .or(raw.start_message.as_deref())
+                    .is_some_and(|m| m.starts_with('@'))
+            {
+                err(format!(
+                    "roles[{i}]: the start_message of a pi role must not start with \"@\", which \
+                     pi would read as a file to attach"
+                ));
             }
             if !is_agent_name(&r.name) {
                 err(format!(
@@ -308,6 +339,7 @@ impl Config {
             root: root.to_path_buf(),
             kind: raw.kind,
             codex: raw.codex.clone(),
+            pi: raw.pi.clone(),
             label: raw.workspace.label,
             board: Board {
                 tab: raw.board.tab,
@@ -326,6 +358,7 @@ impl Config {
                 .map(|r| Role {
                     kind: r.kind.unwrap_or(raw.kind),
                     codex: r.codex.unwrap_or_default().inherit(&raw.codex),
+                    pi: r.pi.unwrap_or_default().inherit(&raw.pi),
                     name: r.name,
                     prompt: r.prompt,
                     worktree: r.worktree,
@@ -432,10 +465,12 @@ fn unknown_keys(root: &DeTable<'_>) -> Vec<(Range<usize>, String)> {
             for (i, item) in items.iter().enumerate() {
                 if let DeValue::Table(t) = item.get_ref() {
                     check(t, ROLE_KEYS, &format!("roles[{i}]"));
-                    if let Some(value) = t.get("codex")
-                        && let DeValue::Table(options) = value.get_ref()
-                    {
-                        check(options, CODEX_KEYS, &format!("roles[{i}].codex"));
+                    for (agent, known) in [("codex", CODEX_KEYS), ("pi", PI_KEYS)] {
+                        if let Some(value) = t.get(agent)
+                            && let DeValue::Table(options) = value.get_ref()
+                        {
+                            check(options, known, &format!("roles[{i}].{agent}"));
+                        }
                     }
                 }
             }
@@ -901,5 +936,50 @@ prompt = '''You are {{NAME}}.'''
             w.worktree_path("globex-dev-2").unwrap(),
             Path::new("/r/globex/.worktrees/globex-dev-2")
         );
+    }
+
+    #[test]
+    fn pi_roles_inherit_options_and_reject_foreign_ones() {
+        let text = WORKTREES
+            .replace("version = 1", "version = 1\nkind = \"pi\"")
+            .replace(
+                "[workspace]",
+                "[pi]\nprovider = \"anthropic\"\nthinking = \"high\"\n[workspace]",
+            );
+        let c = Config::parse(&text, Path::new("/r/globex")).unwrap();
+        assert!(c.roles.iter().all(|role| role.kind == Kind::Pi));
+        let extra = c.session_role("globex-dev-2").unwrap();
+        assert_eq!(extra.pi.provider.as_deref(), Some("anthropic"));
+        assert_eq!(extra.pi.thinking.as_deref(), Some("high"));
+        assert!(
+            errors(&format!("{MIN}[roles.pi]\nmodel = \"sonnet\"\n"))
+                .iter()
+                .any(|error| error.contains("roles[0].pi requires kind = \"pi\""))
+        );
+        let e = errors(&format!(
+            "{MIN}kind = \"pi\"\n[roles.pi]\nsandbox = \"x\"\n"
+        ));
+        assert!(
+            e[0].contains("unknown key \"sandbox\" in roles[0].pi"),
+            "{e:?}"
+        );
+        let e = errors(&format!(
+            "{MIN}kind = \"pi\"\n[roles.pi]\nthinking = \"max\"\n"
+        ));
+        assert!(
+            e[0].ends_with(
+                "roles[0].pi.thinking: expected one of off, minimal, low, medium, high, xhigh"
+            ),
+            "{e:?}"
+        );
+        // pi reads a leading "@" as a file to attach; Claude passes it on as text.
+        let mention = "start_message = \"@p-lead: confirm your role\"\n";
+        let e = errors(&format!("{MIN}kind = \"pi\"\n{mention}"));
+        assert!(
+            e.iter()
+                .any(|error| error.contains("roles[0]: the start_message of a pi role")),
+            "{e:?}"
+        );
+        assert!(Config::parse(&format!("{MIN}{mention}"), Path::new("/r/p")).is_ok());
     }
 }

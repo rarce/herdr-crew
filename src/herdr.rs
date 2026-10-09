@@ -45,13 +45,34 @@ impl Herdr {
         }
     }
 
-    pub fn require_codex_version(&self) -> Result<(), String> {
+    pub fn require_native_version(&self) -> Result<(), String> {
         crate::process::version(
             self.bin
                 .to_str()
                 .ok_or("Herdr executable path must be UTF-8")?,
             (0, 9, 3),
         )
+    }
+
+    /// Codex and pi roles rely on herdr 0.9.3's native integrations, in both the executable and
+    /// the running server.
+    pub fn require_native_server(&self, kind: &str) -> Result<(), String> {
+        self.require_native_version()?;
+        self.require_server_version(kind)
+    }
+
+    /// The running server's half of [`Herdr::require_native_server`].
+    pub fn require_server_version(&self, kind: &str) -> Result<(), String> {
+        let status = self
+            .call(&["status", "server", "--json"])
+            .map_err(|e| e.to_string())?;
+        if status["version"]
+            .as_str()
+            .is_none_or(|v| !codex::supported_herdr(v))
+        {
+            return Err(format!("{kind} crews require Herdr server 0.9.3 or newer"));
+        }
+        Ok(())
     }
 
     /// Runs `herdr <args>` and returns `.result` (`null` when a command prints nothing).
@@ -325,6 +346,39 @@ pub fn execute(
             _ => {}
         }
     }
+    let pi_roles: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::StartAgent {
+                name,
+                kind: Kind::Pi,
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !pi_roles.is_empty() {
+        crate::pi::preflight()?;
+        crate::pi::require_version("pi")?;
+    }
+    // Once per plan: every Codex and pi role needs the same herdr.
+    let native = plan.steps.iter().find_map(|step| match step {
+        Step::StartAgent {
+            kind: Kind::Codex, ..
+        } => Some("Codex"),
+        Step::StartAgent { kind: Kind::Pi, .. } => Some("pi"),
+        _ => None,
+    });
+    if let Some(kind) = native {
+        herdr.require_native_server(kind)?;
+    }
+    for name in pi_roles {
+        let rendered = crate::prompt::render(c, name, &crate::binary());
+        if let Some(problem) = crate::pi::prompt_problem(name, &rendered) {
+            return Err(problem);
+        }
+    }
     for step in &plan.steps {
         if let Step::StartAgent {
             name,
@@ -334,7 +388,6 @@ pub fn execute(
         } = step
         {
             codex::validate_runtime(&c.root)?;
-            herdr.require_codex_version()?;
             codex::context_prompt(c, name, &crate::prompt::render(c, name, &crate::binary()))?;
             let cwd = if c.session_role(name).unwrap().worktree {
                 c.worktree_path(name).unwrap()
@@ -342,15 +395,6 @@ pub fn execute(
                 c.root.clone()
             };
             codex::integration::preflight(&cwd, options, &c.root)?;
-            let status = herdr
-                .call(&["status", "server", "--json"])
-                .map_err(|e| e.to_string())?;
-            if status["version"]
-                .as_str()
-                .is_none_or(|v| !codex::supported_herdr(v))
-            {
-                return Err("Codex crews require Herdr server 0.9.3 or newer".into());
-            }
         }
     }
     let mut workspace = state.workspace.as_ref().map(|w| w.id.clone());
@@ -474,25 +518,38 @@ pub fn execute(
                 message,
                 kind,
                 codex: options,
+                pi,
             } => {
                 let pane = pane_of(pane, &panes)?;
                 if *kind == Kind::Codex {
                     let rendered = std::fs::read_to_string(prompt).map_err(|e| e.to_string())?;
                     codex::prepare(herdr, c, name, &pane, &rendered, options)?;
                 }
-                let native = if *kind == Kind::Claude {
-                    vec![
+                let native = match kind {
+                    Kind::Claude => vec![
                         "-n".into(),
                         name.clone(),
                         "--append-system-prompt-file".into(),
                         prompt.display().to_string(),
-                    ]
-                } else {
-                    let mut effective = options.clone();
-                    effective.resolve_dirs(&c.root)?;
-                    let mut args = effective.args();
-                    args.extend(["-c".into(), "features.hooks=true".into()]);
-                    args
+                    ],
+                    Kind::Codex => {
+                        let mut effective = options.clone();
+                        effective.resolve_dirs(&c.root)?;
+                        let mut args = effective.args();
+                        args.extend(["-c".into(), "features.hooks=true".into()]);
+                        args
+                    }
+                    // The crew's pi extension reads these flags and keeps the prompt in the session.
+                    Kind::Pi => {
+                        let mut args = vec![
+                            "--herdr-crew-role".into(),
+                            name.clone(),
+                            "--herdr-crew-prompt".into(),
+                            prompt.display().to_string(),
+                        ];
+                        args.extend(pi.args());
+                        args
+                    }
                 };
                 start_agent(herdr, name, &pane, *kind, &native, message.as_deref(), out)?;
             }

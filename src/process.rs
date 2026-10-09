@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -84,11 +84,12 @@ impl Inspector {
         Ok(())
     }
 
+    fn left(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
     pub fn line(&mut self) -> Result<String, String> {
-        match self
-            .lines
-            .recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
-        {
+        match self.lines.recv_timeout(self.left()) {
             Ok(result) => result,
             Err(_) => Err(self.failure()),
         }
@@ -132,20 +133,51 @@ impl Drop for Inspector {
     }
 }
 
-/// The first `X.Y.Z` that `<program> --version` prints, within the inspection deadline.
+/// The first `X.Y.Z` that `<program> --version` prints, within the inspection deadline: on the
+/// first stdout line or, when stdout closes empty and the program exits successfully, a stderr
+/// line that holds only the version (pi prints it there, maybe after warnings that name other
+/// versions).
 pub fn detect(program: impl AsRef<OsStr>) -> Result<(u32, u32, u32), String> {
     let name = program.as_ref().to_string_lossy().into_owned();
     let mut process = Inspector::spawn(Command::new(program.as_ref()).arg("--version"))?;
-    let line = process.line()?;
-    line.split_whitespace()
-        .find_map(|word| {
-            let parts: Vec<_> = word.split('.').map(str::parse::<u32>).collect();
-            match parts.as_slice() {
-                [Ok(a), Ok(b), Ok(c)] => Some((*a, *b, *c)),
-                _ => None,
+    let line = match process.lines.recv_timeout(process.left()) {
+        Ok(result) => result?,
+        Err(RecvTimeoutError::Timeout) => return Err(process.failure()),
+        Err(RecvTimeoutError::Disconnected) => {
+            let status = loop {
+                match process.child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) if !process.left().is_zero() => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    _ => return Err(process.failure()),
+                }
+            };
+            let stderr = process
+                .stderr
+                .recv_timeout(process.left())
+                .unwrap_or_default();
+            if !status.success() {
+                return Err(format!("`--version` failed ({status}): {}", stderr.trim()));
             }
-        })
+            return stderr
+                .lines()
+                .find_map(|line| triple(line.trim()))
+                .ok_or_else(|| format!("cannot determine {name} version"));
+        }
+    };
+    line.split_whitespace()
+        .find_map(triple)
         .ok_or_else(|| format!("cannot determine {name} version"))
+}
+
+/// `word` as `X.Y.Z`.
+fn triple(word: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<_> = word.split('.').map(str::parse::<u32>).collect();
+    match parts.as_slice() {
+        [Ok(a), Ok(b), Ok(c)] => Some((*a, *b, *c)),
+        _ => None,
+    }
 }
 
 pub fn version(program: &str, minimum: (u32, u32, u32)) -> Result<(), String> {
@@ -156,4 +188,35 @@ pub fn version(program: &str, minimum: (u32, u32, u32)) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn script(name: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("crew-detect-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tool");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn versions_come_from_stdout_or_from_stderr_of_a_successful_run() {
+        assert_eq!(detect(script("out", "echo 'tool 0.9.3'")), Ok((0, 9, 3)));
+        assert_eq!(detect(script("err", "echo 1.1.0 >&2")), Ok((1, 1, 0)));
+        let noisy = "echo 'Update available: 1.2.0' >&2; echo 1.1.0 >&2";
+        assert_eq!(detect(script("noisy", noisy)), Ok((1, 1, 0)));
+        assert!(detect(script("notice", "echo 'Update available: 1.2.0' >&2")).is_err());
+    }
+
+    #[test]
+    fn a_failing_run_is_not_read_as_a_version() {
+        let error =
+            detect(script("fail", "echo 'requires Node.js 20.6.0' >&2; exit 1")).unwrap_err();
+        assert!(error.contains("requires Node.js 20.6.0"), "{error}");
+    }
 }

@@ -32,6 +32,23 @@ fn codex_setup_selects_agent_without_installing_hooks_or_starting_it() {
     );
 }
 
+#[test]
+fn pi_setup_selects_agent_without_installing_the_extension() {
+    let repo = Repo::new(false);
+    let output = repo
+        .command()
+        .args(["init", "--agent", "pi", "--yes"])
+        .output()
+        .unwrap();
+    success(output.clone());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("herdr-crew pi-install"));
+    let text = fs::read_to_string(repo.root.join(".herdr/crew.toml")).unwrap();
+    let config: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(config["kind"].as_str(), Some("pi"));
+    assert!(!repo.root.join(".pi").exists());
+    assert!(!repo.root.join("unexpected-agent-call").exists());
+}
+
 struct Repo {
     root: PathBuf,
 }

@@ -456,6 +456,174 @@ fn codex_only_check_does_not_require_claude_and_bad_profiles_explain_the_failure
 }
 
 #[test]
+fn pi_roles_need_the_extension_then_carry_their_prompt_and_options() {
+    let f = Fixture::new();
+    let tools = f.root.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    // pi prints its version on stderr; 0.73.1 is too old for herdr to resume it.
+    fs::write(tools.join("pi"), "#!/bin/sh\necho 0.73.1 >&2\n").unwrap();
+    fs::set_permissions(tools.join("pi"), fs::Permissions::from_mode(0o755)).unwrap();
+    let config = f
+        .read(".herdr/crew.toml")
+        .replace("version = 1", "version = 1\nkind = \"pi\"")
+        .replace("[workspace]", "[pi]\nprovider = \"anthropic\"\n[workspace]");
+    fs::write(
+        f.repo.join(".herdr/crew.toml"),
+        format!("{config}\n[roles.pi]\nmodel = \"sonnet\"\nthinking = \"high\"\n"),
+    )
+    .unwrap();
+
+    // Without the extension a resumed conversation would lose its role: stop before any change.
+    failure(f.crew(&["up", "--no-attach"]), "herdr-crew pi-install");
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    f.no_generated_files();
+    failure(f.crew(&["check"]), "herdr-crew pi-install");
+
+    let extension = f.root.join(".pi/agent/extensions/herdr-crew.ts");
+    fs::create_dir_all(extension.parent().unwrap()).unwrap();
+    fs::write(&extension, "// someone else's extension\n").unwrap();
+    failure(f.crew(&["pi-install"]), "was not installed by herdr-crew");
+    failure(f.crew(&["pi-uninstall"]), "was not installed by herdr-crew");
+    fs::remove_file(&extension).unwrap();
+    // A dotfile manager may link the extensions directory; pi follows the link, and so does install.
+    let linked = f.root.join("dotfiles/pi-extensions");
+    fs::create_dir_all(&linked).unwrap();
+    fs::remove_dir(extension.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&linked, extension.parent().unwrap()).unwrap();
+
+    success(f.crew(&["pi-install"]));
+    assert!(linked.join("herdr-crew.ts").is_file());
+    assert!(
+        fs::read_to_string(&extension)
+            .unwrap()
+            .contains("herdr-crew-role")
+    );
+    failure(f.crew(&["check"]), "pi 0.73.1 is too old: 1.1.0 or newer");
+    failure(f.crew(&["up", "--no-attach"]), "pi 0.73.1 is too old");
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    // A failing `pi --version` is not a version, whatever numbers its error holds.
+    fs::write(
+        tools.join("pi"),
+        "#!/bin/sh\necho 'pi requires Node.js 20.6.0' >&2\nexit 1\n",
+    )
+    .unwrap();
+    failure(f.crew(&["check"]), "requires Node.js 20.6.0");
+    failure(f.crew(&["up", "--no-attach"]), "requires Node.js 20.6.0");
+    fs::write(tools.join("pi"), "#!/bin/sh\necho 1.1.0 >&2\n").unwrap();
+    // herdr resumes pi only from 0.9.3 on.
+    for command in [vec!["check"], vec!["up", "--no-attach"]] {
+        failure(
+            f.command(CREW)
+                .args(&command)
+                .env("CREW_TEST_HERDR_VERSION", "0.9.2")
+                .output()
+                .unwrap(),
+            "0.9.3 or newer is required",
+        );
+    }
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    let checked = success(f.crew(&["check"]));
+    assert!(checked.contains("herdr-crew: pi 1.1.0 at "), "{checked}");
+    assert!(
+        checked.contains("the crew pi extension is current"),
+        "{checked}"
+    );
+    assert!(!checked.contains("claude"), "{checked}");
+
+    // An extra's prompt names its instance, so it can exceed the cap where the base role's does not.
+    let config = f.read(".herdr/crew.toml");
+    fs::write(
+        f.repo.join(".herdr/crew.toml"),
+        config.replace(
+            "Developer {{NAME}} in {{REPO}}.",
+            &"{{NAME}}".repeat(15_000),
+        ),
+    )
+    .unwrap();
+    let out = f.crew(&["check"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        stderr.contains("the prompt of dev-99 must be nonempty"),
+        "{out:?}"
+    );
+    assert!(!stderr.contains("the prompt of dev "), "{stderr}");
+    fs::write(f.repo.join(".herdr/crew.toml"), config).unwrap();
+
+    f.up();
+    success(f.crew(&["add", "dev"]));
+    let starts: Vec<_> = f
+        .calls()
+        .into_iter()
+        .filter(|c| starts_with(c, &["agent", "start"]))
+        .collect();
+    assert_eq!(starts.len(), 3);
+    for (call, role, options) in [
+        (&starts[0], "lead", vec!["--provider", "anthropic"]),
+        (
+            &starts[1],
+            "dev",
+            vec![
+                "--provider",
+                "anthropic",
+                "--model",
+                "sonnet",
+                "--thinking",
+                "high",
+            ],
+        ),
+        (
+            &starts[2],
+            "dev-2",
+            vec![
+                "--provider",
+                "anthropic",
+                "--model",
+                "sonnet",
+                "--thinking",
+                "high",
+            ],
+        ),
+    ] {
+        let prompt = f.repo.join(format!(".herdr/prompts/{role}.txt"));
+        assert_eq!(
+            &call[..6],
+            ["agent", "start", role, "--kind", "pi", "--pane"]
+        );
+        let native = call.iter().position(|a| a == "--").unwrap() + 1;
+        let mut args = vec![
+            "--herdr-crew-role".to_string(),
+            role.into(),
+            "--herdr-crew-prompt".into(),
+            prompt.display().to_string(),
+        ];
+        args.extend(options.into_iter().map(String::from));
+        args.push(MESSAGE.into());
+        assert_eq!(&call[native..], args.as_slice());
+        assert!(
+            fs::read_to_string(&prompt)
+                .unwrap()
+                .contains(&format!(" {role} "))
+        );
+    }
+    f.up();
+    assert_eq!(f.count(&["agent", "start"]), 3);
+
+    // A modified extension is not the reviewed one.
+    fs::write(
+        &extension,
+        format!(
+            "{}\n// local edit\n",
+            fs::read_to_string(&extension).unwrap()
+        ),
+    )
+    .unwrap();
+    failure(f.crew(&["check"]), "outdated or modified");
+    success(f.crew(&["pi-uninstall"]));
+    assert!(!extension.exists());
+    success(f.crew(&["pi-uninstall"]));
+}
+
+#[test]
 fn check_reports_versions_base_and_what_it_did_not_check() {
     let f = Fixture::new();
     f.claude_tool(0o755);
