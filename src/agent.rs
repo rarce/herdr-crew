@@ -32,6 +32,24 @@ impl Kind {
     }
 }
 
+/// The agent a role starts, with the options of its kind only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentOptions {
+    Claude,
+    Codex(CodexOptions),
+    Pi(PiOptions),
+}
+
+impl AgentOptions {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Self::Claude => Kind::Claude,
+            Self::Codex(_) => Kind::Codex,
+            Self::Pi(_) => Kind::Pi,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CodexOptions {

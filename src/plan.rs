@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::agent::{CodexOptions, Kind, PiOptions};
+use crate::agent::{AgentOptions, Kind};
 use crate::board::schema;
 use crate::config::{Config, extra_number};
 use crate::prompt;
@@ -289,9 +289,7 @@ pub enum Step {
     /// Starts the role's agent in a tab the plan has just created; `message` is the first
     /// message of the new conversation (`start_message`).
     StartAgent {
-        kind: Kind,
-        codex: CodexOptions,
-        pi: Box<PiOptions>,
+        agent: AgentOptions,
         name: String,
         pane: PaneRef,
         prompt: PathBuf,
@@ -354,21 +352,14 @@ impl fmt::Display for Step {
             }
             Step::WritePrompt { path, .. } => write!(f, "write {}", path.display()),
             Step::StartAgent {
-                name,
-                pane,
-                kind: Kind::Claude,
-                ..
-            } => write!(f, "start {name} in {pane}"),
-            Step::StartAgent {
-                name,
-                pane,
-                kind: Kind::Pi,
-                pi,
-                ..
-            } => write!(f, "start {name} (pi, {:?}) in {pane}", pi.args()),
-            Step::StartAgent {
-                name, pane, codex, ..
-            } => write!(f, "start {name} (codex, {:?}) in {pane}", codex.args()),
+                name, pane, agent, ..
+            } => match agent {
+                AgentOptions::Claude => write!(f, "start {name} in {pane}"),
+                AgentOptions::Codex(o) => {
+                    write!(f, "start {name} (codex, {:?}) in {pane}", o.args())
+                }
+                AgentOptions::Pi(o) => write!(f, "start {name} (pi, {:?}) in {pane}", o.args()),
+            },
             Step::RunInPane { pane, command, .. } => write!(f, "type in {pane}: {command}"),
             Step::WriteSchema { path, .. } => write!(f, "write {}", path.display()),
             Step::SeedStatus { path, .. } => write!(f, "seed {}", path.display()),
@@ -452,7 +443,12 @@ impl Plan {
     }
 }
 
-/// `s` as one POSIX shell word, for a command the user copies.
+/// `s` single-quoted as one POSIX shell word.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// `s` as one POSIX shell word, quoted only when it needs it, for a command the user copies.
 fn shell_word(s: &str) -> String {
     if !s.is_empty()
         && s.bytes()
@@ -460,7 +456,7 @@ fn shell_word(s: &str) -> String {
     {
         s.to_string()
     } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
+        shell_quote(s)
     }
 }
 
@@ -549,8 +545,10 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                 }
                 p.steps.push(Step::Warn(match session {
                     Some(v) => format!(
-                        "tab {} has no agent; restart it there with `claude -r {v} -n {}`",
-                        r.name, r.name
+                        "tab {} has no agent; restart it there with `claude -r {} -n {}`",
+                        r.name,
+                        shell_word(&v),
+                        shell_word(&r.name)
                     ),
                     // Roles start with `-n <role>`: the picker lists the conversations with that
                     // name, possibly older ones, and the user picks one.
@@ -558,7 +556,8 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                         "tab {} has no agent and herdr knows no session; restart it there with \
                          `claude -r {}` and pick its conversation, or, if it never had one, close \
                          the tab and run `herdr-crew up`",
-                        r.name, r.name
+                        r.name,
+                        shell_word(&r.name)
                     ),
                 }));
             }
@@ -736,9 +735,14 @@ fn agent_steps(c: &Config, e: &Env, steps: &mut Vec<Step>, name: &str) {
             new_tab: true,
         },
         None => Step::StartAgent {
-            kind: c.session_role(name).unwrap().kind,
-            codex: c.session_role(name).unwrap().codex.clone(),
-            pi: Box::new(c.session_role(name).unwrap().pi.clone()),
+            agent: {
+                let role = c.session_role(name).unwrap();
+                match role.kind {
+                    Kind::Claude => AgentOptions::Claude,
+                    Kind::Codex => AgentOptions::Codex(role.codex.clone()),
+                    Kind::Pi => AgentOptions::Pi(role.pi.clone()),
+                }
+            },
             name: name.to_string(),
             pane,
             prompt: path,
@@ -761,7 +765,7 @@ pub fn board_command(c: &Config, e: &Env) -> String {
             q(&file)
         )
     } else {
-        let q = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+        let q = shell_quote;
         format!("{} board --root {} --file {}", q(&bin), q(&root), q(&file))
     }
 }
@@ -1879,5 +1883,13 @@ mod tests {
                 .iter()
                 .all(|(_, m)| m.is_none())
         );
+    }
+
+    #[test]
+    fn shell_words_are_quoted_only_when_needed() {
+        assert_eq!(shell_word("acme-lead"), "acme-lead");
+        assert_eq!(shell_word(""), "''");
+        assert_eq!(shell_word("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 }

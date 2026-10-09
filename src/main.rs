@@ -771,10 +771,10 @@ fn check(c: &Config) -> Result<(), Fail> {
         {
             missing.push(format!("herdr-crew: {error}"));
         }
-        let path = binary().to_string_lossy().replace('\'', "'\\''");
+        let path = plan::shell_quote(&binary().to_string_lossy());
         println!(
             "herdr-crew: a herdr server is already running; `herdr` only attaches and does not \
-             run plugin startup. From this project, run `'{path}' up --no-attach`"
+             run plugin startup. From this project, run `{path} up --no-attach`"
         );
     }
     let remote = c
