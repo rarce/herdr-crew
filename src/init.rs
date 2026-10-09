@@ -9,14 +9,18 @@ use serde::Serialize;
 use crate::{Fail, config, git};
 
 const MAX_PREFIX: usize = 21; // Leave room for "-research-a" within a 32-byte agent name.
-const IGNORE_RULES: &[&str] = &[
-    "/.herdr/status.json",
-    "/.herdr/status.json.tmp",
-    "/.herdr/.herdr-crew-*.tmp",
-    "/.herdr/status.schema.json",
-    "/.herdr/prompts/",
-    "/.herdr/codex/",
+/// Each generated-file rule with a path it must ignore, to ask Git whether the repository
+/// already decides that path with rules of its own. Directory rules use the directory, so
+/// that a rule for some of its files, such as `*.txt`, does not count for all of them.
+const IGNORE_RULES: &[(&str, &str)] = &[
+    ("/.herdr/status.json", ".herdr/status.json"),
+    ("/.herdr/status.json.tmp", ".herdr/status.json.tmp"),
+    ("/.herdr/.herdr-crew-*.tmp", ".herdr/.herdr-crew-0.tmp"),
+    ("/.herdr/status.schema.json", ".herdr/status.schema.json"),
+    ("/.herdr/prompts/", ".herdr/prompts/"),
+    ("/.herdr/codex/", ".herdr/codex/"),
 ];
+const WORKTREES_RULE: (&str, &str) = ("/.worktrees/", ".worktrees/");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
@@ -293,6 +297,19 @@ fn choose(
             writeln!(output, "Enter 1-4 or solo, review, parallel, research.").map_err(io_fail)?;
         }
     };
+    let agent = if let Some(agent) = options.agent {
+        agent
+    } else if options.yes {
+        crate::agent::Kind::default()
+    } else {
+        loop {
+            let choice = ask(input, output, "Agent (claude, codex, pi)", Some("claude"))?;
+            if let Some(agent) = crate::agent::Kind::parse(&choice.to_ascii_lowercase()) {
+                break agent;
+            }
+            writeln!(output, "Enter claude, codex or pi.").map_err(io_fail)?;
+        }
+    };
     if options.shared_checkout && preset != Preset::Review {
         return Err(Fail::usage(
             "--shared-checkout applies only to the review preset; parallel requires worktrees",
@@ -327,6 +344,9 @@ fn choose(
         writeln!(output, "Worktrees start from a remote branch, not uncommitted local changes. No fetch runs during setup.").map_err(io_fail)?;
         if let Some(base) = &options.base {
             git::validate_base(root, base).map_err(Fail::usage)?;
+            if !fetched(root, base) {
+                writeln!(output, "{}", unfetched(base)).map_err(io_fail)?;
+            }
             Some(base.clone())
         } else if options.yes {
             let base = suggested_base.ok_or_else(|| Fail::usage("no remote branch found; set --base REMOTE/BRANCH, or use review --shared-checkout"))?;
@@ -340,9 +360,16 @@ fn choose(
                     "Worktree base (configured remote/branch)",
                     suggested_base.as_deref(),
                 )?;
-                match git::validate_base(root, &base) {
-                    Ok(()) => break Some(base),
-                    Err(error) => writeln!(output, "{error}").map_err(io_fail)?,
+                if let Err(error) = git::validate_base(root, &base) {
+                    writeln!(output, "{error}").map_err(io_fail)?;
+                    continue;
+                }
+                if fetched(root, &base) {
+                    break Some(base);
+                }
+                writeln!(output, "{}", unfetched(&base)).map_err(io_fail)?;
+                if yes_no(input, output, &format!("Use {base} anyway?"), false)? {
+                    break Some(base);
                 }
             }
         }
@@ -358,12 +385,24 @@ fn choose(
                 true,
             )?);
     Ok(Selection {
-        agent: options.agent.unwrap_or_default(),
+        agent,
         name,
         preset,
         base,
         ignore,
     })
+}
+
+/// Whether a validated `REMOTE/BRANCH` base is already known locally.
+fn fetched(root: &Path, base: &str) -> bool {
+    base.split_once('/')
+        .is_some_and(|(remote, branch)| git::knows_remote_branch(root, remote, branch))
+}
+
+fn unfetched(base: &str) -> String {
+    format!(
+        "Warning: {base} is not among the fetched remote branches. Check its name; `up` fetches it and stops if the remote lacks it."
+    )
 }
 
 fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
@@ -498,11 +537,25 @@ fn ignore_addition(root: &Path, worktrees: bool) -> Result<String, Fail> {
     };
     let mut rules = IGNORE_RULES.to_vec();
     if worktrees {
-        rules.push("/.worktrees/");
+        rules.push(WORKTREES_RULE);
     }
+    // A rule in a shared .gitignore already decides the path, such as `.herdr/` or a
+    // negation the team chose on purpose; appending another rule would duplicate or
+    // override it. Local and global excludes do not count: other clones lack them. Git does
+    // not report negated directories, so an exact `!rule` line also counts.
+    let samples: Vec<&str> = rules.iter().map(|(_, sample)| *sample).collect();
+    let decided = git::ignore_rules(root, &samples).map_err(Fail::run)?;
     let missing: Vec<&str> = rules
-        .into_iter()
-        .filter(|rule| !contents.lines().any(|line| line.trim() == *rule))
+        .iter()
+        .zip(&decided)
+        .filter(|((rule, _), decided)| {
+            !decided.as_ref().is_some_and(git::IgnoreRule::shared)
+                && !contents.lines().any(|line| {
+                    let line = line.trim();
+                    line.strip_prefix('!').unwrap_or(line) == *rule
+                })
+        })
+        .map(|((rule, _), _)| *rule)
         .collect();
     if missing.is_empty() {
         return Ok(String::new());
@@ -516,6 +569,23 @@ fn ignore_addition(root: &Path, worktrees: bool) -> Result<String, Fail> {
         },
         missing.join("\n")
     ))
+}
+
+/// A warning when existing ignore rules would keep `crew.toml` out of Git, which defeats a
+/// team definition that is meant to be reviewed and versioned with the code.
+fn config_ignored(root: &Path) -> Result<Option<String>, Fail> {
+    let [rule] = &git::ignore_rules(root, &[config::CONFIG_FILE]).map_err(Fail::run)?[..] else {
+        unreachable!("one rule per path")
+    };
+    Ok(rule.as_ref().filter(|rule| rule.ignores()).map(|rule| {
+        format!(
+            "Warning: {}:{} ignores {} with {:?}. Git will not version the crew until that rule changes.",
+            rule.source,
+            rule.line,
+            config::CONFIG_FILE,
+            rule.pattern
+        )
+    }))
 }
 
 fn wizard(
@@ -541,9 +611,14 @@ fn wizard(
     };
     writeln!(
         output,
-        "\n{}\nWorkspace: {}\nBoard writer: {}-{}\n",
+        "\n{}\nWorkspace: {}\nAgent: {}\nWorktree base: {}\nBoard writer: {}-{}\n",
         selection.preset.description(),
         selection.name,
+        selection.agent.as_str(),
+        selection
+            .base
+            .as_deref()
+            .unwrap_or("none (main checkout only)"),
         selection.name,
         selection.preset.roles()[0].0
     )
@@ -553,6 +628,9 @@ fn wizard(
     }
     if !addition.is_empty() {
         writeln!(output, ".gitignore additions:{addition}").map_err(io_fail)?;
+    }
+    if let Some(warning) = config_ignored(root)? {
+        writeln!(output, "{warning}\n").map_err(io_fail)?;
     }
     if dry_run {
         writeln!(output, "Dry run: no files created or changed.").map_err(io_fail)?;
@@ -678,6 +756,102 @@ mod tests {
         ] {
             assert!(valid_name(&suggested_name(Path::new(folder))), "{folder}");
         }
+    }
+
+    fn ok<T>(result: Result<T, Fail>) -> T {
+        result.unwrap_or_else(|f| panic!("{:?}", f.lines))
+    }
+
+    fn choose_with(root: &Path, options: &Options, answers: &str) -> (Selection, String) {
+        let mut output = Vec::new();
+        let selection = choose(root, options, &mut answers.as_bytes(), &mut output)
+            .unwrap_or_else(|f| panic!("{:?}", f.lines));
+        (selection, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn the_wizard_asks_for_the_agent_and_retries_unknown_ones() {
+        let root = git::test_repo("init-agent");
+        let (selection, output) = choose_with(&root, &Options::default(), "\n1\ngpt\nPi\n\n");
+        assert_eq!(selection.agent, crate::agent::Kind::Pi);
+        assert!(output.contains("Enter claude, codex or pi."), "{output}");
+        let yes = Options {
+            yes: true,
+            ..Options::default()
+        };
+        let (selection, _) = choose_with(&root, &yes, "");
+        assert_eq!(selection.agent, crate::agent::Kind::Claude);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unfetched_base_needs_confirmation_or_warns_when_given_as_a_flag() {
+        let root = git::test_repo("init-base");
+        git::test_remote_branch(&root, "origin/main");
+        // A typo is refused at the confirmation, then the suggested default is accepted.
+        let (selection, output) =
+            choose_with(&root, &Options::default(), "\n3\n\norigin/mian\n\n\n\n");
+        assert_eq!(selection.base.as_deref(), Some("origin/main"));
+        assert!(
+            output.contains("origin/mian is not among the fetched"),
+            "{output}"
+        );
+        assert!(output.contains("Use origin/mian anyway? [y/N]"), "{output}");
+        // An explicit answer keeps it, since `up` fetches before creating worktrees.
+        let (selection, _) = choose_with(&root, &Options::default(), "\n3\n\norigin/next\ny\n\n");
+        assert_eq!(selection.base.as_deref(), Some("origin/next"));
+
+        let flag = Options {
+            preset: Some(Preset::Parallel),
+            base: Some("origin/mian".into()),
+            yes: true,
+            ..Options::default()
+        };
+        let (selection, output) = choose_with(&root, &flag, "");
+        assert_eq!(selection.base.as_deref(), Some("origin/mian"));
+        assert!(output.contains("Warning: origin/mian"), "{output}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ignore_rules_already_decided_by_the_repository_are_not_appended() {
+        let root = git::test_repo("init-ignore");
+        let gitignore = root.join(".gitignore");
+        assert!(ok(config_ignored(&root)).is_none());
+
+        std::fs::write(&gitignore, ".herdr/\n").unwrap();
+        assert_eq!(ok(ignore_addition(&root, false)), "");
+        assert_eq!(
+            ok(ignore_addition(&root, true)),
+            "\n# Generated crew files\n/.worktrees/\n"
+        );
+        let warning = ok(config_ignored(&root)).unwrap();
+        assert!(
+            warning.contains(".gitignore:1 ignores .herdr/crew.toml"),
+            "{warning}"
+        );
+
+        // A deliberate negation keeps its effect.
+        std::fs::write(
+            &gitignore,
+            "/.herdr/*\n!/.herdr/crew.toml\n!/.herdr/prompts/\n",
+        )
+        .unwrap();
+        assert!(ok(config_ignored(&root)).is_none());
+        assert_eq!(ok(ignore_addition(&root, false)), "");
+
+        // A pattern for some files covers those files, not the directories holding others.
+        std::fs::write(&gitignore, "*.json").unwrap();
+        assert_eq!(
+            ok(ignore_addition(&root, false)),
+            "\n\n# Generated crew files\n/.herdr/status.json.tmp\n/.herdr/.herdr-crew-*.tmp\n/.herdr/prompts/\n/.herdr/codex/\n"
+        );
+
+        // Local excludes do not count: other clones lack them.
+        std::fs::remove_file(&gitignore).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), "/.herdr/status.json\n").unwrap();
+        assert!(ok(ignore_addition(&root, false)).contains("/.herdr/status.json\n"));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

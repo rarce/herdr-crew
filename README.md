@@ -199,7 +199,7 @@ thinking = "high"
 herdr-crew init
 ```
 
-The wizard asks for a project name, a workflow, worktree settings and generated-file ignore rules. It previews the complete configuration before saving. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
+The wizard asks for a project name, a workflow, the agent (`claude`, `codex` or `pi`), worktree settings and generated-file ignore rules. It previews the complete configuration before saving. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
 
 | Preset | Agent sessions | Use it for |
 | --- | --- | --- |
@@ -218,13 +218,13 @@ herdr-crew init --preset parallel --name payments --base origin/main --yes --dry
 
 Remove `--dry-run` to save it. `--name` sets the workspace label and role prefix: 1–21 characters, starting with a lowercase letter, followed by lowercase letters, digits, `_` or `-`. Choose a prefix unique among your projects; the default comes from the repository directory.
 
-`review` normally isolates both developer and reviewer in worktrees; `parallel` always does. The wizard suggests a locally known remote branch. `--base REMOTE/BRANCH` must name a configured remote and a valid branch; ensure that branch exists on the remote before starting sessions. No local changes are copied into new worktrees. Without a remote, use `solo`, `research`, or shared-checkout review:
+`review` normally isolates both developer and reviewer in worktrees; `parallel` always does. The wizard suggests a locally known default branch, such as `origin/HEAD` or `origin/main`, rather than the current feature branch's upstream, because the base is saved in `crew.toml`. `--base REMOTE/BRANCH` must name a configured remote and a valid branch. A branch that is not fetched locally gets a warning, and the wizard asks before keeping it; ensure that branch exists on the remote before starting sessions. No local changes are copied into new worktrees. Without a remote, use `solo`, `research`, or shared-checkout review:
 
 ```sh
 herdr-crew init --preset review --shared-checkout --yes
 ```
 
-Generated board files, prompts and optional `.worktrees/` entries are appended to `.gitignore`, preserving its contents. Use `--no-ignore` to manage those rules yourself. `.herdr/crew.toml` remains versionable. Calls from subdirectories or worktrees configure the main checkout; `--root DIR` selects another project. Submodules and main checkouts with separate Git metadata are supported. If a linked worktree's main checkout cannot be identified safely, run setup from the main checkout instead.
+Generated board files, prompts and optional `.worktrees/` entries are appended to `.gitignore`, preserving its contents. Rules that a shared `.gitignore` already decides, such as an existing `.herdr/` or a deliberate negation, are not appended again. If existing rules ignore `.herdr/crew.toml`, `init` warns, since the crew would not be versioned. Use `--no-ignore` to manage those rules yourself. `.herdr/crew.toml` remains versionable. Calls from subdirectories or worktrees configure the main checkout; `--root DIR` selects another project. Submodules and main checkouts with separate Git metadata are supported. If a linked worktree's main checkout cannot be identified safely, run setup from the main checkout instead.
 
 ## Usage
 
