@@ -85,7 +85,7 @@ The first time `claude` runs in a folder, it asks whether you trust it; answer i
 ### Know the limits before you start
 
 - **How the crew starts depends on herdr.** With no server running, `cd repo && herdr` brings the project up through the startup hook. With a server already running, `herdr` only attaches: run `herdr-crew up --no-attach` or the `herdr-crew.up` action. After a herdr restart, herdr resumes the sessions and the hook repairs only the board; a tab whose agent stopped gets a resume command from `up`, never a second agent.
-- **Sessions do not message each other on their own.** herdr-crew starts the roles with their prompts, worktrees and board; handoffs go through you, Claude Code's cross-session messaging or `herdr agent` commands, as described in [how sessions collaborate](docs/workflows.md#how-sessions-collaborate).
+- **Sessions do not message each other on their own.** herdr-crew starts the roles with their prompts, worktrees and board. Handoffs go through you, through Claude Code's cross-session messaging between Claude roles, or through `herdr-crew send` for pairs with Codex or pi, as described in [how sessions collaborate](docs/workflows.md#how-sessions-collaborate). A Codex role in a sandbox cannot reach herdr, so it has no direct channel: it delivers through commits and its final report.
 - **Worktrees start from the remote base.** New role worktrees are created with a detached HEAD from `worktrees.base` (for example `origin/main`). Your uncommitted or unpushed local changes are not in them, so commit and push what the crew needs first. Each session creates a task branch before committing; existing worktrees are reused as they are.
 - **Agent names are global to the herdr server.** A live agent named like one of your roles, in any workspace or project, blocks that role. `init` prefixes role names with the project name to avoid collisions.
 - **Every role is a running agent.** Each session has its own context and usage, and a crew multiplies both. Start with the smallest preset that can produce a verifiable result.
@@ -236,6 +236,7 @@ herdr-crew [--root DIR] <command>
   up [--no-attach] [--dry-run]   start or complete the project's sessions
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
+  send <session>                 type the message on stdin into another crew session
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
   codex-install                  install the crew hook; review it in Codex /hooks
@@ -254,6 +255,7 @@ herdr-crew [--root DIR] <command>
 - **The `herdr-crew.up` action.** It works on the workspace you have focused in herdr.
 - **Starting the server.** From a plain terminal, `up` starts a herdr server if none is running and then opens herdr. Pass `--no-attach` to skip opening it.
 - **`--dry-run`** prints each role's verdict and the steps `up` would take, without doing anything.
+- **`send <session>`** reads a message on stdin, frames it as coming from the calling session (from `HERDR_PANE_ID`), and types it into that session's agent in the crew's workspace. It delivers to idle and working agents. It refuses an agent waiting at a dialog (exit 76), a repeated or bursty message (exit 75), and reports an unreachable herdr, typically a sandbox, with exit 77. It is a convenience, not a security boundary: see [messaging](docs/messaging.md).
 - **One command at a time.** `up`, `add` and `close` on the same project wait for each other (up to two minutes) instead of racing; the startup hook leaves a project another command is changing to that command. The lock is released automatically, even after a crash.
 
 **No-parameter actions.** herdr actions take no parameters, so `add` and `close` are not actions. There is also a trap: an action invoked with `herdr plugin action invoke` acts on whichever workspace is focused, not on the caller's. So agents and scripts run the binary directly: `{{LAUNCHER}} up` or `{{LAUNCHER}} add <role>` in a prompt (see `{{LAUNCHER}}` below), never `plugin action invoke`.
@@ -336,6 +338,7 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
   | `{{STATUS}}`   | `board.file`                            |
   | `{{SCHEMA}}`   | `.herdr/status.schema.json`             |
   | `{{LAUNCHER}}` | the binary's absolute path              |
+  | `{{PEERS}}`    | how this session reaches each other role, from its own kind and sandbox (see [messaging](docs/messaging.md)) |
 
 - The result is written to `.herdr/prompts/<name>.txt`. Claude receives it with `--append-system-prompt-file`; Codex receives a saved copy through the crew hook as additional developer context; pi receives it through the crew pi extension, which appends it to the system prompt.
 - Use literal strings (`'''…'''`): they keep backslashes as written. Basic strings (`"""…"""`) are accepted too.

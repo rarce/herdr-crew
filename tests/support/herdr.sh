@@ -166,6 +166,18 @@ case "${1-} ${2-}" in
         if [ "$injection" = agent_not_ready ]; then error agent_not_ready; fi
         echo '{"result":{}}'
         ;;
+    'agent get')
+        t=$(tab_for_pane "$3")
+        [ -f "$t/agent" ] || error agent_not_found
+        printf '{"result":{"agent":{"pane_id":"%s","agent_status":"%s"}}}\n' "$3" "$(cat "$t/status" 2>/dev/null || echo idle)"
+        ;;
+    'agent prompt')
+        t=$(tab_for_pane "$3")
+        [ -f "$t/agent" ] || error agent_not_found
+        [ "$(cat "$t/status" 2>/dev/null || echo idle)" != blocked ] || error agent_blocked
+        printf '%s\000' "$4" >> "$t/prompts"
+        echo '{"result":{}}'
+        ;;
     'pane process-info')
         t=$(tab_for_pane "$(option --pane "$@")")
         group=1

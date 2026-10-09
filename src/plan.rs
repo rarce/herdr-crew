@@ -466,7 +466,7 @@ pub fn shell_program(program: &str, windows: bool) -> String {
 /// `s` as one shell word, quoted only when it needs it, for a command the user copies. `@`, `=`
 /// and `,` are left out of the plain set: zsh expands a leading `=`, and PowerShell reads `@` and
 /// `,` as operators.
-fn shell_word(s: &str, windows: bool) -> String {
+pub fn shell_word(s: &str, windows: bool) -> String {
     if !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"/._-+:".contains(&b))

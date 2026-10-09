@@ -494,7 +494,7 @@ fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
         kind: (selection.agent != crate::agent::Kind::Claude).then_some(selection.agent),
         version: config::SUPPORTED_VERSION,
         common_prompt: format!(
-            "Workflow: {workflow}\nFollow the repository's contributor instructions and discover its actual build, lint and test commands. Wait for an explicit task before changing files. A handoff includes objective, acceptance criteria, exact base and delivery commits, validation results and limitations. A 'done' report is not acceptance of the integrated result.\nOnly {coordinator} writes {{{{STATUS}}}}, following {{{{SCHEMA}}}}; other roles report status without editing the board. Write the whole board atomically through a .tmp file and rename.\nAdditional sessions cost time and tokens. {expansion}\n"
+            "Workflow: {workflow}\nFollow the repository's contributor instructions and discover its actual build, lint and test commands. Wait for an explicit task before changing files. A handoff includes objective, acceptance criteria, exact base and delivery commits, validation results and limitations. A 'done' report is not acceptance of the integrated result.\nOnly {coordinator} writes {{{{STATUS}}}}, following {{{{SCHEMA}}}}; other roles report status without editing the board. Write the whole board atomically through a .tmp file and rename.\nAdditional sessions cost time and tokens. {expansion}\n{{{{PEERS}}}}\n"
         ),
         start_message: "Confirm your role in one line and wait for an explicit task before changing files.",
         workspace: Workspace {

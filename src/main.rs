@@ -15,6 +15,7 @@ mod pi;
 mod plan;
 mod process;
 mod prompt;
+mod send;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   up [--no-attach] [--dry-run]   start or complete the project's sessions
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
+  send <session>                 type the message on stdin into another crew session
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
   codex-install                  install the crew hook; review it in Codex /hooks
@@ -153,7 +155,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "dry_run",
         ],
         "up" => &["no_attach", "dry_run"],
-        "add" | "close" | "check" | "startup" | "codex-install" | "codex-uninstall"
+        "add" | "close" | "send" | "check" | "startup" | "codex-install" | "codex-uninstall"
         | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" | "pi-install"
         | "pi-uninstall" => &[],
         "board" => &["file", "once", "interval"],
@@ -181,7 +183,10 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             name.replace('_', "-")
         )));
     }
-    let arity = if matches!(a.command.as_str(), "add" | "close" | "codex-resume") {
+    let arity = if matches!(
+        a.command.as_str(),
+        "add" | "close" | "send" | "codex-resume"
+    ) {
         1
     } else {
         0
@@ -793,6 +798,31 @@ fn check(c: &Config) -> Result<(), Fail> {
     }
 }
 
+/// `send`: the message from stdin into another session (docs/messaging.md §4). Its refusals use
+/// their own exit codes and no usage text, because the caller is usually a model.
+fn send(c: &Config, target: &str) -> Result<(), Fail> {
+    use std::io::Read;
+    let mut raw = String::new();
+    std::io::stdin()
+        .take(send::MAX_BODY as u64 * 4)
+        .read_to_string(&mut raw)
+        .map_err(|e| Fail {
+            code: 2,
+            lines: vec![format!("herdr-crew: cannot read the message on stdin: {e}")],
+        })?;
+    let pane = std::env::var("HERDR_PANE_ID").ok();
+    match send::run(c, &Herdr::from_env(), target, &raw, pane.as_deref()) {
+        Ok(line) => {
+            println!("{line}");
+            Ok(())
+        }
+        Err(r) => Err(Fail {
+            code: r.code,
+            lines: vec![format!("herdr-crew: {}", r.message)],
+        }),
+    }
+}
+
 fn run() -> Result<(), Fail> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.iter().any(|a| a == "--version" || a == "-V") {
@@ -848,6 +878,7 @@ fn run() -> Result<(), Fail> {
         "up" => up(&c, &a),
         "add" => add(&c, &a.positional[0]),
         "close" => close(&c, &a.positional[0]),
+        "send" => send(&c, &a.positional[0]),
         "board" => board(&c, &a),
         "check" => check(&c),
         _ => unreachable!("validated in parse_args"),
