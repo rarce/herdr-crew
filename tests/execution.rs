@@ -495,7 +495,27 @@ fn pi_roles_need_the_extension_then_carry_their_prompt_and_options() {
     failure(f.crew(&["check"]), "pi 0.73.1 is too old: 1.1.0 or newer");
     failure(f.crew(&["up", "--no-attach"]), "pi 0.73.1 is too old");
     assert_eq!(f.count(&["workspace", "create"]), 0);
+    // A failing `pi --version` is not a version, whatever numbers its error holds.
+    fs::write(
+        tools.join("pi"),
+        "#!/bin/sh\necho 'pi requires Node.js 20.6.0' >&2\nexit 1\n",
+    )
+    .unwrap();
+    failure(f.crew(&["check"]), "requires Node.js 20.6.0");
+    failure(f.crew(&["up", "--no-attach"]), "requires Node.js 20.6.0");
     fs::write(tools.join("pi"), "#!/bin/sh\necho 1.1.0 >&2\n").unwrap();
+    // herdr resumes pi only from 0.9.3 on.
+    for command in [vec!["check"], vec!["up", "--no-attach"]] {
+        failure(
+            f.command(CREW)
+                .args(&command)
+                .env("CREW_TEST_HERDR_VERSION", "0.9.2")
+                .output()
+                .unwrap(),
+            "0.9.3 or newer is required",
+        );
+    }
+    assert_eq!(f.count(&["workspace", "create"]), 0);
     let checked = success(f.crew(&["check"]));
     assert!(checked.contains("herdr-crew: pi 1.1.0 at "), "{checked}");
     assert!(

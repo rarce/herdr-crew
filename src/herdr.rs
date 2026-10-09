@@ -45,13 +45,29 @@ impl Herdr {
         }
     }
 
-    pub fn require_codex_version(&self) -> Result<(), String> {
+    pub fn require_native_version(&self) -> Result<(), String> {
         crate::process::version(
             self.bin
                 .to_str()
                 .ok_or("Herdr executable path must be UTF-8")?,
             (0, 9, 3),
         )
+    }
+
+    /// Codex and pi roles rely on herdr 0.9.3's native integrations, in both the executable and
+    /// the running server.
+    pub fn require_native_server(&self, kind: &str) -> Result<(), String> {
+        self.require_native_version()?;
+        let status = self
+            .call(&["status", "server", "--json"])
+            .map_err(|e| e.to_string())?;
+        if status["version"]
+            .as_str()
+            .is_none_or(|v| !codex::supported_herdr(v))
+        {
+            return Err(format!("{kind} crews require Herdr server 0.9.3 or newer"));
+        }
+        Ok(())
     }
 
     /// Runs `herdr <args>` and returns `.result` (`null` when a command prints nothing).
@@ -325,20 +341,30 @@ pub fn execute(
             _ => {}
         }
     }
-    for step in &plan.steps {
-        if let Step::StartAgent {
-            name,
-            kind: Kind::Pi,
-            ..
-        } = step
-        {
-            crate::pi::preflight()?;
-            crate::pi::require_version()?;
-            let rendered = crate::prompt::render(c, name, &crate::binary());
-            if let Some(problem) = crate::pi::prompt_problem(name, &rendered) {
-                return Err(problem);
-            }
+    let pi_roles: Vec<&str> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::StartAgent {
+                name,
+                kind: Kind::Pi,
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !pi_roles.is_empty() {
+        crate::pi::preflight()?;
+        crate::pi::require_version()?;
+        herdr.require_native_server("pi")?;
+    }
+    for name in pi_roles {
+        let rendered = crate::prompt::render(c, name, &crate::binary());
+        if let Some(problem) = crate::pi::prompt_problem(name, &rendered) {
+            return Err(problem);
         }
+    }
+    for step in &plan.steps {
         if let Step::StartAgent {
             name,
             kind: Kind::Codex,
@@ -347,7 +373,7 @@ pub fn execute(
         } = step
         {
             codex::validate_runtime(&c.root)?;
-            herdr.require_codex_version()?;
+            herdr.require_native_server("Codex")?;
             codex::context_prompt(c, name, &crate::prompt::render(c, name, &crate::binary()))?;
             let cwd = if c.session_role(name).unwrap().worktree {
                 c.worktree_path(name).unwrap()
@@ -355,15 +381,6 @@ pub fn execute(
                 c.root.clone()
             };
             codex::integration::preflight(&cwd, options, &c.root)?;
-            let status = herdr
-                .call(&["status", "server", "--json"])
-                .map_err(|e| e.to_string())?;
-            if status["version"]
-                .as_str()
-                .is_none_or(|v| !codex::supported_herdr(v))
-            {
-                return Err("Codex crews require Herdr server 0.9.3 or newer".into());
-            }
         }
     }
     let mut workspace = state.workspace.as_ref().map(|w| w.id.clone());

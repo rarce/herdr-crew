@@ -82,13 +82,16 @@ pub fn install(remove: bool) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("pi agent directory: {e}"))?;
     let path = agent.join("extensions").join(EXTENSION_FILE);
-    if let Ok(text) = fs::read_to_string(&path)
-        && !text.contains(MARKER)
-    {
-        return Err(format!(
-            "{} exists and was not installed by herdr-crew; move it away first",
-            path.display()
-        ));
+    match fs::read(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+        Ok(bytes) if !String::from_utf8_lossy(&bytes).contains(MARKER) => {
+            return Err(format!(
+                "{} exists and was not installed by herdr-crew; move it away first",
+                path.display()
+            ));
+        }
+        Ok(_) => {}
     }
     files::write(&agent, &path, EXTENSION)?;
     println!(

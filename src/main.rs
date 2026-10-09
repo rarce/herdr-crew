@@ -614,7 +614,7 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// The lowest herdr that runs any crew; Codex roles need more (README, Requirements).
+/// The lowest herdr that runs any crew; Codex and pi roles need more (README, Requirements).
 const MIN_HERDR: (u32, u32, u32) = (0, 9, 1);
 
 fn check(c: &Config) -> Result<(), Fail> {
@@ -709,10 +709,17 @@ fn check(c: &Config) -> Result<(), Fail> {
             Err(e) => missing.push(format!("herdr-crew: {e}")),
         }
     }
+    let native = c.roles.iter().find_map(|r| match r.kind {
+        agent::Kind::Codex => Some("Codex"),
+        agent::Kind::Pi => Some("pi"),
+        agent::Kind::Claude => None,
+    });
+    if native.is_some()
+        && let Err(error) = Herdr::from_env().require_native_version()
+    {
+        missing.push(format!("herdr-crew: {error}"));
+    }
     if c.roles.iter().any(|r| r.kind == agent::Kind::Codex) {
-        if let Err(error) = Herdr::from_env().require_codex_version() {
-            missing.push(format!("herdr-crew: {error}"));
-        }
         if let Err(why) = executable("codex", None) {
             missing.push(format!(
                 "herdr-crew: codex is missing: {why} (install: npm install -g @openai/codex)"
@@ -755,14 +762,15 @@ fn check(c: &Config) -> Result<(), Fail> {
         }
     }
     if Herdr::from_env().call(&["workspace", "list"]).is_ok() {
-        if c.roles.iter().any(|r| r.kind == agent::Kind::Codex) {
+        if let Some(kind) = native {
             match Herdr::from_env().call(&["status", "server", "--json"]) {
                 Ok(status)
                     if status["version"]
                         .as_str()
                         .is_some_and(codex::supported_herdr) => {}
-                _ => missing
-                    .push("herdr-crew: Codex crews require Herdr server 0.9.3 or newer".into()),
+                _ => missing.push(format!(
+                    "herdr-crew: {kind} crews require Herdr server 0.9.3 or newer"
+                )),
             }
         }
         let path = binary().to_string_lossy().replace('\'', "'\\''");

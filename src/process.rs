@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -84,11 +84,12 @@ impl Inspector {
         Ok(())
     }
 
+    fn left(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
     pub fn line(&mut self) -> Result<String, String> {
-        match self
-            .lines
-            .recv_timeout(self.deadline.saturating_duration_since(Instant::now()))
-        {
+        match self.lines.recv_timeout(self.left()) {
             Ok(result) => result,
             Err(_) => Err(self.failure()),
         }
@@ -132,15 +133,34 @@ impl Drop for Inspector {
     }
 }
 
-/// The first `X.Y.Z` that `<program> --version` prints, within the inspection deadline.
+/// The first `X.Y.Z` that `<program> --version` prints, within the inspection deadline: on the
+/// first stdout line or, when stdout closes empty and the program exits successfully, on stderr
+/// (pi prints its version there).
 pub fn detect(program: impl AsRef<OsStr>) -> Result<(u32, u32, u32), String> {
     let name = program.as_ref().to_string_lossy().into_owned();
-    let process = Inspector::spawn(Command::new(program.as_ref()).arg("--version"))?;
-    let left = || process.deadline.saturating_duration_since(Instant::now());
-    let line = match process.lines.recv_timeout(left()) {
+    let mut process = Inspector::spawn(Command::new(program.as_ref()).arg("--version"))?;
+    let line = match process.lines.recv_timeout(process.left()) {
         Ok(result) => result?,
-        // pi prints its version on stderr only.
-        Err(_) => process.stderr.recv_timeout(left()).unwrap_or_default(),
+        Err(RecvTimeoutError::Timeout) => return Err(process.failure()),
+        Err(RecvTimeoutError::Disconnected) => {
+            let status = loop {
+                match process.child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) if !process.left().is_zero() => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    _ => return Err(process.failure()),
+                }
+            };
+            let stderr = process
+                .stderr
+                .recv_timeout(process.left())
+                .unwrap_or_default();
+            if !status.success() {
+                return Err(format!("`--version` failed ({status}): {}", stderr.trim()));
+            }
+            stderr
+        }
     };
     line.split_whitespace()
         .find_map(|word| {
@@ -161,4 +181,32 @@ pub fn version(program: &str, minimum: (u32, u32, u32)) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn script(name: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("crew-detect-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tool");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn versions_come_from_stdout_or_from_stderr_of_a_successful_run() {
+        assert_eq!(detect(script("out", "echo 'tool 0.9.3'")), Ok((0, 9, 3)));
+        assert_eq!(detect(script("err", "echo 1.1.0 >&2")), Ok((1, 1, 0)));
+    }
+
+    #[test]
+    fn a_failing_run_is_not_read_as_a_version() {
+        let error =
+            detect(script("fail", "echo 'requires Node.js 20.6.0' >&2; exit 1")).unwrap_err();
+        assert!(error.contains("requires Node.js 20.6.0"), "{error}");
+    }
 }

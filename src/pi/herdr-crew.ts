@@ -3,7 +3,8 @@
 // Keeps a crew role's prompt with its pi conversation: a fresh role passes the prompt file with
 // --herdr-crew-prompt, this extension saves the text in the session as a custom entry and appends
 // it to the system prompt on every turn. herdr resumes pi with a plain `pi --session <file>`; the
-// entry in that file brings the role back. Sessions without the entry are left alone.
+// entry in that file brings the role back. /new and /fork carry the role; a resumed session
+// without the entry is left alone. An unreadable prompt file stops pi instead of running bare.
 // @ts-nocheck
 
 import { readFileSync } from "node:fs";
@@ -55,24 +56,41 @@ export default function (pi) {
   pi.registerFlag("herdr-crew-prompt", { description: "herdr-crew role prompt file", type: "string" });
 
   let role;
+  let broken;
 
   pi.on("session_start", async (event, ctx) => {
     role = stored(ctx.sessionManager.getEntries());
+    broken = undefined;
     if (role) {
       return;
     }
-    const file = pi.getFlag("herdr-crew-prompt");
-    if (typeof file === "string" && file) {
-      const name = pi.getFlag("herdr-crew-role");
-      const data = { version: 1, role: typeof name === "string" ? name : "", prompt: readFileSync(file, "utf8") };
-      if (!valid(data)) {
-        throw new Error(`herdr-crew: ${file} must hold a nonempty role prompt of at most ${MAX_PROMPT} bytes`);
+    if (event?.reason === "new" || event?.reason === "fork") {
+      // /new and /fork inside a role keep the role of the session they come from.
+      role = event.previousSessionFile ? fromFile(event.previousSessionFile) : undefined;
+    } else if (event?.reason === "startup" || event?.reason === "reload") {
+      const file = pi.getFlag("herdr-crew-prompt");
+      if (typeof file === "string" && file) {
+        const name = pi.getFlag("herdr-crew-role");
+        let prompt;
+        try {
+          prompt = readFileSync(file, "utf8");
+        } catch {
+          prompt = undefined;
+        }
+        const data = { version: 1, role: typeof name === "string" ? name : "", prompt };
+        if (!valid(data)) {
+          // pi logs handler errors and keeps going; a role must not run without its prompt.
+          broken = `herdr-crew: ${file} must hold a nonempty role prompt of at most ${MAX_PROMPT} bytes`;
+          console.error(broken);
+          ctx.ui?.notify?.(broken, "error");
+          process.exitCode = 1;
+          ctx.shutdown();
+          return;
+        }
+        role = data;
       }
-      role = data;
-    } else if (event?.previousSessionFile) {
-      // /new, /fork or /resume of an unmarked session inside a crew role keeps the role.
-      role = fromFile(event.previousSessionFile);
     }
+    // A resumed session without the entry (/resume of an unrelated session) is left alone.
     if (role) {
       pi.appendEntry(ENTRY, role);
       if (role.role && !pi.getSessionName()) {
@@ -81,7 +99,17 @@ export default function (pi) {
     }
   });
 
-  pi.on("before_agent_start", (event) => {
+  pi.on("input", () => {
+    if (broken) {
+      return { action: "handled" };
+    }
+  });
+
+  pi.on("before_agent_start", (event, ctx) => {
+    if (broken) {
+      ctx.abort();
+      return;
+    }
     if (role) {
       return { systemPrompt: `${event.systemPrompt}\n\n${role.prompt}` };
     }
