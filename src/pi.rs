@@ -8,7 +8,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::files;
+use crate::{files, process};
 
 /// The extension, installed verbatim; `check` and `up` require this exact content.
 pub const EXTENSION: &str = include_str!("pi/herdr-crew.ts");
@@ -17,6 +17,9 @@ const EXTENSION_FILE: &str = "herdr-crew.ts";
 const MARKER: &str = "// HERDR_CREW_PI_EXTENSION=";
 /// The largest rendered role prompt; the extension enforces the same bound.
 pub const MAX_PROMPT: usize = 64 * 1024;
+/// herdr 0.9.3's pi integration reports state and sessions only when the extension context has
+/// `mode`, which pi 0.73.1 lacks; without those reports herdr cannot resume pi. 1.1.0 is tested.
+pub const MIN_PI: (u32, u32, u32) = (1, 1, 0);
 
 /// pi's configuration directory: `PI_CODING_AGENT_DIR` (with pi's `~` expansion) or `~/.pi/agent`.
 pub fn agent_dir() -> Result<PathBuf, String> {
@@ -113,6 +116,23 @@ pub fn preflight() -> Result<(), String> {
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
+
+/// The `pi` on the PATH, which herdr starts, must be recent enough for herdr to resume it.
+pub fn require_version() -> Result<(u32, u32, u32), String> {
+    let found = process::detect("pi").map_err(|e| format!("pi --version: {e}"))?;
+    if found < MIN_PI {
+        let (a, b, c) = found;
+        let (x, y, z) = MIN_PI;
+        return Err(format!(
+            "pi {a}.{b}.{c} is too old: {x}.{y}.{z} or newer is required, or herdr cannot resume \
+             pi sessions (update: pi update, or npm install -g {PACKAGE})"
+        ));
+    }
+    Ok(found)
+}
+
+/// The npm package that ships pi.
+pub const PACKAGE: &str = "@earendil-works/pi-coding-agent";
 
 /// Why a rendered role prompt cannot be handed to the extension, if it cannot.
 pub fn prompt_problem(name: &str, prompt: &str) -> Option<String> {

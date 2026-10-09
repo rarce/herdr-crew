@@ -460,7 +460,8 @@ fn pi_roles_need_the_extension_then_carry_their_prompt_and_options() {
     let f = Fixture::new();
     let tools = f.root.join("tools");
     fs::create_dir_all(&tools).unwrap();
-    fs::write(tools.join("pi"), "#!/bin/sh\necho 0.73.1\n").unwrap();
+    // pi prints its version on stderr; 0.73.1 is too old for herdr to resume it.
+    fs::write(tools.join("pi"), "#!/bin/sh\necho 0.73.1 >&2\n").unwrap();
     fs::set_permissions(tools.join("pi"), fs::Permissions::from_mode(0o755)).unwrap();
     let config = f
         .read(".herdr/crew.toml")
@@ -491,8 +492,12 @@ fn pi_roles_need_the_extension_then_carry_their_prompt_and_options() {
             .unwrap()
             .contains("herdr-crew-role")
     );
+    failure(f.crew(&["check"]), "pi 0.73.1 is too old: 1.1.0 or newer");
+    failure(f.crew(&["up", "--no-attach"]), "pi 0.73.1 is too old");
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    fs::write(tools.join("pi"), "#!/bin/sh\necho 1.1.0 >&2\n").unwrap();
     let checked = success(f.crew(&["check"]));
-    assert!(checked.contains("herdr-crew: pi 0.73.1 at "), "{checked}");
+    assert!(checked.contains("herdr-crew: pi 1.1.0 at "), "{checked}");
     assert!(
         checked.contains("the crew pi extension is current"),
         "{checked}"

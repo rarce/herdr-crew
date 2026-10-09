@@ -135,8 +135,13 @@ impl Drop for Inspector {
 /// The first `X.Y.Z` that `<program> --version` prints, within the inspection deadline.
 pub fn detect(program: impl AsRef<OsStr>) -> Result<(u32, u32, u32), String> {
     let name = program.as_ref().to_string_lossy().into_owned();
-    let mut process = Inspector::spawn(Command::new(program.as_ref()).arg("--version"))?;
-    let line = process.line()?;
+    let process = Inspector::spawn(Command::new(program.as_ref()).arg("--version"))?;
+    let left = || process.deadline.saturating_duration_since(Instant::now());
+    let line = match process.lines.recv_timeout(left()) {
+        Ok(result) => result?,
+        // pi prints its version on stderr only.
+        Err(_) => process.stderr.recv_timeout(left()).unwrap_or_default(),
+    };
     line.split_whitespace()
         .find_map(|word| {
             let parts: Vec<_> = word.split('.').map(str::parse::<u32>).collect();

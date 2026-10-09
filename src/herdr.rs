@@ -333,6 +333,7 @@ pub fn execute(
         } = step
         {
             crate::pi::preflight()?;
+            crate::pi::require_version()?;
             let rendered = crate::prompt::render(c, name, &crate::binary());
             if let Some(problem) = crate::pi::prompt_problem(name, &rendered) {
                 return Err(problem);

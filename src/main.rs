@@ -734,15 +734,12 @@ fn check(c: &Config) -> Result<(), Fail> {
     if c.roles.iter().any(|r| r.kind == agent::Kind::Pi) {
         match executable("pi", None) {
             Err(why) => missing.push(format!(
-                "herdr-crew: pi is missing: {why} (install: npm install -g \
-                 @mariozechner/pi-coding-agent)"
+                "herdr-crew: pi is missing: {why} (install: npm install -g {})",
+                pi::PACKAGE
             )),
-            Ok(path) => match process::detect(&path) {
+            Ok(path) => match pi::require_version() {
                 Ok((a, b, v)) => println!("herdr-crew: pi {a}.{b}.{v} at {}", path.display()),
-                Err(e) => missing.push(format!(
-                    "herdr-crew: pi at {} does not run `--version`: {e}",
-                    path.display()
-                )),
+                Err(e) => missing.push(format!("herdr-crew: {e}")),
             },
         }
         match pi::preflight() {

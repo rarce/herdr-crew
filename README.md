@@ -20,7 +20,7 @@ See [the end-to-end demo](docs/demo.md) for one task going from assignment to re
 - Rust (stable) with `cargo`: herdr builds the plugin from source when it installs it
 - `git` and the selected agents (`claude`, `codex`, `pi`, or a mix) on the `PATH`
 - Codex roles require herdr 0.9.3+, Codex CLI 0.160.1+, the public crew launcher, and the trusted crew hook described below
-- pi roles require the crew pi extension (`herdr-crew pi-install`) and herdr's pi integration; they are tested with herdr 0.9.3 and pi 0.73.1
+- pi roles require the crew pi extension (`herdr-crew pi-install`) and herdr's pi integration; they need pi 1.1.0 or newer (`@earendil-works/pi-coding-agent`), whose extension context herdr's pi integration needs to track and resume sessions, and are tested with herdr 0.9.3 and pi 1.1.0
 
 ## Install
 
@@ -168,7 +168,7 @@ herdr-crew check
 
 herdr resumes pi with a plain `pi --session <file>`, and pi builds its system prompt anew on every start, so a prompt passed on the command line would be gone after a restore. `pi-install` writes one extension, `herdr-crew.ts`, to pi's global extensions directory (`$PI_CODING_AGENT_DIR/extensions`, default `~/.pi/agent/extensions`). A fresh role starts with `--herdr-crew-role <name> --herdr-crew-prompt <.herdr/prompts/<name>.txt>`; the extension saves the prompt in the session file as a custom entry (not sent as a message), names the session after the role, and appends the prompt to pi's system prompt on every turn. A resumed session finds its entry and keeps its role, unchanged even when `crew.toml` changes; `/new` and `/fork` inside a role carry it over. Sessions without the entry are left alone. The rendered prompt is capped at 64 KiB.
 
-`up` and `check` require the installed extension to match this version exactly; run `pi-install` again after updating herdr-crew. Without the extension, pi refuses the crew flags, so a role never starts without its prompt. `pi-uninstall` removes only that file, and neither command touches a file it did not write. `init` and the other commands do not install it.
+`up` and `check` require pi 1.1.0 or newer and the installed extension to match this version exactly; run `pi-install` again after updating herdr-crew. Without the extension, pi refuses the crew flags, so a role never starts without its prompt. `pi-uninstall` removes only that file, and neither command touches a file it did not write. `init` and the other commands do not install it.
 
 ```toml
 kind = "pi"
