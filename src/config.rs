@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use toml::de::{DeTable, DeValue};
 
-use crate::agent::{CODEX_KEYS, CodexOptions, Kind, PI_KEYS, PiOptions};
+use crate::agent::{AgentOptions, CODEX_KEYS, CodexOptions, Kind, PI_KEYS, PiOptions};
 use crate::{files, prompt};
 
 pub const CONFIG_FILE: &str = ".herdr/crew.toml";
@@ -77,6 +77,17 @@ pub struct Role {
     pub extra: bool,
     /// Overrides the top-level `start_message`; empty means none for this role.
     pub start_message: Option<String>,
+}
+
+impl Role {
+    /// The agent this role starts, with only its kind's options.
+    pub fn agent(&self) -> AgentOptions {
+        match self.kind {
+            Kind::Claude => AgentOptions::Claude,
+            Kind::Codex => AgentOptions::Codex(self.codex.clone()),
+            Kind::Pi => AgentOptions::Pi(self.pi.clone()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
