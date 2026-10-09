@@ -11,6 +11,7 @@ mod git;
 mod herdr;
 mod init;
 mod lock;
+mod pi;
 mod plan;
 mod process;
 mod prompt;
@@ -31,7 +32,7 @@ use lock::{Busy, ProjectLock};
 use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, WorkspaceItem};
 
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
-  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex]
+  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi]
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
   up [--no-attach] [--dry-run]   start or complete the project's sessions
@@ -43,6 +44,8 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   codex-uninstall                remove only the crew hook
   codex-list                     list saved role bindings and Codex session IDs
   codex-resume <binding>          recover a saved Codex session in its role tab
+  pi-install                     install the crew pi extension that keeps role prompts
+  pi-uninstall                   remove only the crew pi extension
   check                          validate the configuration and the dependencies
   startup                        herdr's startup hook: bring up or repair the projects in herdr";
 
@@ -123,7 +126,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "--agent" => {
                 a.init.agent = Some(
                     agent::Kind::parse(&value("--agent")?)
-                        .ok_or_else(|| Fail::usage("--agent must be claude or codex"))?,
+                        .ok_or_else(|| Fail::usage("--agent must be claude, codex or pi"))?,
                 )
             }
             "--name" => a.init.name = Some(value("--name")?),
@@ -151,7 +154,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ],
         "up" => &["no_attach", "dry_run"],
         "add" | "close" | "check" | "startup" | "codex-install" | "codex-uninstall"
-        | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" => &[],
+        | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" | "pi-install"
+        | "pi-uninstall" => &[],
         "board" => &["file", "once", "interval"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
@@ -727,6 +731,32 @@ fn check(c: &Config) -> Result<(), Fail> {
             }
         }
     }
+    if c.roles.iter().any(|r| r.kind == agent::Kind::Pi) {
+        match executable("pi", None) {
+            Err(why) => missing.push(format!(
+                "herdr-crew: pi is missing: {why} (install: npm install -g \
+                 @mariozechner/pi-coding-agent)"
+            )),
+            Ok(path) => match process::detect(&path) {
+                Ok((a, b, v)) => println!("herdr-crew: pi {a}.{b}.{v} at {}", path.display()),
+                Err(e) => missing.push(format!(
+                    "herdr-crew: pi at {} does not run `--version`: {e}",
+                    path.display()
+                )),
+            },
+        }
+        match pi::preflight() {
+            Ok(()) => println!("herdr-crew: the crew pi extension is current"),
+            Err(error) => missing.push(format!("herdr-crew: {error}")),
+        }
+        for role in c.roles.iter().filter(|r| r.kind == agent::Kind::Pi) {
+            if let Some(problem) =
+                pi::prompt_problem(&role.name, &prompt::render(c, &role.name, &binary()))
+            {
+                missing.push(format!("herdr-crew: {problem}"));
+            }
+        }
+    }
     if Herdr::from_env().call(&["workspace", "list"]).is_ok() {
         if c.roles.iter().any(|r| r.kind == agent::Kind::Codex) {
             match Herdr::from_env().call(&["status", "server", "--json"]) {
@@ -777,6 +807,12 @@ fn run() -> Result<(), Fail> {
                 return Err(Fail::usage("Codex integration setup does not take --root"));
             }
             return codex::integration::install(a.command == "codex-uninstall").map_err(Fail::run);
+        }
+        "pi-install" | "pi-uninstall" => {
+            if a.root.is_some() {
+                return Err(Fail::usage("pi extension setup does not take --root"));
+            }
+            return pi::install(a.command == "pi-uninstall").map_err(Fail::run);
         }
         "codex-protocol" => {
             println!("1");

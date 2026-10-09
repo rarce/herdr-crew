@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::agent::{CodexOptions, Kind};
+use crate::agent::{CodexOptions, Kind, PiOptions};
 use crate::board::schema;
 use crate::config::{Config, extra_number};
 use crate::prompt;
@@ -291,6 +291,7 @@ pub enum Step {
     StartAgent {
         kind: Kind,
         codex: CodexOptions,
+        pi: Box<PiOptions>,
         name: String,
         pane: PaneRef,
         prompt: PathBuf,
@@ -358,6 +359,13 @@ impl fmt::Display for Step {
                 kind: Kind::Claude,
                 ..
             } => write!(f, "start {name} in {pane}"),
+            Step::StartAgent {
+                name,
+                pane,
+                kind: Kind::Pi,
+                pi,
+                ..
+            } => write!(f, "start {name} (pi, {:?}) in {pane}", pi.args()),
             Step::StartAgent {
                 name, pane, codex, ..
             } => write!(f, "start {name} (codex, {:?}) in {pane}", codex.args()),
@@ -444,6 +452,18 @@ impl Plan {
     }
 }
 
+/// `s` as one POSIX shell word, for a command the user copies.
+fn shell_word(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-+:@=,".contains(&b))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 fn describe(agent: &Agent) -> String {
     match &agent.name {
         Some(n) => format!("agent \"{n}\" in {}", agent.pane_id),
@@ -509,6 +529,22 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                 let session = session_pane.and_then(|p| p.agent_session.clone());
                 if recorded_kind == Kind::Codex {
                     p.steps.push(Step::Warn(format!("tab {} has no agent; use `herdr-crew codex-resume <binding>` in that tab with its saved binding from `herdr-crew codex-list` (recorded session: {})", r.name, session.as_deref().unwrap_or("unknown"))));
+                    continue;
+                }
+                if recorded_kind == Kind::Pi {
+                    // The crew's pi extension restores the role prompt from the session file.
+                    p.steps.push(Step::Warn(match session {
+                        Some(v) => format!(
+                            "tab {} has no agent; restart it there with `pi --session {}`",
+                            r.name,
+                            shell_word(&v)
+                        ),
+                        None => format!(
+                            "tab {} has no agent and herdr knows no session; close the tab and \
+                             run `herdr-crew up` to start it again with its prompt",
+                            r.name
+                        ),
+                    }));
                     continue;
                 }
                 p.steps.push(Step::Warn(match session {
@@ -702,6 +738,7 @@ fn agent_steps(c: &Config, e: &Env, steps: &mut Vec<Step>, name: &str) {
         None => Step::StartAgent {
             kind: c.session_role(name).unwrap().kind,
             codex: c.session_role(name).unwrap().codex.clone(),
+            pi: Box::new(c.session_role(name).unwrap().pi.clone()),
             name: name.to_string(),
             pane,
             prompt: path,
@@ -1311,6 +1348,27 @@ mod tests {
                 .contains("claude -r saved-codex-id")
         );
         assert_eq!(kinds(&p), ["warn"]);
+
+        c.roles[0].kind = Kind::Claude;
+        let pane = &mut s.workspace.as_mut().unwrap().panes[0];
+        pane.session_agent = Some("pi".into());
+        pane.agent_session = Some("/home/u/.pi/agent/sessions/--r--/it's.jsonl".into());
+        let p = plan(&c, &s, &settled(&c, Foreground::Other("herdr-crew".into())));
+        assert_eq!(
+            p.warnings().next().unwrap(),
+            "tab acme-lead has no agent; restart it there with \
+             `pi --session '/home/u/.pi/agent/sessions/--r--/it'\\''s.jsonl'`"
+        );
+        assert_eq!(kinds(&p), ["warn"]);
+        s.workspace.as_mut().unwrap().panes[0].agent_session = None;
+        c.roles[0].kind = Kind::Pi;
+        let p = plan(&c, &s, &settled(&c, Foreground::Other("herdr-crew".into())));
+        assert!(
+            p.warnings()
+                .next()
+                .unwrap()
+                .contains("close the tab and run `herdr-crew up`")
+        );
     }
 
     #[test]

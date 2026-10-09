@@ -1,6 +1,6 @@
 # herdr-crew
 
-**Bring up a team of Claude Code and Codex sessions, one per role, from a file you keep in the repository.**
+**Bring up a team of Claude Code, Codex and pi sessions, one per role, from a file you keep in the repository.**
 
 herdr-crew is a [herdr](https://herdr.dev/) plugin. You describe the project's roles once in `.herdr/crew.toml`: their prompts, whether each works in its own git worktree, and which one coordinates. After that, `cd repo && herdr` opens the project's workspace with a tab per role running its selected coding agent, plus a tab with a live status board.
 
@@ -18,8 +18,9 @@ See [the end-to-end demo](docs/demo.md) for one task going from assignment to re
 
 - herdr 0.9.1 or later, on macOS or Linux
 - Rust (stable) with `cargo`: herdr builds the plugin from source when it installs it
-- `git` and the selected agents (`claude`, `codex`, or both) on the `PATH`
+- `git` and the selected agents (`claude`, `codex`, `pi`, or a mix) on the `PATH`
 - Codex roles require herdr 0.9.3+, Codex CLI 0.160.1+, the public crew launcher, and the trusted crew hook described below
+- pi roles require the crew pi extension (`herdr-crew pi-install`) and herdr's pi integration; they are tested with herdr 0.9.3 and pi 0.73.1
 
 ## Install
 
@@ -88,6 +89,7 @@ The first time `claude` runs in a folder, it asks whether you trust it; answer i
 - **Worktrees start from the remote base.** New role worktrees are created with a detached HEAD from `worktrees.base` (for example `origin/main`). Your uncommitted or unpushed local changes are not in them, so commit and push what the crew needs first. Each session creates a task branch before committing; existing worktrees are reused as they are.
 - **Agent names are global to the herdr server.** A live agent named like one of your roles, in any workspace or project, blocks that role. `init` prefixes role names with the project name to avoid collisions.
 - **Every role is a running agent.** Each session has its own context and usage, and a crew multiplies both. Start with the smallest preset that can produce a verifiable result.
+- **pi roles need setup.** Run `herdr-crew pi-install` once; the extension keeps each role's prompt in its pi session so that a herdr restore brings the role back.
 - **Codex roles need setup.** Install and trust the crew hook (`herdr-crew codex-install`, then `/hooks` in Codex). Codex's sandbox and approvals stay in effect, and a Codex board writer in a worktree needs the main checkout's `.herdr` in `additional_dirs`.
 - **One command at a time per project.** `up`, `add` and `close` on the same project wait for each other instead of racing.
 
@@ -154,6 +156,43 @@ For manual recovery, find the binding with `herdr-crew codex-list`, then run `he
 
 Codex sandbox permissions remain in effect. Git metadata can require approvals even in workspace-write mode. If a board writer uses a worktree, explicitly include the main checkout's `.herdr` directory in `additional_dirs` when it needs to write the board. Crew supplies absolute board/schema paths and does not automatically grant access to the entire main checkout. `check` validates only the agents selected by the crew; repairing an existing board does not require a working Codex installation or trusted hook.
 
+## pi
+
+[pi](https://pi.dev/) roles start through herdr's native `agent start --kind pi`. Initialize a pi crew with:
+
+```sh
+herdr-crew init --agent pi --yes
+herdr-crew pi-install
+herdr-crew check
+```
+
+herdr resumes pi with a plain `pi --session <file>`, and pi builds its system prompt anew on every start, so a prompt passed on the command line would be gone after a restore. `pi-install` writes one extension, `herdr-crew.ts`, to pi's global extensions directory (`$PI_CODING_AGENT_DIR/extensions`, default `~/.pi/agent/extensions`). A fresh role starts with `--herdr-crew-role <name> --herdr-crew-prompt <.herdr/prompts/<name>.txt>`; the extension saves the prompt in the session file as a custom entry (not sent as a message), names the session after the role, and appends the prompt to pi's system prompt on every turn. A resumed session finds its entry and keeps its role, unchanged even when `crew.toml` changes; `/new` and `/fork` inside a role carry it over. Sessions without the entry are left alone. The rendered prompt is capped at 64 KiB.
+
+`up` and `check` require the installed extension to match this version exactly; run `pi-install` again after updating herdr-crew. Without the extension, pi refuses the crew flags, so a role never starts without its prompt. `pi-uninstall` removes only that file, and neither command touches a file it did not write. `init` and the other commands do not install it.
+
+```toml
+kind = "pi"
+
+[pi]                      # optional defaults for pi roles
+provider = "anthropic"
+
+[[roles]]
+name = "payments-dev"
+prompt = '''Implement your assigned component in your worktree.'''
+
+[roles.pi]
+model = "sonnet"
+thinking = "high"
+```
+
+| pi option | Values |
+| --- | --- |
+| `provider` | A provider pi knows; otherwise pi's default |
+| `model` | A model pattern or ID, as for `pi --model` |
+| `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+
+`[pi]` sets defaults and `[roles.pi]` overrides individual options; extras inherit their base role's. pi-only options on another kind are errors. If a pi tab loses its agent, `up` suggests `pi --session <file>` with the session herdr recorded; the extension restores the role from it. A role whose conversation never sent a request has no session file to resume: close its tab and run `herdr-crew up`. pi has no permission prompts of its own, so a pi role can run any command its tools allow; keep that in mind when choosing its prompt and checkout.
+
 ## Configure a crew
 
 ```sh
@@ -191,7 +230,7 @@ Generated board files, prompts and optional `.worktrees/` entries are appended t
 
 ```text
 herdr-crew [--root DIR] <command>
-  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex]
+  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi]
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
   up [--no-attach] [--dry-run]   start or complete the project's sessions
@@ -203,6 +242,8 @@ herdr-crew [--root DIR] <command>
   codex-uninstall                remove only the crew hook
   codex-list                     list saved role bindings and Codex session IDs
   codex-resume <binding>          recover a saved Codex session in its role tab
+  pi-install                     install the crew pi extension that keeps role prompts
+  pi-uninstall                   remove only the crew pi extension
   check                          validate the configuration and the dependencies
   startup                        herdr's startup hook: bring up or repair the projects in herdr
 ```
@@ -263,10 +304,12 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
 
 | Key                | Required         | Meaning                                                                                                                                                                                             |
 | ------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `kind`             | no               | Project agent default: `claude` or `codex`; absent means Claude. |
+| `kind`             | no               | Project agent default: `claude`, `codex` or `pi`; absent means Claude. |
 | `codex`            | no               | Typed defaults for Codex roles, described above. |
+| `pi`               | no               | Typed defaults for pi roles, described above. |
 | `roles[].kind`     | no               | Overrides the project agent default. |
 | `roles[].codex`    | no               | Overrides individual Codex defaults. Requires an effective Codex kind. |
+| `roles[].pi`       | no               | Overrides individual pi defaults. Requires an effective pi kind. |
 | `version`          | yes              | Always `1`.                                                                                                                                                                                         |
 | `common_prompt`    | no               | Text appended to every role's prompt.                                                                                                                                                               |
 | `start_message`    | no               | The first message of each new conversation, one line of at most 200 bytes. Sent only when a tab is created (`up`, the startup hook's first bring-up, `add`), never on a resume or a repair. It costs one request per role on every fresh start, so it should not ask for changes to the tree. |
@@ -294,7 +337,7 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
   | `{{SCHEMA}}`   | `.herdr/status.schema.json`             |
   | `{{LAUNCHER}}` | the binary's absolute path              |
 
-- The result is written to `.herdr/prompts/<name>.txt`. Claude receives it with `--append-system-prompt-file`; Codex receives a saved copy through the crew hook as additional developer context.
+- The result is written to `.herdr/prompts/<name>.txt`. Claude receives it with `--append-system-prompt-file`; Codex receives a saved copy through the crew hook as additional developer context; pi receives it through the crew pi extension, which appends it to the system prompt.
 - Use literal strings (`'''…'''`): they keep backslashes as written. Basic strings (`"""…"""`) are accepted too.
 
 **Validation.** Unknown keys and unknown placeholders are errors, and every error is reported at once with its line and column:

@@ -1,4 +1,4 @@
-//! Agent selection and typed, additive Codex launch options.
+//! Agent selection and typed, additive Codex and pi launch options.
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +10,7 @@ pub enum Kind {
     #[default]
     Claude,
     Codex,
+    Pi,
 }
 
 impl Kind {
@@ -17,6 +18,7 @@ impl Kind {
         match value {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -25,6 +27,7 @@ impl Kind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Pi => "pi",
         }
     }
 }
@@ -185,6 +188,65 @@ impl CodexOptions {
     }
 }
 
+/// pi's model selection. The role prompt itself travels through the crew's pi extension
+/// (`crate::pi`), never as a launch option.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PiOptions {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+}
+
+pub const PI_KEYS: &[&str] = &["provider", "model", "thinking"];
+
+impl PiOptions {
+    pub fn inherit(&self, defaults: &Self) -> Self {
+        Self {
+            provider: self.provider.clone().or_else(|| defaults.provider.clone()),
+            model: self.model.clone().or_else(|| defaults.model.clone()),
+            thinking: self.thinking.clone().or_else(|| defaults.thinking.clone()),
+        }
+    }
+
+    pub fn problems(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (key, value) in [
+            ("provider", &self.provider),
+            ("model", &self.model),
+            ("thinking", &self.thinking),
+        ] {
+            let Some(value) = value else { continue };
+            if value.is_empty() || value.starts_with('-') || value.chars().any(char::is_control) {
+                errors.push(format!(
+                    "{key}: must be a nonempty value without control characters or a leading '-'"
+                ));
+                continue;
+            }
+            let choices = ["off", "minimal", "low", "medium", "high", "xhigh"];
+            if key == "thinking" && !choices.contains(&value.as_str()) {
+                errors.push(format!("thinking: expected one of {}", choices.join(", ")));
+            }
+        }
+        errors
+    }
+
+    /// Separate arguments, never interpolated by a shell.
+    pub fn args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for (flag, value) in [
+            ("--provider", &self.provider),
+            ("--model", &self.model),
+            ("--thinking", &self.thinking),
+        ] {
+            if let Some(value) = value {
+                args.extend([flag.to_string(), value.clone()]);
+            }
+        }
+        args
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +279,37 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(options.problems().len(), 3);
+    }
+    #[test]
+    fn pi_options_inherit_and_reject_flags() {
+        let defaults = PiOptions {
+            provider: Some("anthropic".into()),
+            thinking: Some("high".into()),
+            ..Default::default()
+        };
+        let role = PiOptions {
+            model: Some("sonnet".into()),
+            thinking: Some("low".into()),
+            ..Default::default()
+        }
+        .inherit(&defaults);
+        assert_eq!(
+            role.args(),
+            [
+                "--provider",
+                "anthropic",
+                "--model",
+                "sonnet",
+                "--thinking",
+                "low"
+            ]
+        );
+        let bad = PiOptions {
+            model: Some("--session".into()),
+            thinking: Some("max".into()),
+            provider: Some("a\nb".into()),
+        };
+        assert_eq!(bad.problems().len(), 3);
+        assert!(PiOptions::default().args().is_empty());
     }
 }

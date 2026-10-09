@@ -456,6 +456,124 @@ fn codex_only_check_does_not_require_claude_and_bad_profiles_explain_the_failure
 }
 
 #[test]
+fn pi_roles_need_the_extension_then_carry_their_prompt_and_options() {
+    let f = Fixture::new();
+    let tools = f.root.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("pi"), "#!/bin/sh\necho 0.73.1\n").unwrap();
+    fs::set_permissions(tools.join("pi"), fs::Permissions::from_mode(0o755)).unwrap();
+    let config = f
+        .read(".herdr/crew.toml")
+        .replace("version = 1", "version = 1\nkind = \"pi\"")
+        .replace("[workspace]", "[pi]\nprovider = \"anthropic\"\n[workspace]");
+    fs::write(
+        f.repo.join(".herdr/crew.toml"),
+        format!("{config}\n[roles.pi]\nmodel = \"sonnet\"\nthinking = \"high\"\n"),
+    )
+    .unwrap();
+
+    // Without the extension a resumed conversation would lose its role: stop before any change.
+    failure(f.crew(&["up", "--no-attach"]), "herdr-crew pi-install");
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    f.no_generated_files();
+    failure(f.crew(&["check"]), "herdr-crew pi-install");
+
+    let extension = f.root.join(".pi/agent/extensions/herdr-crew.ts");
+    fs::create_dir_all(extension.parent().unwrap()).unwrap();
+    fs::write(&extension, "// someone else's extension\n").unwrap();
+    failure(f.crew(&["pi-install"]), "was not installed by herdr-crew");
+    failure(f.crew(&["pi-uninstall"]), "was not installed by herdr-crew");
+    fs::remove_file(&extension).unwrap();
+
+    success(f.crew(&["pi-install"]));
+    assert!(
+        fs::read_to_string(&extension)
+            .unwrap()
+            .contains("herdr-crew-role")
+    );
+    let checked = success(f.crew(&["check"]));
+    assert!(checked.contains("herdr-crew: pi 0.73.1 at "), "{checked}");
+    assert!(
+        checked.contains("the crew pi extension is current"),
+        "{checked}"
+    );
+    assert!(!checked.contains("claude"), "{checked}");
+
+    f.up();
+    success(f.crew(&["add", "dev"]));
+    let starts: Vec<_> = f
+        .calls()
+        .into_iter()
+        .filter(|c| starts_with(c, &["agent", "start"]))
+        .collect();
+    assert_eq!(starts.len(), 3);
+    for (call, role, options) in [
+        (&starts[0], "lead", vec!["--provider", "anthropic"]),
+        (
+            &starts[1],
+            "dev",
+            vec![
+                "--provider",
+                "anthropic",
+                "--model",
+                "sonnet",
+                "--thinking",
+                "high",
+            ],
+        ),
+        (
+            &starts[2],
+            "dev-2",
+            vec![
+                "--provider",
+                "anthropic",
+                "--model",
+                "sonnet",
+                "--thinking",
+                "high",
+            ],
+        ),
+    ] {
+        let prompt = f.repo.join(format!(".herdr/prompts/{role}.txt"));
+        assert_eq!(
+            &call[..6],
+            ["agent", "start", role, "--kind", "pi", "--pane"]
+        );
+        let native = call.iter().position(|a| a == "--").unwrap() + 1;
+        let mut args = vec![
+            "--herdr-crew-role".to_string(),
+            role.into(),
+            "--herdr-crew-prompt".into(),
+            prompt.display().to_string(),
+        ];
+        args.extend(options.into_iter().map(String::from));
+        args.push(MESSAGE.into());
+        assert_eq!(&call[native..], args.as_slice());
+        assert!(
+            fs::read_to_string(&prompt)
+                .unwrap()
+                .contains(&format!(" {role} "))
+        );
+    }
+    f.up();
+    assert_eq!(f.count(&["agent", "start"]), 3);
+
+    // A modified extension is not the reviewed one.
+    fs::write(
+        &extension,
+        format!(
+            "{}\n// local edit\n",
+            fs::read_to_string(&extension).unwrap()
+        ),
+    )
+    .unwrap();
+    failure(f.crew(&["check"]), "outdated or modified");
+    success(f.crew(&["pi-uninstall"]));
+    assert!(!extension.exists());
+    success(f.crew(&["pi-uninstall"]));
+}
+
+#[test]
 fn check_reports_versions_base_and_what_it_did_not_check() {
     let f = Fixture::new();
     f.claude_tool(0o755);

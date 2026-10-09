@@ -328,6 +328,18 @@ pub fn execute(
     for step in &plan.steps {
         if let Step::StartAgent {
             name,
+            kind: Kind::Pi,
+            ..
+        } = step
+        {
+            crate::pi::preflight()?;
+            let rendered = crate::prompt::render(c, name, &crate::binary());
+            if let Some(problem) = crate::pi::prompt_problem(name, &rendered) {
+                return Err(problem);
+            }
+        }
+        if let Step::StartAgent {
+            name,
             kind: Kind::Codex,
             codex: options,
             ..
@@ -474,25 +486,38 @@ pub fn execute(
                 message,
                 kind,
                 codex: options,
+                pi,
             } => {
                 let pane = pane_of(pane, &panes)?;
                 if *kind == Kind::Codex {
                     let rendered = std::fs::read_to_string(prompt).map_err(|e| e.to_string())?;
                     codex::prepare(herdr, c, name, &pane, &rendered, options)?;
                 }
-                let native = if *kind == Kind::Claude {
-                    vec![
+                let native = match kind {
+                    Kind::Claude => vec![
                         "-n".into(),
                         name.clone(),
                         "--append-system-prompt-file".into(),
                         prompt.display().to_string(),
-                    ]
-                } else {
-                    let mut effective = options.clone();
-                    effective.resolve_dirs(&c.root)?;
-                    let mut args = effective.args();
-                    args.extend(["-c".into(), "features.hooks=true".into()]);
-                    args
+                    ],
+                    Kind::Codex => {
+                        let mut effective = options.clone();
+                        effective.resolve_dirs(&c.root)?;
+                        let mut args = effective.args();
+                        args.extend(["-c".into(), "features.hooks=true".into()]);
+                        args
+                    }
+                    // The crew's pi extension reads these flags and keeps the prompt in the session.
+                    Kind::Pi => {
+                        let mut args = vec![
+                            "--herdr-crew-role".into(),
+                            name.clone(),
+                            "--herdr-crew-prompt".into(),
+                            prompt.display().to_string(),
+                        ];
+                        args.extend(pi.args());
+                        args
+                    }
                 };
                 start_agent(herdr, name, &pane, *kind, &native, message.as_deref(), out)?;
             }
