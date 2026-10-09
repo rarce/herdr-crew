@@ -58,6 +58,11 @@ impl Herdr {
     /// the running server.
     pub fn require_native_server(&self, kind: &str) -> Result<(), String> {
         self.require_native_version()?;
+        self.require_server_version(kind)
+    }
+
+    /// The running server's half of [`Herdr::require_native_server`].
+    pub fn require_server_version(&self, kind: &str) -> Result<(), String> {
         let status = self
             .call(&["status", "server", "--json"])
             .map_err(|e| e.to_string())?;
@@ -355,8 +360,18 @@ pub fn execute(
         .collect();
     if !pi_roles.is_empty() {
         crate::pi::preflight()?;
-        crate::pi::require_version()?;
-        herdr.require_native_server("pi")?;
+        crate::pi::require_version("pi")?;
+    }
+    // Once per plan: every Codex and pi role needs the same herdr.
+    let native = plan.steps.iter().find_map(|step| match step {
+        Step::StartAgent {
+            kind: Kind::Codex, ..
+        } => Some("Codex"),
+        Step::StartAgent { kind: Kind::Pi, .. } => Some("pi"),
+        _ => None,
+    });
+    if let Some(kind) = native {
+        herdr.require_native_server(kind)?;
     }
     for name in pi_roles {
         let rendered = crate::prompt::render(c, name, &crate::binary());
@@ -373,7 +388,6 @@ pub fn execute(
         } = step
         {
             codex::validate_runtime(&c.root)?;
-            herdr.require_native_server("Codex")?;
             codex::context_prompt(c, name, &crate::prompt::render(c, name, &crate::binary()))?;
             let cwd = if c.session_role(name).unwrap().worktree {
                 c.worktree_path(name).unwrap()

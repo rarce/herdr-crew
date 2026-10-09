@@ -3,14 +3,18 @@
 // Keeps a crew role's prompt with its pi conversation: a fresh role passes the prompt file with
 // --herdr-crew-prompt, this extension saves the text in the session as a custom entry and appends
 // it to the system prompt on every turn. herdr resumes pi with a plain `pi --session <file>`; the
-// entry in that file brings the role back. /new and /fork carry the role; a resumed session
-// without the entry is left alone. An unreadable prompt file stops pi instead of running bare.
+// entry in that file brings the role back. /new and /fork carry the role; /resume or /reload of a
+// session without the entry leaves it alone. An unreadable prompt file stops pi instead of
+// running bare.
 // @ts-nocheck
 
 import { readFileSync } from "node:fs";
 
 const ENTRY = "herdr-crew-role";
 const MAX_PROMPT = 64 * 1024;
+// pi tears the extension runtime down when it replaces the session; /new and /fork hand the
+// role over through this slot, so it never depends on the previous session file being written.
+const HANDOFF = Symbol.for("herdr-crew.role-handoff");
 
 function valid(data) {
   return (
@@ -32,25 +36,6 @@ function stored(entries) {
   return found;
 }
 
-function fromFile(file) {
-  try {
-    return stored(
-      readFileSync(file, "utf8")
-        .split("\n")
-        .filter((line) => line.trim())
-        .map((line) => {
-          try {
-            return JSON.parse(line);
-          } catch {
-            return undefined;
-          }
-        }),
-    );
-  } catch {
-    return undefined;
-  }
-}
-
 export default function (pi) {
   pi.registerFlag("herdr-crew-role", { description: "herdr-crew role name", type: "string" });
   pi.registerFlag("herdr-crew-prompt", { description: "herdr-crew role prompt file", type: "string" });
@@ -64,10 +49,14 @@ export default function (pi) {
     if (role) {
       return;
     }
+    const handed = globalThis[HANDOFF];
+    delete globalThis[HANDOFF];
     if (event?.reason === "new" || event?.reason === "fork") {
       // /new and /fork inside a role keep the role of the session they come from.
-      role = event.previousSessionFile ? fromFile(event.previousSessionFile) : undefined;
-    } else if (event?.reason === "startup" || event?.reason === "reload") {
+      role = valid(handed) ? handed : undefined;
+    } else if (event?.reason === "startup") {
+      // Only a fresh launch reads the prompt file: /reload and /resume of a session without the
+      // entry leave it alone.
       const file = pi.getFlag("herdr-crew-prompt");
       if (typeof file === "string" && file) {
         const name = pi.getFlag("herdr-crew-role");
@@ -96,6 +85,12 @@ export default function (pi) {
       if (role.role && !pi.getSessionName()) {
         pi.setSessionName(role.role);
       }
+    }
+  });
+
+  pi.on("session_shutdown", (event) => {
+    if (role && (event?.reason === "new" || event?.reason === "fork")) {
+      globalThis[HANDOFF] = role;
     }
   });
 

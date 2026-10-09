@@ -744,7 +744,7 @@ fn check(c: &Config) -> Result<(), Fail> {
                 "herdr-crew: pi is missing: {why} (install: npm install -g {})",
                 pi::PACKAGE
             )),
-            Ok(path) => match pi::require_version() {
+            Ok(path) => match pi::require_version(&path) {
                 Ok((a, b, v)) => println!("herdr-crew: pi {a}.{b}.{v} at {}", path.display()),
                 Err(e) => missing.push(format!("herdr-crew: {e}")),
             },
@@ -753,25 +753,23 @@ fn check(c: &Config) -> Result<(), Fail> {
             Ok(()) => println!("herdr-crew: the crew pi extension is current"),
             Err(error) => missing.push(format!("herdr-crew: {error}")),
         }
+        // An extra's prompt names its instance; `-99` is the longest name `add` gives one.
         for role in c.roles.iter().filter(|r| r.kind == agent::Kind::Pi) {
-            if let Some(problem) =
-                pi::prompt_problem(&role.name, &prompt::render(c, &role.name, &binary()))
-            {
-                missing.push(format!("herdr-crew: {problem}"));
+            let longest = format!("{}-99", role.name);
+            let names = std::iter::once(role.name.as_str()).chain(role.extra.then_some(&*longest));
+            for name in names {
+                if let Some(problem) = pi::prompt_problem(name, &prompt::render(c, name, &binary()))
+                {
+                    missing.push(format!("herdr-crew: {problem}"));
+                }
             }
         }
     }
     if Herdr::from_env().call(&["workspace", "list"]).is_ok() {
-        if let Some(kind) = native {
-            match Herdr::from_env().call(&["status", "server", "--json"]) {
-                Ok(status)
-                    if status["version"]
-                        .as_str()
-                        .is_some_and(codex::supported_herdr) => {}
-                _ => missing.push(format!(
-                    "herdr-crew: {kind} crews require Herdr server 0.9.3 or newer"
-                )),
-            }
+        if let Some(kind) = native
+            && let Err(error) = Herdr::from_env().require_server_version(kind)
+        {
+            missing.push(format!("herdr-crew: {error}"));
         }
         let path = binary().to_string_lossy().replace('\'', "'\\''");
         println!(

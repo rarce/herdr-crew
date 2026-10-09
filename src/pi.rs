@@ -78,10 +78,12 @@ pub fn install(remove: bool) -> Result<(), String> {
     }
     let dir = path.parent().unwrap();
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let agent = agent_dir()?
+    // The extensions directory may be a symlink (a dotfile manager's); pi follows it, and so does
+    // this, but the file itself must not be one.
+    let dir = dir
         .canonicalize()
-        .map_err(|e| format!("pi agent directory: {e}"))?;
-    let path = agent.join("extensions").join(EXTENSION_FILE);
+        .map_err(|e| format!("pi extensions directory: {e}"))?;
+    let path = dir.join(EXTENSION_FILE);
     match fs::read(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("{}: {e}", path.display())),
@@ -93,7 +95,7 @@ pub fn install(remove: bool) -> Result<(), String> {
         }
         Ok(_) => {}
     }
-    files::write(&agent, &path, EXTENSION)?;
+    files::write(&dir, &path, EXTENSION)?;
     println!(
         "herdr-crew: installed the crew pi extension in {}. pi loads it on its next start; run \
          herdr-crew check.",
@@ -120,9 +122,9 @@ pub fn preflight() -> Result<(), String> {
     }
 }
 
-/// The `pi` on the PATH, which herdr starts, must be recent enough for herdr to resume it.
-pub fn require_version() -> Result<(u32, u32, u32), String> {
-    let found = process::detect("pi").map_err(|e| format!("pi --version: {e}"))?;
+/// `program`, the `pi` that herdr starts, must be recent enough for herdr to resume it.
+pub fn require_version(program: impl AsRef<std::ffi::OsStr>) -> Result<(u32, u32, u32), String> {
+    let found = process::detect(program).map_err(|e| format!("pi --version: {e}"))?;
     if found < MIN_PI {
         let (a, b, c) = found;
         let (x, y, z) = MIN_PI;

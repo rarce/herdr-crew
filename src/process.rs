@@ -134,8 +134,9 @@ impl Drop for Inspector {
 }
 
 /// The first `X.Y.Z` that `<program> --version` prints, within the inspection deadline: on the
-/// first stdout line or, when stdout closes empty and the program exits successfully, on stderr
-/// (pi prints its version there).
+/// first stdout line or, when stdout closes empty and the program exits successfully, a stderr
+/// line that holds only the version (pi prints it there, maybe after warnings that name other
+/// versions).
 pub fn detect(program: impl AsRef<OsStr>) -> Result<(u32, u32, u32), String> {
     let name = program.as_ref().to_string_lossy().into_owned();
     let mut process = Inspector::spawn(Command::new(program.as_ref()).arg("--version"))?;
@@ -159,18 +160,24 @@ pub fn detect(program: impl AsRef<OsStr>) -> Result<(u32, u32, u32), String> {
             if !status.success() {
                 return Err(format!("`--version` failed ({status}): {}", stderr.trim()));
             }
-            stderr
+            return stderr
+                .lines()
+                .find_map(|line| triple(line.trim()))
+                .ok_or_else(|| format!("cannot determine {name} version"));
         }
     };
     line.split_whitespace()
-        .find_map(|word| {
-            let parts: Vec<_> = word.split('.').map(str::parse::<u32>).collect();
-            match parts.as_slice() {
-                [Ok(a), Ok(b), Ok(c)] => Some((*a, *b, *c)),
-                _ => None,
-            }
-        })
+        .find_map(triple)
         .ok_or_else(|| format!("cannot determine {name} version"))
+}
+
+/// `word` as `X.Y.Z`.
+fn triple(word: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<_> = word.split('.').map(str::parse::<u32>).collect();
+    match parts.as_slice() {
+        [Ok(a), Ok(b), Ok(c)] => Some((*a, *b, *c)),
+        _ => None,
+    }
 }
 
 pub fn version(program: &str, minimum: (u32, u32, u32)) -> Result<(), String> {
@@ -201,6 +208,9 @@ mod tests {
     fn versions_come_from_stdout_or_from_stderr_of_a_successful_run() {
         assert_eq!(detect(script("out", "echo 'tool 0.9.3'")), Ok((0, 9, 3)));
         assert_eq!(detect(script("err", "echo 1.1.0 >&2")), Ok((1, 1, 0)));
+        let noisy = "echo 'Update available: 1.2.0' >&2; echo 1.1.0 >&2";
+        assert_eq!(detect(script("noisy", noisy)), Ok((1, 1, 0)));
+        assert!(detect(script("notice", "echo 'Update available: 1.2.0' >&2")).is_err());
     }
 
     #[test]

@@ -238,6 +238,18 @@ impl Config {
                     err(format!("roles[{i}].pi.{problem}"));
                 }
             }
+            // pi reads a positional argument that starts with "@" as a file to attach.
+            if r.kind.unwrap_or(raw.kind) == Kind::Pi
+                && r.start_message
+                    .as_deref()
+                    .or(raw.start_message.as_deref())
+                    .is_some_and(|m| m.starts_with('@'))
+            {
+                err(format!(
+                    "roles[{i}]: the start_message of a pi role must not start with \"@\", which \
+                     pi would read as a file to attach"
+                ));
+            }
             if !is_agent_name(&r.name) {
                 err(format!(
                     "roles[{i}].name \"{}\": must match [a-z][a-z0-9_-]{{0,31}}",
@@ -960,5 +972,14 @@ prompt = '''You are {{NAME}}.'''
             ),
             "{e:?}"
         );
+        // pi reads a leading "@" as a file to attach; Claude passes it on as text.
+        let mention = "start_message = \"@p-lead: confirm your role\"\n";
+        let e = errors(&format!("{MIN}kind = \"pi\"\n{mention}"));
+        assert!(
+            e.iter()
+                .any(|error| error.contains("roles[0]: the start_message of a pi role")),
+            "{e:?}"
+        );
+        assert!(Config::parse(&format!("{MIN}{mention}"), Path::new("/r/p")).is_ok());
     }
 }

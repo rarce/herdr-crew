@@ -485,8 +485,14 @@ fn pi_roles_need_the_extension_then_carry_their_prompt_and_options() {
     failure(f.crew(&["pi-install"]), "was not installed by herdr-crew");
     failure(f.crew(&["pi-uninstall"]), "was not installed by herdr-crew");
     fs::remove_file(&extension).unwrap();
+    // A dotfile manager may link the extensions directory; pi follows the link, and so does install.
+    let linked = f.root.join("dotfiles/pi-extensions");
+    fs::create_dir_all(&linked).unwrap();
+    fs::remove_dir(extension.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&linked, extension.parent().unwrap()).unwrap();
 
     success(f.crew(&["pi-install"]));
+    assert!(linked.join("herdr-crew.ts").is_file());
     assert!(
         fs::read_to_string(&extension)
             .unwrap()
@@ -523,6 +529,25 @@ fn pi_roles_need_the_extension_then_carry_their_prompt_and_options() {
         "{checked}"
     );
     assert!(!checked.contains("claude"), "{checked}");
+
+    // An extra's prompt names its instance, so it can exceed the cap where the base role's does not.
+    let config = f.read(".herdr/crew.toml");
+    fs::write(
+        f.repo.join(".herdr/crew.toml"),
+        config.replace(
+            "Developer {{NAME}} in {{REPO}}.",
+            &"{{NAME}}".repeat(15_000),
+        ),
+    )
+    .unwrap();
+    let out = f.crew(&["check"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        stderr.contains("the prompt of dev-99 must be nonempty"),
+        "{out:?}"
+    );
+    assert!(!stderr.contains("the prompt of dev "), "{stderr}");
+    fs::write(f.repo.join(".herdr/crew.toml"), config).unwrap();
 
     f.up();
     success(f.crew(&["add", "dev"]));
