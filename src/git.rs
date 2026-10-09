@@ -213,8 +213,9 @@ pub fn existing_worktrees(c: &Config) -> Result<BTreeSet<String>, String> {
 ///
 /// The base is saved in a versioned `crew.toml`, so it prefers a default branch over the
 /// current branch's upstream: a feature branch would become the base of every future
-/// worktree. The upstream wins only when it looks like a default branch (a fork's
-/// `upstream/main`, say), and otherwise is just a fallback before an arbitrary branch.
+/// worktree. The upstream wins only when it is its remote's recorded default branch, or is
+/// named `main` or `master` on a remote without one (a fork's `upstream/main`, say), and
+/// otherwise is just a fallback before an arbitrary branch.
 pub fn default_base(root: &Path) -> Option<String> {
     let refs = git(
         root,
@@ -226,14 +227,17 @@ pub fn default_base(root: &Path) -> Option<String> {
     )
     .ok()?;
     let mut branches = Vec::new();
-    let mut heads = Vec::new();
+    // (remote, its default branch) for each remote with a recorded `<remote>/HEAD`.
+    let mut heads: Vec<(String, String)> = Vec::new();
     for line in refs.lines() {
         let (name, target) = line.split_once('\t').unwrap_or((line, ""));
         let Some(name) = name.strip_prefix("refs/remotes/") else {
             continue;
         };
-        if name.ends_with("/HEAD") {
-            heads.extend(target.strip_prefix("refs/remotes/").map(String::from));
+        if let Some(remote) = name.strip_suffix("/HEAD") {
+            if let Some(target) = target.strip_prefix("refs/remotes/") {
+                heads.push((remote.to_string(), target.to_string()));
+            }
         } else {
             branches.push(name.to_string());
         }
@@ -249,12 +253,21 @@ pub fn default_base(root: &Path) -> Option<String> {
     )
     .ok();
     let looks_default = |base: &String| {
-        heads.contains(base)
-            || base
+        match heads.iter().find(|(remote, _)| {
+            base.strip_prefix(remote.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        }) {
+            // A recorded default, such as `develop`, beats a stale or release `master`.
+            Some((_, default)) => default == base,
+            None => base
                 .split_once('/')
-                .is_some_and(|(_, branch)| matches!(branch, "main" | "master"))
+                .is_some_and(|(_, branch)| matches!(branch, "main" | "master")),
+        }
     };
-    let origin_head = heads.iter().find(|h| h.starts_with("origin/")).cloned();
+    let origin_head = heads
+        .iter()
+        .find(|(remote, _)| remote == "origin")
+        .map(|(_, default)| default.clone());
     upstream
         .iter()
         .filter(|u| looks_default(u))
@@ -321,10 +334,20 @@ impl IgnoreRule {
     }
 
     /// Whether the rule lives in a `.gitignore` that the repository shares, as opposed to
-    /// `.git/info/exclude` or a global excludes file that other clones do not have.
-    pub fn shared(&self) -> bool {
-        !Path::new(&self.source).is_absolute()
-            && Path::new(&self.source).file_name() == Some(".gitignore".as_ref())
+    /// `.git/info/exclude` or an excludes file that other clones do not have. Git reports a
+    /// relative `core.excludesFile` relative too, so only the root `.gitignore`, which setup
+    /// itself writes, or a tracked `.gitignore` in a subdirectory counts.
+    pub fn shared(&self, root: &Path) -> bool {
+        let source = Path::new(&self.source);
+        if source.file_name() != Some(".gitignore".as_ref())
+            || !source
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            return false;
+        }
+        source == Path::new(".gitignore")
+            || git(root, &["ls-files", "--error-unmatch", "--", &self.source]).is_ok()
     }
 }
 
@@ -348,13 +371,19 @@ pub fn ignore_rules(root: &Path, paths: &[&str]) -> Result<Vec<Option<IgnoreRule
         .spawn()
         .map_err(|e| format!("could not run git: {e}"))?;
     let input: String = paths.iter().map(|path| format!("{path}\0")).collect();
-    // A few short paths fit in the pipe buffer, so writing before reading cannot block.
-    child
+    // A few short paths fit in the pipe buffer, so writing before reading cannot block. If
+    // git exits early the pipe breaks; its exit status and stderr below explain why.
+    match child
         .stdin
         .take()
         .expect("piped stdin")
         .write_all(input.as_bytes())
-        .map_err(|e| format!("could not run git check-ignore: {e}"))?;
+    {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+            return Err(format!("could not run git check-ignore: {e}"));
+        }
+        _ => {}
+    }
     let out = child
         .wait_with_output()
         .map_err(|e| format!("could not run git: {e}"))?;
@@ -412,6 +441,8 @@ pub fn test_repo(name: &str) -> PathBuf {
             "start",
         ],
         &["checkout", "--quiet", "-b", "work"],
+        // Keep the developer's global excludes out of ignore assertions.
+        &["config", "core.excludesFile", "/dev/null"],
         &[
             "remote",
             "add",
@@ -503,6 +534,50 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_default_branch_beats_an_upstream_named_master() {
+        let root = test_repo("base-gitflow");
+        test_remote_branch(&root, "origin/develop");
+        test_remote_branch(&root, "origin/master");
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/develop",
+            ],
+        )
+        .unwrap();
+        git(
+            &root,
+            &["branch", "--quiet", "--set-upstream-to", "origin/master"],
+        )
+        .unwrap();
+        assert_eq!(default_base(&root).as_deref(), Some("origin/develop"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn only_the_root_or_a_tracked_gitignore_is_shared() {
+        let root = test_repo("ignore-shared");
+        let rule = |source: &str| IgnoreRule {
+            source: source.into(),
+            line: "1".into(),
+            pattern: ".herdr/".into(),
+        };
+        assert!(rule(".gitignore").shared(&root));
+        // A relative core.excludesFile is reported relative to the root.
+        assert!(!rule("../.gitignore").shared(&root));
+        assert!(!rule(".git/info/exclude").shared(&root));
+        assert!(!rule("/home/user/.gitignore").shared(&root));
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/.gitignore"), "*\n").unwrap();
+        assert!(!rule("sub/.gitignore").shared(&root));
+        git(&root, &["add", "--force", "sub/.gitignore"]).unwrap();
+        assert!(rule("sub/.gitignore").shared(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn ignore_rules_report_the_deciding_rule_and_where_it_lives() {
         let root = test_repo("ignore");
         std::fs::write(root.join(".gitignore"), "/.herdr/*\n!/.herdr/crew.toml\n").unwrap();
@@ -521,15 +596,15 @@ mod tests {
             panic!("{rules:?}")
         };
         let status = status.as_ref().unwrap();
-        assert!(status.ignores() && status.shared());
+        assert!(status.ignores() && status.shared(&root));
         assert_eq!(
             (status.line.as_str(), status.pattern.as_str()),
             ("1", "/.herdr/*")
         );
         let config = config.as_ref().unwrap();
-        assert!(!config.ignores() && config.shared());
+        assert!(!config.ignores() && config.shared(&root));
         let notes = notes.as_ref().unwrap();
-        assert!(notes.ignores() && !notes.shared(), "{notes:?}");
+        assert!(notes.ignores() && !notes.shared(&root), "{notes:?}");
         assert_eq!(source, &None);
         std::fs::remove_dir_all(&root).unwrap();
     }

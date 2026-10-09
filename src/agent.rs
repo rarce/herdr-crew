@@ -14,6 +14,8 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Pi];
+
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "claude" => Some(Self::Claude),
