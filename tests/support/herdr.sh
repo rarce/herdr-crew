@@ -23,6 +23,7 @@ if [ -f fail-prefix ]; then
             rm fail-prefix fail-mode
             case "$injection" in
                 transport) echo 'simulated transport failure' >&2; exit 1 ;;
+                denied) echo 'Error: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }' >&2; exit 1 ;;
                 malformed) echo '{"result":{}}'; exit 0 ;;
                 agent_not_ready) ;; # The agent is running, but awaiting user input.
                 *) error "$injection" ;;
@@ -164,6 +165,18 @@ case "${1-} ${2-}" in
         printf 'session-%s' "$pane" > "$t/session"
         touch "$t/running"
         if [ "$injection" = agent_not_ready ]; then error agent_not_ready; fi
+        echo '{"result":{}}'
+        ;;
+    'agent get')
+        t=$(tab_for_pane "$3")
+        [ -f "$t/agent" ] || error agent_not_found
+        printf '{"result":{"agent":{"pane_id":"%s","agent_status":"%s"}}}\n' "$3" "$(cat "$t/status" 2>/dev/null || echo idle)"
+        ;;
+    'agent prompt')
+        t=$(tab_for_pane "$3")
+        [ -f "$t/agent" ] || error agent_not_found
+        [ "$(cat "$t/status" 2>/dev/null || echo idle)" != blocked ] || error agent_blocked
+        printf '%s\000' "$4" >> "$t/prompts"
         echo '{"result":{}}'
         ;;
     'pane process-info')

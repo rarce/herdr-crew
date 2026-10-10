@@ -136,6 +136,7 @@ Placeholders:
 | `{{STATUS}}`   | `board.file`                                                                                      |
 | `{{SCHEMA}}`   | `.herdr/status.schema.json` (§5.1)                                                                |
 | `{{LAUNCHER}}` | the binary's absolute path, so that a coordinating role can run `{{LAUNCHER}} add <role>` itself |
+| `{{PEERS}}` | how this session reaches each other role: `SendMessage` between Claude roles, `herdr-crew send` otherwise, or no direct channel from a sandboxed Codex role ([messaging](messaging.md)) |
 
 **Claude invocation:** `herdr agent start <name> --kind claude --pane <P> --timeout 60000 -- -n <name> --append-system-prompt-file <file> [<start_message>]`. `kind` is optional at the project and role levels; absent means Claude. Codex uses native `--kind codex`, typed options, additive hook context and configured recovery. Arbitrary `args` remain unsupported. See [Codex support](codex-support.md) for its protocol, compatibility requirements and tests.
 

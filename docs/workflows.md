@@ -52,7 +52,7 @@ What herdr-crew provides:
 | --- | --- | --- |
 | **You relay** | Copy the handoff from one tab and paste it in another. | Always works, for any agent. Slowest, but you see and approve every handoff. |
 | **Claude Code messaging** | In a Claude role, ask the session to message another by role name, for example "send the delivery to @tl-reviewer". | Claude Code 2.1.224+ messages your other local sessions directly ([cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)). herdr-crew starts each Claude role with `-n <role>`, so the role name is the session name. Only between Claude sessions; each session's own permissions and prompts still apply. |
-| **herdr agent commands** | The coordinator runs `herdr agent prompt <role> "<text>" --wait --timeout 600000`, and `herdr agent read <role> --source recent-unwrapped --lines 120` to read a reply. | Works for Claude and Codex roles, because every role is a herdr agent named after it. The command needs shell access to the herdr socket, which a sandboxed Codex session may not have and which your agent may ask you to approve. herdr rejects a prompt to an agent waiting at an approval dialog. Not exercised by herdr-crew's tests. |
+| **`herdr-crew send`** | A Claude or pi role (or Codex with `sandbox = "danger-full-access"`) pipes the message into `herdr-crew --root <repo> send <role>`. The `{{PEERS}}` placeholder writes the exact command into each prompt. | For pairs involving Codex or pi. The message arrives framed as coming from the sending role, never as the user's approval. `send` refuses an agent waiting at a dialog and repeated or bursty messages. A sandboxed Codex role cannot reach herdr and gets no command: it delivers through commits and its final report, which the coordinator reads with `herdr agent read <role> --source recent-unwrapped --lines 120`. A convenience, not a security boundary; see [messaging](messaging.md). |
 | **Git** | Developers commit on a task branch; reviewers and the coordinator read that exact commit. | Worktrees share the repository's refs, so a commit is visible to every session at once, without pushing. The commit, not a description of it, is what gets reviewed and integrated. |
 | **The board** | The coordinator records state, queues and decisions for you. | Status, not messages: other roles report to the coordinator instead of editing it. |
 
@@ -96,13 +96,13 @@ See [the end-to-end demo](demo.md) for a full round, the board at each step, and
 | | Several manual tabs | herdr-crew | Claude Code agent teams | One agent session |
 | --- | --- | --- | --- | --- |
 | Setup | By hand, every time | `crew.toml` in the repository; `up` or herdr's startup | A request to the lead session; experimental flag | None |
-| Agents | Any | Claude Code and Codex, mixed per role | Claude Code | Any |
+| Agents | Any | Claude Code, Codex and pi, mixed per role | Claude Code | Any |
 | Sessions after a restart | Start them again | herdr restores the tabs and resumes the agents; `up` repairs what is missing | In-process teammates are not restored on resume | Resume the one session |
 | Isolation | Up to you | Optional worktree per role | One checkout; split files by owner | One checkout |
 | Coordination | You | Role prompts, the board, and the channels above | Shared task list and direct messages | Not needed |
 | Cost | One session per tab | One session per role, all running | One session per teammate | Lowest |
 
-herdr-crew fits when the same roles come back task after task on a project, when you want them visible as tabs that survive restarts, or when you mix Claude Code and Codex. For one-off parallel exploration within a single Claude Code session, [agent teams](https://code.claude.com/docs/en/agent-teams) or subagents are lighter. For a localized fix, one session is usually best.
+herdr-crew fits when the same roles come back task after task on a project, when you want them visible as tabs that survive restarts, or when you mix Claude Code, Codex and pi. For one-off parallel exploration within a single Claude Code session, [agent teams](https://code.claude.com/docs/en/agent-teams) or subagents are lighter. For a localized fix, one session is usually best.
 
 ### Worktrees and the base branch
 

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 
-pub const PLACEHOLDERS: [&str; 5] = ["NAME", "REPO", "STATUS", "SCHEMA", "LAUNCHER"];
+pub const PLACEHOLDERS: [&str; 6] = ["NAME", "REPO", "STATUS", "SCHEMA", "LAUNCHER", "PEERS"];
 pub const SCHEMA_FILE: &str = ".herdr/status.schema.json";
 pub const PROMPTS_DIR: &str = ".herdr/prompts";
 
@@ -38,6 +38,7 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
         .filter(|p| !p.is_empty())
         .collect();
     let root = config.root.display().to_string();
+    let peers = crate::send::peers(config, name, launcher);
     let launcher = launcher.display().to_string();
     let values = [
         ("NAME", name),
@@ -45,6 +46,7 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
         ("STATUS", config.board.file.as_str()),
         ("SCHEMA", SCHEMA_FILE),
         ("LAUNCHER", launcher.as_str()),
+        ("PEERS", peers.as_str()),
     ];
     let mut text = parts.join("\n\n");
     for (placeholder, value) in values {
@@ -71,7 +73,8 @@ mod tests {
             [(13, "LAUNCH".to_string()), (24, String::new())]
         );
         assert!(
-            unknown_placeholders("{{NAME}}{{REPO}}{{STATUS}}{{SCHEMA}}{{LAUNCHER}}").is_empty()
+            unknown_placeholders("{{NAME}}{{REPO}}{{STATUS}}{{SCHEMA}}{{LAUNCHER}}{{PEERS}}")
+                .is_empty()
         );
     }
 
