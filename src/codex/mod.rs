@@ -159,24 +159,15 @@ impl Drop for Lock {
 /// Two stable hashes produce short filenames; the stored full context is always compared.
 fn context_key(context: &Context) -> String {
     let bytes = serde_json::to_vec(context).unwrap();
-    let hash = |seed: u64| {
-        bytes
-            .iter()
-            .fold(seed, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3))
-    };
     format!(
         "{:016x}{:016x}",
-        hash(0xcbf29ce484222325),
-        hash(0x84222325cbf29ce4)
+        files::fnv64(0xcbf29ce484222325, &bytes),
+        files::fnv64(0x84222325cbf29ce4, &bytes)
     )
 }
 
 fn new_token() -> Result<String, String> {
-    let mut bytes = [0u8; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .map_err(|e| format!("cannot create Codex binding token: {e}"))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    files::random_hex(16).map_err(|e| format!("cannot create Codex binding token: {e}"))
 }
 
 fn text(value: &Value, key: &str) -> Result<String, String> {

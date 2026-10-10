@@ -1962,7 +1962,48 @@ fn send_refusals_have_distinct_exit_codes_and_type_nothing() {
     success(f.send(from, "dev", "something else"));
     assert_eq!(prompts(&dev).len(), 2);
 
-    fs::remove_file(f.state.join("online")).unwrap();
+    f.fail_once("workspace list", "denied");
     refused(&f.send(from, "dev", "later"), 77, "ask the user to relay");
+    fs::remove_file(f.state.join("online")).unwrap();
+    let down = f.send(from, "dev", "later");
+    refused(&down, 1, "cannot reach herdr: no_server");
+    assert!(!String::from_utf8_lossy(&down.stderr).contains("relay"));
     assert_eq!(prompts(&dev).len(), 2);
+
+    let out = f.send(from, "dev", &"é".repeat(20_000));
+    refused(&out, 2, "over 32768 bytes");
+    let usage = f.crew(&["send"]);
+    assert_eq!(usage.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&usage.stderr),
+        "herdr-crew: usage: herdr-crew [--root DIR] send <session>, with the message on stdin\n"
+    );
+}
+
+#[test]
+fn concurrent_identical_sends_pass_the_repeat_check_once() {
+    let f = Fixture::new();
+    f.up();
+    let lead_pane = fs::read_to_string(f.tab("lead").join("pane")).unwrap();
+    let dev = f.tab("dev");
+    let outputs: Vec<Output> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..6)
+            .map(|_| scope.spawn(|| f.send(Some(&lead_pane), "dev", "same message")))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let codes: Vec<_> = outputs.iter().map(|o| o.status.code()).collect();
+    assert_eq!(
+        codes.iter().filter(|c| **c == Some(0)).count(),
+        1,
+        "{outputs:?}"
+    );
+    assert_eq!(
+        codes.iter().filter(|c| **c == Some(75)).count(),
+        5,
+        "{outputs:?}"
+    );
+    assert_eq!(prompts(&dev).len(), 1);
+    // The record lives in the repository's Git directory, not in a shared temporary directory.
+    assert!(f.repo.join(".git/herdr-crew-send.json").is_file());
 }

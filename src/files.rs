@@ -17,6 +17,20 @@ pub enum Kind {
     Directory,
 }
 
+/// `count` random bytes from the operating system, as lowercase hex.
+pub fn random_hex(count: usize) -> io::Result<String> {
+    use std::io::Read;
+    let mut bytes = vec![0u8; count];
+    fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// FNV-1a over `data` from `seed`: stable short keys, not a cryptographic hash.
+pub fn fnv64(seed: u64, data: &[u8]) -> u64 {
+    data.iter()
+        .fold(seed, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3))
+}
+
 /// Filesystem preflight for every generated-file location, before contacting the server.
 pub fn validate_config(c: &Config) -> Result<(), String> {
     validate(&c.root, &c.board_path(), Kind::File)?;

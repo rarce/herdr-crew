@@ -51,6 +51,10 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   check                          validate the configuration and the dependencies
   startup                        herdr's startup hook: bring up or repair the projects in herdr";
 
+/// `send`'s own usage line: its caller is usually a model, which needs this, not every command.
+const SEND_USAGE: &str =
+    "herdr-crew: usage: herdr-crew [--root DIR] send <session>, with the message on stdin";
+
 /// A failure with its exit code: 2 for an invalid command line or configuration, 1 when the
 /// plan stopped or something else failed (design §4.3).
 struct Fail {
@@ -191,6 +195,12 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
     } else {
         0
     };
+    if a.command == "send" && a.positional.len() != arity {
+        return Err(Fail {
+            code: 2,
+            lines: vec![SEND_USAGE.into()],
+        });
+    }
     if a.positional.len() != arity {
         return Err(Fail::usage(format!(
             "{} takes {arity} argument(s)",
@@ -801,15 +811,10 @@ fn check(c: &Config) -> Result<(), Fail> {
 /// `send`: the message from stdin into another session (docs/messaging.md §4). Its refusals use
 /// their own exit codes and no usage text, because the caller is usually a model.
 fn send(c: &Config, target: &str) -> Result<(), Fail> {
-    use std::io::Read;
-    let mut raw = String::new();
-    std::io::stdin()
-        .take(send::MAX_BODY as u64 * 4)
-        .read_to_string(&mut raw)
-        .map_err(|e| Fail {
-            code: 2,
-            lines: vec![format!("herdr-crew: cannot read the message on stdin: {e}")],
-        })?;
+    let raw = send::read_input(std::io::stdin().lock()).map_err(|e| Fail {
+        code: 2,
+        lines: vec![format!("herdr-crew: {e}")],
+    })?;
     let pane = std::env::var("HERDR_PANE_ID").ok();
     match send::run(c, &Herdr::from_env(), target, &raw, pane.as_deref()) {
         Ok(line) => {

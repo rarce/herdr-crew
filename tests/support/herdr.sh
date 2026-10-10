@@ -23,6 +23,7 @@ if [ -f fail-prefix ]; then
             rm fail-prefix fail-mode
             case "$injection" in
                 transport) echo 'simulated transport failure' >&2; exit 1 ;;
+                denied) echo 'Error: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }' >&2; exit 1 ;;
                 malformed) echo '{"result":{}}'; exit 0 ;;
                 agent_not_ready) ;; # The agent is running, but awaiting user input.
                 *) error "$injection" ;;
