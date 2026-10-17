@@ -14,6 +14,13 @@ elif args and args[0] == "queue":
     with directory.joinpath("codex-queue.jsonl").open("a") as output:
         output.write(json.dumps({"args": args, "cwd": os.getcwd(), "home": os.environ.get("CODEX_HOME"),
                                  "inherited_thread": os.environ.get("CODEX_THREAD_ID")}) + "\n")
+    if directory.joinpath("queue-wait").exists():
+        import time
+        deadline = time.monotonic() + 8
+        while not directory.joinpath("queue-release").exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("test did not release queue delivery")
+            time.sleep(0.02)
     if directory.joinpath("queue-fail").exists():
         print("simulated failure after possible delivery", file=sys.stderr)
         raise SystemExit(1)

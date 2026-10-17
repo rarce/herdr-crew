@@ -52,7 +52,7 @@ pub fn deliver(
     if !binding_path.exists() {
         return Ok(false);
     }
-    let _lock = Lock::acquire(&c.root)?;
+    let lock = Lock::acquire(&c.root)?;
     let binding: Binding = read(&c.root, &binding_path)?;
     if binding
         .codex_version
@@ -86,6 +86,9 @@ pub fn deliver(
             "the Codex conversation is owned by another crew role; nothing was sent".into(),
         );
     }
+    // The target is now copied and validated. Slow queue I/O must not hold the runtime
+    // lock needed by role startup, SessionStart hooks and recovery.
+    drop(lock);
     let mut command = Command::new("codex");
     command
         .args(["queue", "--thread", &session.id, "--message", message])
@@ -93,6 +96,9 @@ pub fn deliver(
         .env("CODEX_HOME", &snapshot.codex_home)
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CREW_CODEX_BINDING");
+    if let Some(profile) = &snapshot.options.profile {
+        command.args(["--profile", profile]);
+    }
     process::Inspector::spawn(&mut command)?
         .finish()
         .map_err(|e| {

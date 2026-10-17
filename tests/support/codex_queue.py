@@ -1,6 +1,6 @@
 """Real Herdr and two real Codex TUIs, with isolated homes and a local mock provider.
 
-Checks native delivery with --no-daemon, distinct role hooks, a busy receiver and restore.
+Checks --no-daemon delivery, a profile-specific queue, role hooks, busy delivery and restore.
 Never reads real credentials or sends requests to an external model.
 """
 import http.server
@@ -92,6 +92,9 @@ codex_config = ('model = "offline-queue"\nmodel_provider = "offline"\n'
                 'wire_api = "responses"\nrequires_openai_auth = false\n'
                 '[analytics]\nenabled = false\n[projects.' + json.dumps(str(repo)) + ']\ntrust_level = "trusted"\n')
 home.joinpath("config.toml").write_text(codex_config)
+recipient_queue = root / "recipient-queue"
+recipient_queue.mkdir()
+home.joinpath("recipient.config.toml").write_text("sqlite_home = " + json.dumps(str(recipient_queue)) + "\n")
 subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], env=env, check=True)
 repo.joinpath(".herdr").mkdir()
 repo.joinpath(".herdr/crew.toml").write_text('''version = 1
@@ -112,6 +115,8 @@ prompt = "PROBE_ROLE_LEAD. Keep the lead role."
 [[roles]]
 name = "dev"
 prompt = "PROBE_ROLE_DEV. Keep the developer role."
+[roles.codex]
+profile = "recipient"
 ''')
 
 
@@ -271,7 +276,7 @@ try:
     send("lead", "dev", "PROBE_AFTER_RESTORE")
     verify_delivery("PROBE_AFTER_RESTORE", "dev")
     assert len(list(repo.joinpath(".herdr/codex/snapshots").glob("*.json"))) == 2
-    print("Verified real Codex queue with --no-daemon: two distinct role contexts, multiline delivery by UUID, busy delivery and the same conversations after Herdr restart.", flush=True)
+    print("Verified real Codex queue with --no-daemon: a profile-specific sqlite_home, two distinct role contexts, multiline delivery by UUID, busy delivery and the same conversations after Herdr restart.", flush=True)
 finally:
     release.set()
     if sys.exc_info()[0] is not None and server is not None:

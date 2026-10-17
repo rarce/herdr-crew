@@ -2043,6 +2043,102 @@ fn send_queues_the_bound_codex_uuid_with_its_saved_home_and_repeat_guard() {
 }
 
 #[test]
+fn native_codex_delivery_preserves_the_recipients_saved_profile() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(true);
+    let config = f.read(".herdr/crew.toml") + "\n[roles.codex]\nprofile = \"recipient\"\n";
+    fs::write(f.repo.join(".herdr/crew.toml"), &config).unwrap();
+    fs::create_dir_all(f.root.join(".codex")).unwrap();
+    fs::write(
+        f.root.join(".codex/recipient.config.toml"),
+        format!("sqlite_home = {:?}\n", f.root.join("recipient-queue")),
+    )
+    .unwrap();
+    fs::write(f.state.join("codex-version"), "0.163.0").unwrap();
+    f.up();
+    let host = RpcHost::new(&f);
+    assert!(
+        host.hook(&f, "dev", "startup", DEV_UUID)
+            .get("continue")
+            .is_none()
+    );
+    fs::write(f.tab("dev").join("session"), DEV_UUID).unwrap();
+    // A later crew configuration and the sender's home cannot retarget a running role.
+    fs::write(
+        f.repo.join(".herdr/crew.toml"),
+        config.replace("profile = \"recipient\"", "profile = \"future\""),
+    )
+    .unwrap();
+    let mut command = f.command(CREW);
+    command.env("CODEX_HOME", f.root.join("unrelated-home"));
+    assert_eq!(
+        success(Fixture::send_command(
+            command,
+            None,
+            "dev",
+            "Profile request"
+        )),
+        "herdr-crew: queued to dev\n"
+    );
+    let deliveries = queued(&f);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(
+        deliveries[0]["home"],
+        f.root.join(".codex").to_str().unwrap()
+    );
+    assert!(
+        deliveries[0]["args"]
+            .as_array()
+            .unwrap()
+            .windows(2)
+            .any(|pair| pair == [json!("--profile"), json!("recipient")]),
+        "{}",
+        deliveries[0]
+    );
+    assert!(prompts(&f.tab("dev")).is_empty());
+}
+
+#[test]
+fn native_codex_delivery_allows_concurrent_role_startup_and_hooks() {
+    use std::time::{Duration, Instant};
+
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(false);
+    fs::write(f.state.join("codex-version"), "0.163.0").unwrap();
+    f.up();
+    let host = RpcHost::new(&f);
+    for (role, id) in [("lead", LEAD_UUID), ("dev", DEV_UUID)] {
+        assert!(host.hook(&f, role, "startup", id).get("continue").is_none());
+        fs::write(f.tab(role).join("session"), id).unwrap();
+    }
+    fs::write(f.state.join("queue-wait"), "").unwrap();
+    std::thread::scope(|scope| {
+        let sender = scope.spawn(|| f.send(None, "dev", "Slow queue request"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !f.state.join("codex-queue.jsonl").exists() {
+            assert!(Instant::now() < deadline, "queue process did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let hook = host.hook(&f, "lead", "compact", LEAD_UUID);
+        let added = f.crew(&["add", "dev"]);
+        let still_waiting = !sender.is_finished();
+        fs::write(f.state.join("queue-release"), "").unwrap();
+        let sent = sender.join().unwrap();
+        assert!(
+            still_waiting,
+            "delivery must still be pending during startup"
+        );
+        success(added);
+        assert!(hook.get("continue").is_none(), "{hook}");
+        assert!(f.repo.join(".worktrees/dev-2").is_dir());
+        assert!(f.agents().iter().any(|name| name == "dev-2"));
+        assert_eq!(success(sent), "herdr-crew: queued to dev\n");
+    });
+}
+
+#[test]
 fn native_codex_delivery_reaches_an_extra_in_its_worktree() {
     let f = Fixture::new();
     f.codex_tools();
