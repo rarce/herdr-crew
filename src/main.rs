@@ -39,7 +39,7 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   up [--no-attach] [--dry-run]   start or complete the project's sessions
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
-  send <session>                 type the message on stdin into another crew session
+  send <session>                 send the message on stdin to another crew session
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
   codex-install                  install the crew hook; review it in Codex /hooks

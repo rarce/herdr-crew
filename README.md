@@ -19,7 +19,7 @@ See [the end-to-end demo](docs/demo.md) for one task going from assignment to re
 - herdr 0.9.1 or later, on macOS or Linux
 - Rust (stable) with `cargo`: herdr builds the plugin from source when it installs it
 - `git` and the selected agents (`claude`, `codex`, `pi`, or a mix) on the `PATH`
-- Codex roles require herdr 0.9.3+, Codex CLI 0.160.1+, the public crew launcher, and the trusted crew hook described below
+- Codex roles require herdr 0.9.3+, Codex CLI 0.160.1+ (0.163.0+ for native message queues), the public crew launcher, and the trusted crew hook described below
 - pi roles require herdr 0.9.3+, the crew pi extension (`herdr-crew pi-install`) and herdr's pi integration; they need pi 1.1.0 or newer (`@earendil-works/pi-coding-agent`), whose extension context herdr's pi integration needs to track and resume sessions, and are tested with herdr 0.9.3 and pi 1.1.0
 
 ## Install
@@ -85,7 +85,7 @@ The first time `claude` runs in a folder, it asks whether you trust it; answer i
 ### Know the limits before you start
 
 - **How the crew starts depends on herdr.** With no server running, `cd repo && herdr` brings the project up through the startup hook. With a server already running, `herdr` only attaches: run `herdr-crew up --no-attach` or the `herdr-crew.up` action. After a herdr restart, herdr resumes the sessions and the hook repairs only the board; a tab whose agent stopped gets a resume command from `up`, never a second agent.
-- **Sessions do not message each other on their own.** herdr-crew starts the roles with their prompts, worktrees and board. Handoffs go through you, through Claude Code's cross-session messaging between Claude roles, or through `herdr-crew send` for pairs with Codex or pi, as described in [how sessions collaborate](docs/workflows.md#how-sessions-collaborate). A Codex role in a sandbox cannot reach herdr, so it has no direct channel: it delivers through commits and its final report.
+- **Sessions follow the handoff protocol in their prompts.** Handoffs go through you, Claude Code's cross-session messaging between Claude roles, or `herdr-crew send`. For bound Codex recipients with Codex 0.163.0+, `send` uses the native message queue by saved UUID; older or unbound sessions receive terminal input. See [how sessions collaborate](docs/workflows.md#how-sessions-collaborate). A Codex sender in a sandbox still cannot reach herdr: it delivers through commits and its final report unless you explicitly approve an invocation outside its sandbox.
 - **Worktrees start from the remote base.** New role worktrees are created with a detached HEAD from `worktrees.base` (for example `origin/main`). Your uncommitted or unpushed local changes are not in them, so commit and push what the crew needs first. Each session creates a task branch before committing; existing worktrees are reused as they are.
 - **Agent names are global to the herdr server.** A live agent named like one of your roles, in any workspace or project, blocks that role. `init` prefixes role names with the project name to avoid collisions.
 - **Every role is a running agent.** Each session has its own context and usage, and a crew multiplies both. Start with the smallest preset that can produce a verifiable result.
@@ -147,6 +147,10 @@ profile = "development"
 | `additional_dirs` | Existing directories, absolute or relative to the main checkout; `[]` clears inherited additional roots |
 
 Absent options inherit Codex settings. Codex-only role options on a Claude role are errors, and arbitrary `args` are unsupported. Crew starts the interactive CLI through native Herdr `agent start`, using `--no-daemon` to keep each pane's hook context local.
+
+`herdr-crew send <role>` resolves a running Codex role to its bound conversation and queues the framed message with `codex queue --thread <UUID> --message ...` on Codex 0.163.0+. Native delivery works with `--no-daemon`, including while the recipient is working: Codex processes the queue after the current turn. The role name remains scoped to this crew; delivery does not depend on Codex's display names. The command uses the recipient's saved `CODEX_HOME`, keeps the same repeat and dialog checks, and never retries a failed native delivery through terminal input. Sending still requires access to herdr and to the recipient's Codex home; this adds no sandbox permissions.
+
+Both the recipient's recorded launch version and the installed CLI must support native queues. Existing sessions with older or unversioned bindings keep terminal delivery until configured recovery through `codex-resume` records the newer version. Updating the executable alone does not change a running process.
 
 Role context is additive; crew does not replace Codex's built-in instructions or edit shared repository `AGENTS.md` files. The complete rendered context, including absolute board guidance, is capped at 64 KiB; larger prompts fail before launching. The handler disables Codex's default context spilling within that bound. See [Codex hooks](https://learn.chatgpt.com/docs/hooks).
 
@@ -236,7 +240,7 @@ herdr-crew [--root DIR] <command>
   up [--no-attach] [--dry-run]   start or complete the project's sessions
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
-  send <session>                 type the message on stdin into another crew session
+  send <session>                 send the message on stdin to another crew session
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
   codex-install                  install the crew hook; review it in Codex /hooks
@@ -255,7 +259,7 @@ herdr-crew [--root DIR] <command>
 - **The `herdr-crew.up` action.** It works on the workspace you have focused in herdr.
 - **Starting the server.** From a plain terminal, `up` starts a herdr server if none is running and then opens herdr. Pass `--no-attach` to skip opening it.
 - **`--dry-run`** prints each role's verdict and the steps `up` would take, without doing anything.
-- **`send <session>`** reads a message on stdin, frames it as coming from the calling session (from `HERDR_PANE_ID`), and types it into that session's agent in the crew's workspace. It delivers to idle and working agents. It refuses an agent waiting at a dialog (exit 76), a repeated or bursty message (exit 75), and reports an unreachable herdr, typically a sandbox, with exit 77. It is a convenience, not a security boundary: see [messaging](docs/messaging.md).
+- **`send <session>`** reads a message on stdin and frames it as coming from the calling session (from `HERDR_PANE_ID`). It queues native Codex messages when the CLI and live crew binding support them, and otherwise types into the recipient's terminal. It delivers to idle and working agents. It refuses an agent waiting at a dialog (exit 76), a repeated or bursty message (exit 75), and reports an unreachable herdr, typically a sandbox, with exit 77. Success means queued or typed, not that the recipient has acted on the request. It is a convenience, not a security boundary: see [messaging](docs/messaging.md).
 - **One command at a time.** `up`, `add` and `close` on the same project wait for each other (up to two minutes) instead of racing; the startup hook leaves a project another command is changing to that command. The lock is released automatically, even after a crash.
 
 **No-parameter actions.** herdr actions take no parameters, so `add` and `close` are not actions. There is also a trap: an action invoked with `herdr plugin action invoke` acts on whichever workspace is focused, not on the caller's. So agents and scripts run the binary directly: `{{LAUNCHER}} up` or `{{LAUNCHER}} add <role>` in a prompt (see `{{LAUNCHER}}` below), never `plugin action invoke`.
@@ -463,11 +467,19 @@ The real-herdr tests clear inherited `HERDR_*` and `CLAUDE*` variables and use t
 `.github/workflows/real-herdr.yml` runs both integrations weekly and on manual
 dispatch on Linux and macOS. It downloads herdr 0.9.3 into the runner's temporary
 directory and checks its pinned SHA-256 digest. Upgrade the version and the asset
-digests together when changing the tested host version. Claude and Codex remain simulated. The Codex lifecycle test verifies exact hook context, native-hook coexistence, persisted custom recovery, and options/instructions after an isolated server restart:
+digests together when changing the tested host version. The basic lifecycle test uses a simulated Codex and verifies exact hook context, native-hook coexistence, persisted custom recovery, and options/instructions after an isolated server restart:
 
 ```sh
 CREW_REAL_HERDR=1 cargo test --locked --test codex_herdr -- --ignored --nocapture
 ```
+
+With Codex 0.163.0+ installed, the native queue integration starts two real Codex TUIs with `--no-daemon` in its own Herdr session and uses a local mock provider. It verifies distinct role contexts, multiline delivery by UUID in both directions, queueing while the recipient works, and delivery to the same conversations after a Herdr restart:
+
+```sh
+CREW_REAL_HERDR=1 CREW_REAL_CODEX=1 cargo test --locked --test codex_herdr native_codex_queue -- --ignored --nocapture
+```
+
+The scheduled integration pins Codex 0.163.0 and includes this test on Linux and macOS.
 
 A separate opt-in test uses the installed Codex 0.160.1+ CLI, a temporary Codex home and a local mock Responses provider to verify that a large crew hook output reaches the outgoing request as developer guidance while built-in instructions remain intact:
 
@@ -475,7 +487,7 @@ A separate opt-in test uses the installed Codex 0.160.1+ CLI, a temporary Codex 
 CREW_REAL_CODEX=1 cargo test --locked --test execution real_codex_sends -- --ignored --nocapture
 ```
 
-It trusts only the exact hook the test itself installs in its temporary home. It uses no real credentials or external model. Normal tests exercise both agents, mixed crews, option inheritance, hook trust, context ownership, clear/compact, renamed panes, deleted snapshots and configured recovery. The two hook/RPC tests bind temporary Unix sockets.
+It trusts only the exact hook the test itself installs in its temporary home. It uses no real credentials or external model. Normal tests exercise both agents, mixed crews, option inheritance, hook trust, context ownership, clear/compact, renamed panes, deleted snapshots, native message routing and configured recovery. Hook/RPC tests bind temporary Unix sockets.
 
 ## License
 

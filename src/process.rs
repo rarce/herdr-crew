@@ -1,4 +1,4 @@
-//! Bounded local CLI inspection. Drop always stops and reaps the inspection process.
+//! Bounded local CLI calls. Drop always stops and reaps the child process.
 
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -124,6 +124,35 @@ impl Inspector {
             }
         }
     }
+
+    /// Wait for a command's successful exit, within the same output and time bounds as RPC
+    /// inspection. A delivery command must finish successfully, not just print a first line.
+    pub fn finish(&mut self) -> Result<(), String> {
+        loop {
+            match self.lines.recv_timeout(self.left()) {
+                Ok(line) => {
+                    line?;
+                }
+                Err(RecvTimeoutError::Timeout) => return Err(self.failure()),
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let status = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if !self.left().is_zero() => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => return Err(self.failure()),
+            }
+        };
+        if status.success() {
+            Ok(())
+        } else {
+            let detail = self.stderr.recv_timeout(self.left()).unwrap_or_default();
+            Err(format!("command failed ({status}): {}", detail.trim()))
+        }
+    }
 }
 
 impl Drop for Inspector {
@@ -218,5 +247,22 @@ mod tests {
         let error =
             detect(script("fail", "echo 'requires Node.js 20.6.0' >&2; exit 1")).unwrap_err();
         assert!(error.contains("requires Node.js 20.6.0"), "{error}");
+    }
+
+    #[test]
+    fn finishing_a_command_checks_its_exit_and_bounds_the_wait() {
+        let path = script(
+            "finish-fail",
+            "echo 'queued'; echo 'delivery failed' >&2; exit 1",
+        );
+        let mut process = Inspector::spawn(&mut Command::new(path)).unwrap();
+        assert!(process.finish().unwrap_err().contains("delivery failed"));
+
+        let path = script("finish-timeout", "exec sleep 2");
+        let mut process = Inspector::spawn(&mut Command::new(path)).unwrap();
+        process.deadline = Instant::now() + Duration::from_millis(50);
+        let start = Instant::now();
+        assert!(process.finish().is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

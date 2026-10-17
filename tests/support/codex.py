@@ -7,7 +7,17 @@ import sys
 
 args = sys.argv[1:]
 if args == ["--version"]:
-    print("codex-cli 0.160.1")
+    version = pathlib.Path(os.environ["CREW_TEST_STATE"], "codex-version")
+    print("codex-cli " + (version.read_text().strip() if version.exists() else "0.160.1"))
+elif args and args[0] == "queue":
+    directory = pathlib.Path(os.environ["CREW_TEST_STATE"])
+    with directory.joinpath("codex-queue.jsonl").open("a") as output:
+        output.write(json.dumps({"args": args, "cwd": os.getcwd(), "home": os.environ.get("CODEX_HOME"),
+                                 "inherited_thread": os.environ.get("CODEX_THREAD_ID")}) + "\n")
+    if directory.joinpath("queue-fail").exists():
+        print("simulated failure after possible delivery", file=sys.stderr)
+        raise SystemExit(1)
+    print("Queued message for thread " + args[args.index("--thread") + 1])
 elif "app-server" in args:
     if "--profile" in args and args[args.index("--profile") + 1] == "missing":
         print("configuration profile missing does not exist", file=sys.stderr)

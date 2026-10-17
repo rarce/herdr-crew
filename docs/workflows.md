@@ -37,7 +37,7 @@ For research, deliver observations, rejected hypotheses, source locations and un
 
 ## How sessions collaborate
 
-herdr-crew sets up the team; it does not run it. It gives you persistent sessions with role prompts, optional worktrees, a shared status board and a versioned configuration. It has no message transport, task queue, automatic assignment or task graph of its own: sessions hand work to each other through the channels below, following the protocol in their prompts, and you stay in the loop.
+herdr-crew sets up the team; it does not run it. It gives you persistent sessions with role prompts, optional worktrees, a shared status board and a versioned configuration. It routes messages through herdr or Codex's native queue, without a crew-owned inbox, task queue, automatic assignment or task graph. Sessions follow the handoff protocol in their prompts, and you stay in the loop.
 
 What herdr-crew provides:
 
@@ -52,7 +52,7 @@ What herdr-crew provides:
 | --- | --- | --- |
 | **You relay** | Copy the handoff from one tab and paste it in another. | Always works, for any agent. Slowest, but you see and approve every handoff. |
 | **Claude Code messaging** | In a Claude role, ask the session to message another by role name, for example "send the delivery to @tl-reviewer". | Claude Code 2.1.224+ messages your other local sessions directly ([cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)). herdr-crew starts each Claude role with `-n <role>`, so the role name is the session name. Only between Claude sessions; each session's own permissions and prompts still apply. |
-| **`herdr-crew send`** | A Claude or pi role (or Codex with `sandbox = "danger-full-access"`) pipes the message into `herdr-crew --root <repo> send <role>`. The `{{PEERS}}` placeholder writes the exact command into each prompt. | For pairs involving Codex or pi. The message arrives framed as coming from the sending role, never as the user's approval. `send` refuses an agent waiting at a dialog and repeated or bursty messages. A sandboxed Codex role cannot reach herdr and gets no command: it delivers through commits and its final report, which the coordinator reads with `herdr agent read <role> --source recent-unwrapped --lines 120`. A convenience, not a security boundary; see [messaging](messaging.md). |
+| **`herdr-crew send`** | A Claude or pi role (or Codex with `sandbox = "danger-full-access"`) pipes the message into `herdr-crew --root <repo> send <role>`. The `{{PEERS}}` placeholder writes the exact command into each prompt. | Bound Codex recipients with Codex 0.163.0+ receive native queued messages by UUID, including with `--no-daemon`; they process them after the current turn. Other recipients use terminal input. The frame identifies the sending role and never grants approval. Dialog and repeat checks apply to both transports. A sandboxed Codex sender still needs the user to relay or explicitly approve an invocation outside its sandbox. A convenience, not a security boundary; see [messaging](messaging.md). |
 | **Git** | Developers commit on a task branch; reviewers and the coordinator read that exact commit. | Worktrees share the repository's refs, so a commit is visible to every session at once, without pushing. The commit, not a description of it, is what gets reviewed and integrated. |
 | **The board** | The coordinator records state, queues and decisions for you. | Status, not messages: other roles report to the coordinator instead of editing it. |
 

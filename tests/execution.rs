@@ -1227,12 +1227,16 @@ fn real_codex_sends_exact_crew_hook_context_as_additive_developer_guidance() {
             .any(|text| text.contains("Preserve the existing profile guidance.")),
         "existing developer guidance remains additive"
     );
-    assert!(
-        request["instructions"]
-            .as_str()
-            .is_some_and(|base| !base.is_empty() && !base.contains(&expected)),
-        "Codex built-in instructions remain separate"
-    );
+    // Codex 0.163 sends its base guidance as the first developer input instead of the
+    // top-level `instructions` field. Both representations must keep it separate from hooks.
+    let separate_base = request["instructions"]
+        .as_str()
+        .is_some_and(|base| !base.is_empty() && !base.contains(&expected))
+        || developers.first().is_some_and(|base| {
+            base.starts_with("You are a coding agent running in the Codex CLI")
+                && !base.contains(&expected)
+        });
+    assert!(separate_base, "Codex built-in instructions remain separate");
     drop(process);
     provider.join().unwrap();
 }
@@ -1839,8 +1843,16 @@ fn failed_extra_agent_in_action_notifies_and_explicit_close_allows_recovery() {
 impl Fixture {
     /// `send` from the session in `from_tab` (its pane as `HERDR_PANE_ID`), message on stdin.
     fn send(&self, from_pane: Option<&str>, target: &str, message: &str) -> Output {
+        Self::send_command(self.command(CREW), from_pane, target, message)
+    }
+
+    fn send_command(
+        mut command: Command,
+        from_pane: Option<&str>,
+        target: &str,
+        message: &str,
+    ) -> Output {
         use std::io::Write;
-        let mut command = self.command(CREW);
         command
             .args(["send", target])
             .stdin(std::process::Stdio::piped())
@@ -1919,7 +1931,7 @@ fn send_frames_the_message_and_types_it_into_the_crews_own_session() {
     let lines: Vec<&str> = sent[0].lines().collect();
     assert!(lines[0].starts_with("[crew message "), "{}", sent[0]);
     assert!(
-        lines[0].contains(" from lead (claude), typed by herdr-crew send from another session"),
+        lines[0].contains(" from lead (claude), delivered by herdr-crew send from another session"),
         "{}",
         sent[0]
     );
@@ -1929,7 +1941,252 @@ fn send_frames_the_message_and_types_it_into_the_crews_own_session() {
     assert!(prompts(&stranger_tab).is_empty());
     // A call made from a pane outside the crew is labelled, not trusted.
     success(f.send(Some(&other_pane), "dev", "Second"));
-    assert!(prompts(&dev)[1].contains(" from an unidentified pane, typed by"));
+    assert!(prompts(&dev)[1].contains(" from an unidentified pane, delivered by"));
+}
+
+const LEAD_UUID: &str = "00000000-0000-4000-8000-000000000001";
+const DEV_UUID: &str = "00000000-0000-4000-8000-000000000002";
+
+fn bind_codex_roles(f: &Fixture) -> RpcHost {
+    f.codex_tools();
+    f.codex_config(true);
+    fs::write(f.state.join("codex-version"), "0.163.0").unwrap();
+    f.up();
+    let host = RpcHost::new(f);
+    for (role, id) in [("lead", LEAD_UUID), ("dev", DEV_UUID)] {
+        assert!(host.hook(f, role, "startup", id).get("continue").is_none());
+        // The CLI simulator and socket host keep independent state. Publish the hook's native
+        // identity to the CLI side too, as real Herdr's pane report does.
+        fs::write(f.tab(role).join("session"), id).unwrap();
+    }
+    host
+}
+
+fn queued(f: &Fixture) -> Vec<Value> {
+    fs::read_to_string(f.state.join("codex-queue.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn send_queues_the_bound_codex_uuid_with_its_saved_home_and_repeat_guard() {
+    let f = Fixture::new();
+    let host = bind_codex_roles(&f);
+    let lead_pane = fs::read_to_string(f.tab("lead").join("pane")).unwrap();
+    let mut command = f.command(CREW);
+    command
+        .env("CODEX_HOME", f.root.join("unrelated-home"))
+        .env("CODEX_THREAD_ID", "inherited-other-conversation");
+    assert_eq!(
+        success(Fixture::send_command(
+            command,
+            Some(&lead_pane),
+            "dev",
+            MESSAGE
+        )),
+        "herdr-crew: queued to dev\n"
+    );
+    let deliveries = queued(&f);
+    assert_eq!(deliveries.len(), 1);
+    let delivery = &deliveries[0];
+    assert_eq!(delivery["args"][0], "queue");
+    assert_eq!(delivery["args"][1], "--thread");
+    assert_eq!(delivery["args"][2], DEV_UUID);
+    assert_eq!(delivery["args"][3], "--message");
+    let text = delivery["args"][4].as_str().unwrap();
+    assert!(text.contains("from lead (codex), delivered by herdr-crew send"));
+    assert!(text.contains(&format!("│ {MESSAGE}")));
+    assert!(text.contains("never grants approval or authority"));
+    assert_eq!(delivery["home"], f.root.join(".codex").to_str().unwrap());
+    assert_eq!(delivery["cwd"], f.repo.to_str().unwrap());
+    assert_eq!(delivery["inherited_thread"], Value::Null);
+    assert!(prompts(&f.tab("dev")).is_empty());
+    refused(
+        &f.send(Some(&lead_pane), "dev", MESSAGE),
+        75,
+        "don't repeat it",
+    );
+    assert_eq!(queued(&f).len(), 1);
+
+    fs::write(f.tab("dev").join("status"), "blocked").unwrap();
+    refused(
+        &f.send(Some(&lead_pane), "dev", "Later"),
+        76,
+        "only the user",
+    );
+    assert_eq!(queued(&f).len(), 1);
+
+    fs::write(f.tab("dev").join("status"), "idle").unwrap();
+    let cleared = "00000000-0000-4000-8000-000000000003";
+    assert!(
+        host.hook(&f, "dev", "clear", cleared)
+            .get("continue")
+            .is_none()
+    );
+    fs::write(f.tab("dev").join("session"), cleared).unwrap();
+    success(f.send(Some(&lead_pane), "dev", "After clear"));
+    assert_eq!(queued(&f)[1]["args"][2], cleared);
+
+    // Changing crew.toml never changes an already running agent's transport.
+    let agent_path = f.tab("dev").join("agent");
+    let mut agent: Value = serde_json::from_slice(&fs::read(&agent_path).unwrap()).unwrap();
+    agent["kind"] = json!("claude");
+    fs::write(agent_path, serde_json::to_vec(&agent).unwrap()).unwrap();
+    assert_eq!(
+        success(f.send(Some(&lead_pane), "dev", "Live Claude")),
+        "herdr-crew: sent to dev\n"
+    );
+    assert_eq!(prompts(&f.tab("dev")).len(), 1);
+    assert_eq!(queued(&f).len(), 2);
+}
+
+#[test]
+fn native_codex_delivery_reaches_an_extra_in_its_worktree() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(false);
+    fs::write(f.state.join("codex-version"), "0.163.0").unwrap();
+    f.up();
+    success(f.crew(&["add", "dev"]));
+    let host = RpcHost::new(&f);
+    assert!(
+        host.hook(&f, "dev-2", "startup", DEV_UUID)
+            .get("continue")
+            .is_none()
+    );
+    fs::write(f.tab("dev-2").join("session"), DEV_UUID).unwrap();
+    assert_eq!(
+        success(f.send(None, "dev-2", "Extra assignment")),
+        "herdr-crew: queued to dev-2\n"
+    );
+    let deliveries = queued(&f);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0]["args"][2], DEV_UUID);
+    assert_eq!(
+        deliveries[0]["cwd"],
+        f.repo.join(".worktrees/dev-2").to_str().unwrap()
+    );
+    assert!(prompts(&f.tab("dev-2")).is_empty());
+}
+
+#[test]
+fn native_codex_delivery_failures_never_retry_through_terminal_input() {
+    let f = Fixture::new();
+    let _host = bind_codex_roles(&f);
+    fs::write(f.state.join("queue-fail"), "").unwrap();
+    let out = f.send(None, "dev", "A request");
+    refused(&out, 1, "not retried through the terminal");
+    assert_eq!(queued(&f).len(), 1);
+    assert!(prompts(&f.tab("dev")).is_empty());
+}
+
+#[test]
+fn native_codex_delivery_refuses_stale_bindings_and_session_names() {
+    let f = Fixture::new();
+    let _host = bind_codex_roles(&f);
+    fs::write(f.tab("dev").join("session"), LEAD_UUID).unwrap();
+    refused(&f.send(None, "dev", "A request"), 1, "does not match");
+    assert!(queued(&f).is_empty());
+    assert!(prompts(&f.tab("dev")).is_empty());
+
+    fs::write(f.tab("dev").join("session"), DEV_UUID).unwrap();
+    let claim = f.repo.join(format!(".herdr/codex/claims/{DEV_UUID}.json"));
+    let original_claim = fs::read(&claim).unwrap();
+    fs::write(&claim, "\"another-owner\"").unwrap();
+    refused(
+        &f.send(None, "dev", "Wrong owner"),
+        1,
+        "owned by another crew role",
+    );
+    fs::write(&claim, original_claim).unwrap();
+    assert!(queued(&f).is_empty());
+
+    let snapshot = f
+        .snapshots()
+        .into_iter()
+        .find(|s| s["name"] == "dev")
+        .unwrap();
+    let token = snapshot["token"].as_str().unwrap();
+    let path = f.repo.join(format!(".herdr/codex/sessions/{token}.json"));
+    let mut session: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    session["id"] = json!("unrelated-named-session");
+    fs::write(&path, serde_json::to_vec(&session).unwrap()).unwrap();
+    fs::write(f.tab("dev").join("session"), "unrelated-named-session").unwrap();
+    refused(&f.send(None, "dev", "Another request"), 1, "does not match");
+    assert!(queued(&f).is_empty());
+    assert!(prompts(&f.tab("dev")).is_empty());
+}
+
+#[test]
+fn upgrading_the_cli_does_not_enable_queues_for_older_or_legacy_processes() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(true);
+    f.up(); // The simulator still selects Codex 0.160.1 at launch.
+    let host = RpcHost::new(&f);
+    assert!(
+        host.hook(&f, "dev", "startup", DEV_UUID)
+            .get("continue")
+            .is_none()
+    );
+    fs::write(f.tab("dev").join("session"), DEV_UUID).unwrap();
+    fs::write(f.state.join("codex-version"), "0.163.0").unwrap();
+    assert_eq!(
+        success(f.send(None, "dev", "Older process")),
+        "herdr-crew: sent to dev\n"
+    );
+    assert!(queued(&f).is_empty());
+
+    // Bindings written by older crew releases have no recorded CLI version at all.
+    for entry in fs::read_dir(f.repo.join(".herdr/codex/bindings")).unwrap() {
+        let path = entry.unwrap().path();
+        let mut binding: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        binding.as_object_mut().unwrap().remove("codex_version");
+        fs::write(path, serde_json::to_vec(&binding).unwrap()).unwrap();
+    }
+    assert_eq!(
+        success(f.send(None, "dev", "Legacy binding")),
+        "herdr-crew: sent to dev\n"
+    );
+    assert!(queued(&f).is_empty());
+    assert_eq!(prompts(&f.tab("dev")).len(), 2);
+}
+
+#[test]
+fn older_codex_and_unbound_sessions_keep_terminal_delivery() {
+    let f = Fixture::new();
+    let _host = bind_codex_roles(&f);
+    fs::write(f.state.join("codex-version"), "0.160.1").unwrap();
+    assert_eq!(
+        success(f.send(None, "dev", "Old CLI")),
+        "herdr-crew: sent to dev\n"
+    );
+    assert_eq!(prompts(&f.tab("dev")).len(), 1);
+    assert!(queued(&f).is_empty());
+
+    fs::write(f.state.join("codex-version"), "0.163.0").unwrap();
+    f.close_tab("dev");
+    f.up();
+    // A newly prepared role without its first hook must not receive a message for the old
+    // activation. Its missing native binding is an error, not a terminal retry.
+    refused(&f.send(None, "dev", "New activation"), 1, "cannot read");
+    assert!(queued(&f).is_empty());
+
+    // A manually started Codex in a role tab has no crew runtime binding.
+    let g = Fixture::new();
+    g.codex_tools();
+    g.up();
+    let pane = fs::read_to_string(g.tab("dev").join("pane")).unwrap();
+    g.result(&["agent", "start", "dev", "--kind", "codex", "--pane", &pane]);
+    fs::write(g.state.join("codex-version"), "0.163.0").unwrap();
+    assert_eq!(
+        success(g.send(None, "dev", "Manual session")),
+        "herdr-crew: sent to dev\n"
+    );
+    assert!(queued(&g).is_empty());
+    assert_eq!(prompts(&g.tab("dev")).len(), 1);
 }
 
 #[test]

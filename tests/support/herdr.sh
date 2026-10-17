@@ -74,7 +74,9 @@ case "${1-} ${2-}" in
     'pane get')
         t=$(tab_for_pane "$3")
         w=${t#workspaces/}; w=${w%%/*}
-        printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-%s","workspace_id":"%s","tab_id":"%s","cwd":%s}}}\n' "$3" "$3" "$w" "${t##*/}" "$(cat "$t/cwd")"
+        printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-%s","workspace_id":"%s","tab_id":"%s","cwd":%s' "$3" "$3" "$w" "${t##*/}" "$(cat "$t/cwd")"
+        if [ -f "$t/session" ]; then printf ',"agent_session":{"value":"%s","agent":"%s","kind":"id","source":"herdr:%s"}' "$(cat "$t/session")" "$(cat "$t/kind" 2>/dev/null || echo claude)" "$(cat "$t/kind" 2>/dev/null || echo claude)"; fi
+        printf '}}}\n'
         ;;
     'server ')
         # ensure_server must remove the nesting markers before spawning the server.
