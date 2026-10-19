@@ -10,6 +10,12 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- The global Codex hook ignores projects and panes without a crew binding before
+  contacting Herdr. Stale inherited pane IDs no longer stop unrelated Codex
+  sessions on startup, resume, clear or compaction.
+
 ### Added
 
 - `send <role>` uses Codex 0.163.0+'s native message queue for bound Codex

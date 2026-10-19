@@ -336,22 +336,51 @@ fn rpc(_: &Context, _: &str, _: Value) -> Result<Value, String> {
     Err("Codex crews currently require macOS or Linux".into())
 }
 
-fn inherited_context() -> Result<Option<Context>, String> {
+fn inherited_environment() -> Result<Option<Context>, String> {
     if std::env::var("HERDR_ENV").ok().as_deref() != Some("1") {
         return Ok(None);
     }
     let env = |name| {
         std::env::var(name).map_err(|_| format!("missing {name} in the Codex hook environment"))
     };
-    let context = Context {
+    Ok(Some(Context {
         socket: env("HERDR_SOCKET_PATH")?,
         workspace: env("HERDR_WORKSPACE_ID")?,
         tab: env("HERDR_TAB_ID")?,
         pane: env("HERDR_PANE_ID")?,
         terminal: String::new(),
-    };
+    }))
+}
+
+fn live_context(context: Context) -> Result<Context, String> {
     let pane = rpc(&context, "pane.get", json!({"pane_id":context.pane}))?;
-    Ok(Some(pane_context(&pane, context.socket)?))
+    pane_context(&pane, context.socket)
+}
+
+fn inherited_context() -> Result<Option<Context>, String> {
+    inherited_environment()?.map(live_context).transpose()
+}
+
+/// The global hook must establish local ownership before consulting a possibly stale
+/// Herdr environment. The terminal identity is only available from the live pane and is
+/// still checked against the exact binding after this preflight.
+fn has_inherited_binding(root: &Path, context: &Context) -> Result<bool, String> {
+    let directory = root.join(RUNTIME).join("bindings");
+    files::validate(root, &directory, files::Kind::Directory)?;
+    if !directory.exists() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
+        let binding: Binding = read(root, &entry.map_err(|e| e.to_string())?.path())?;
+        if binding.context.socket == context.socket
+            && binding.context.workspace == context.workspace
+            && binding.context.tab == context.tab
+            && binding.context.pane == context.pane
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn validate_live(snapshot: &Snapshot, context: &Context, cwd: &Path) -> Result<(), String> {
@@ -413,17 +442,25 @@ fn process_hook(input: HookInput) -> Result<Option<String>, String> {
     {
         return Err("unsupported Codex session event or invalid session ID".into());
     }
-    let Some(context) = inherited_context()? else {
-        return Ok(None);
-    };
     let root = match git::main_root(&input.cwd) {
         Ok(root) => root,
         Err(_) => return Ok(None),
     };
-    let binding_path = path(&root, "bindings", &context_key(&context));
     let explicit = std::env::var("CREW_CODEX_BINDING")
         .ok()
         .filter(|token| !token.is_empty());
+    // Most Codex sessions are unrelated to crew, even when launched from Herdr.
+    if explicit.is_none() && !root.join(RUNTIME).join("bindings").exists() {
+        return Ok(None);
+    }
+    let Some(context) = inherited_environment()? else {
+        return Ok(None);
+    };
+    if explicit.is_none() && !has_inherited_binding(&root, &context)? {
+        return Ok(None);
+    }
+    let context = live_context(context)?;
+    let binding_path = path(&root, "bindings", &context_key(&context));
     if !binding_path.exists() && explicit.is_none() {
         return Ok(None);
     }
