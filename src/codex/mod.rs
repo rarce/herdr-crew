@@ -1,6 +1,7 @@
 //! Codex role context and configured restoration through Herdr's native session protocol.
 
 pub mod integration;
+pub mod messaging;
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -73,6 +74,10 @@ struct Snapshot {
 struct Binding {
     context: Context,
     token: String,
+    /// Version selected when launching this process, not the potentially upgraded CLI that
+    /// a sender finds later. Legacy bindings conservatively keep terminal delivery.
+    #[serde(default)]
+    codex_version: Option<(u32, u32, u32)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -269,6 +274,7 @@ fn bind(snapshot: &Snapshot, context: Context) -> Result<(), String> {
         &Binding {
             context,
             token: snapshot.token.clone(),
+            codex_version: Some(crate::process::detect("codex")?),
         },
     )
 }

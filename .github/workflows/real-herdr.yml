@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 20
     env:
       HERDR_VERSION: 0.9.3
-      CODEX_VERSION: 0.160.1
+      CODEX_VERSION: 0.163.0
       CREW_REAL_HERDR: '1'
       CREW_REAL_CODEX: '1'
       # Short socket paths also fit macOS's 104-byte sun_path limit.

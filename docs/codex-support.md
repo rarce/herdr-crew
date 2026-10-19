@@ -106,7 +106,7 @@ Fresh launch sequence:
 3. Start through native `herdr agent start --kind codex`, passing only bounded structured options and the optional initial message.
 4. The hook validates the input and binding, supplies the exact role context, associates the native session ID with that snapshot, and reports the custom resume command to Herdr.
 
-Use `--no-daemon` for crew-managed Codex launches in the initial implementation. It avoids assuming that a shared backend forwards each pane's Herdr context correctly. Reapply it on resume. A later change may enable daemon mode after a specific test demonstrates correct hook context in two concurrent crew panes; process-detection behavior must also be verified with the real Codex TUI.
+Use `--no-daemon` for crew-managed Codex launches and resume. It keeps each pane's Herdr hook context local. Native messaging does not require changing this: Codex 0.163.0 stores `codex queue` submissions in a durable queue consumed by an independent interactive CLI. The two-role integration checks actual delivery, distinct hook contexts and process detection through a Herdr restart without a shared Codex daemon.
 
 Keep role instructions separate from authentication and approvals. The native Codex login remains the user's login. Preflight and setup must not request an API key or initiate login flows.
 
@@ -141,6 +141,14 @@ Keep the existing worktree manager and never pass Codex `--worktree`. If the boa
 Test socket access to Herdr, launching the plugin helper, Git operations, and network-requiring validation under the chosen Codex permissions. Hook execution and model-generated sandboxed commands are separate paths; one working does not prove the other is allowed. Respect managed policies and expose a concrete error when they prevent the configured workflow.
 
 Audit inherited session markers when creating a cold Herdr server and child sessions. In particular, the native Codex integration ignores a reported session when inherited `CODEX_THREAD_ID` identifies a different session. Clear inappropriate inherited markers without dropping the user's Codex home, profile, authentication, or unrelated preferences.
+
+## Native messages
+
+`send <role>` uses the live agent kind, not the current `crew.toml` kind, to select its transport. With a Codex CLI at least 0.163.0 and a crew binding, it validates the full pane context, role, workspace, checkout, claimed ownership and native UUID against the immutable snapshot and session state. It invokes `codex queue` directly, without shell interpolation, using the recipient's saved Codex home and profile, including a profile-specific `sqlite_home`. Role names stay scoped to the crew; native display names are not used for routing.
+
+The binding records the CLI version selected at launch or configured recovery. Both that version and the sender's installed CLI must be at least 0.163.0. Upgrading the binary alone does not enable queues for an older process. Legacy bindings without version metadata, older CLIs and live panes without a crew binding retain terminal delivery. Recovering through `codex-resume` refreshes the process version without changing the immutable snapshot. A prepared binding without a session, an incompatible snapshot, a different live native ID or a failed queue command is an error. Once native delivery is selected, failure never triggers terminal delivery: a timed-out or failed child may already have enqueued the message. The queue child has bounded output and a ten-second deadline, and is always reaped.
+
+The runtime lock protects binding and ownership validation and is released before invoking `queue`, so a slow enqueue does not block role startup, recovery or SessionStart hooks. The existing dialog, framing and repeat checks apply before queueing. A successful native send means queued, not processed; an active Codex turn finishes before it takes the next queued message. Sandbox permissions do not change. The caller still needs herdr socket access and permission to write to the recipient's Codex home and queue store.
 
 ## Implementation changes
 
@@ -185,7 +193,7 @@ Focused tests must cover:
 - Installation and removal preserve other hook entries, native integrations, authentication files, and user configuration.
 - Marker isolation, daemon choice, socket access, Git approvals, and board writing from a configured worktree writer.
 
-`tests/support/herdr.sh` now carries agent kinds and complete session references instead of assuming `--append-system-prompt-file`. Ordinary tests stay offline. The scheduled Linux/macOS integration pins Herdr 0.9.3 and Codex 0.160.1, runs guarded fake-agent restoration, and inspects real Codex requests through a local mock provider. External model conversations remain outside these tests.
+`tests/support/herdr.sh` now carries agent kinds and complete session references instead of assuming `--append-system-prompt-file`. Ordinary tests stay offline. The scheduled Linux/macOS integration pins Herdr 0.9.3 and Codex 0.163.0, runs guarded fake-agent restoration, inspects real Codex requests through a local mock provider, and runs two real Codex TUIs for native queue delivery and restoration. External model conversations remain outside these tests.
 
 Run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, and the locked release build for implementation changes. Review any changed board snapshots; no board layout change is planned. Instruction delivery, configured startup and restored startup pass locally. Linux/macOS CI and release checks must pass on the final revision.
 

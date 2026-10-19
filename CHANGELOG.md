@@ -10,6 +10,19 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Added
+
+- `send <role>` uses Codex 0.163.0+'s native message queue for bound Codex
+  recipients, addressing the saved UUID with the recipient's Codex home and profile.
+  Slow enqueueing releases the runtime lock before waiting for Codex. It works
+  with `--no-daemon`, queues behind an active turn, and preserves framing, dialog
+  checks and repeat limits. Older CLIs and unbound sessions retain terminal
+  delivery; native failures never retry through the terminal.
+- An opt-in integration tests two real Codex roles with a local mock provider,
+  including a profile-specific queue, distinct hook contexts, multiline messages,
+  a busy receiver and delivery after a Herdr restart. Scheduled Linux/macOS tests
+  pin Codex 0.163.0.
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
