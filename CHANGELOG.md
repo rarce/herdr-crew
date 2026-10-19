@@ -14,12 +14,17 @@ change between minor versions.
 
 ### Fixed
 
+- `init` prefers the remote default branch over a feature branch upstream,
+  respects existing Git ignore decisions and rejects worktree presets without
+  a remote before asking for an agent.
 - The global Codex hook ignores projects and panes without a crew binding before
   contacting Herdr. Stale inherited pane IDs no longer stop unrelated Codex
   sessions on startup, resume, clear or compaction.
 
 ### Added
 
+- `send <role>` and `{{PEERS}}` provide framed messages between crew sessions,
+  with project-scoped receiver lookup, dialog checks and repeat limits.
 - `up --agent claude|codex|pi` saves a new project default in `crew.toml` for
   future sessions while preserving running agents, role overrides, worktrees,
   formatting and comments. `--dry-run` previews the change. Options for inactive
