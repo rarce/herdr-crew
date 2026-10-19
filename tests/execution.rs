@@ -853,6 +853,74 @@ impl Drop for RpcHost {
 }
 
 #[test]
+fn global_codex_hook_ignores_unbound_sessions_before_contacting_herdr() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let f = Fixture::new();
+    let hook = |cwd: &Path, source: &str, pane: &str, explicit: Option<&str>| {
+        let mut command = f.command(CREW);
+        command
+            .arg("codex-hook")
+            .env("HERDR_ENV", "1")
+            .env("HERDR_SOCKET_PATH", f.root.join("herdr.sock"))
+            .env("HERDR_WORKSPACE_ID", "w1")
+            .env("HERDR_TAB_ID", "w1:t1")
+            .env("HERDR_PANE_ID", pane)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        if let Some(token) = explicit {
+            command.env("CREW_CODEX_BINDING", token);
+        }
+        let mut child = command.spawn().unwrap();
+        write!(child.stdin.take().unwrap(), "{}", json!({"hook_event_name":"SessionStart","session_id":"ordinary-session","source":source,"cwd":cwd})).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+
+    // No socket exists. A global hook in another project or outside Git must not use it.
+    for source in ["startup", "resume", "clear", "compact"] {
+        assert_eq!(hook(&f.repo, source, "w45:p2", None), json!({}));
+        assert_eq!(hook(&f.root, source, "w45:p2", None), json!({}));
+    }
+    assert!(!f.repo.join(".herdr/codex").exists());
+
+    f.codex_tools();
+    f.codex_config(true);
+    f.up();
+    // The same checkout can also host ordinary Codex sessions without a crew binding.
+    for source in ["startup", "resume", "clear", "compact"] {
+        assert_eq!(hook(&f.repo, source, "w45:p2", None), json!({}));
+    }
+
+    // A real crew binding must still fail closed if its Herdr server is unavailable.
+    let binding_path = fs::read_dir(f.repo.join(".herdr/codex/bindings"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut binding: Value = serde_json::from_slice(&fs::read(&binding_path).unwrap()).unwrap();
+    binding["context"]["workspace"] = json!("w1");
+    binding["context"]["tab"] = json!("w1:t1");
+    binding["context"]["pane"] = json!("w45:p2");
+    fs::write(&binding_path, serde_json::to_vec(&binding).unwrap()).unwrap();
+    let stopped = hook(&f.repo, "compact", "w45:p2", None);
+    assert_eq!(stopped["continue"], false);
+    assert!(
+        stopped["stopReason"]
+            .as_str()
+            .unwrap()
+            .contains("Herdr socket")
+    );
+    assert_eq!(
+        hook(&f.repo, "resume", "other-pane", binding["token"].as_str())["continue"],
+        false
+    );
+}
+
+#[test]
 fn shared_roles_receive_distinct_context_and_keep_it_through_clear_and_compaction() {
     let f = Fixture::new();
     f.codex_tools();
