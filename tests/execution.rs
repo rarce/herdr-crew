@@ -281,6 +281,120 @@ extra = true
 }
 
 #[test]
+fn up_agent_saves_the_default_and_preserves_running_sessions_and_worktrees() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.up();
+    let original = f.read(".herdr/crew.toml");
+    let lead_pane = fs::read(f.tab("lead").join("pane")).unwrap();
+    f.git(&["-C", ".worktrees/dev", "switch", "-c", "in-progress"]);
+    fs::write(f.repo.join(".worktrees/dev/local-work"), "keep").unwrap();
+    success(f.crew(&["up", "--agent", "codex", "--no-attach"]));
+    assert_eq!(
+        f.read(".herdr/crew.toml"),
+        format!("kind = \"codex\"\n{original}")
+    );
+    assert_eq!(f.count(&["agent", "start"]), 2);
+    assert_eq!(fs::read(f.tab("lead").join("pane")).unwrap(), lead_pane);
+    assert_eq!(
+        fs::read_to_string(f.tab("lead").join("kind"))
+            .unwrap()
+            .trim(),
+        "claude"
+    );
+    f.close_tab("dev");
+    f.up(); // No flag: the saved selection starts the replacement in the existing worktree.
+    assert_eq!(
+        fs::read_to_string(f.tab("dev").join("kind"))
+            .unwrap()
+            .trim(),
+        "codex"
+    );
+    assert_eq!(f.read(".worktrees/dev/local-work"), "keep");
+    assert_eq!(
+        f.git(&["-C", ".worktrees/dev", "branch", "--show-current"])
+            .trim(),
+        "in-progress"
+    );
+    success(f.crew(&["add", "dev"]));
+    assert_eq!(
+        fs::read_to_string(f.tab("dev-2").join("kind"))
+            .unwrap()
+            .trim(),
+        "codex"
+    );
+    assert_eq!(f.count(&["agent", "start"]), 4);
+}
+
+#[test]
+fn up_agent_can_switch_back_without_losing_options_or_explicit_role_kinds() {
+    let f = Fixture::new();
+    f.codex_tools();
+    let original = f
+        .read(".herdr/crew.toml")
+        .replace("name = \"lead\"", "name = \"lead\"\nkind = \"codex\"");
+    let config = format!(
+        "kind = 'codex' # project default\n{original}\n[roles.codex]\nmodel = 'saved-model'\n"
+    );
+    fs::write(f.repo.join(".herdr/crew.toml"), &config).unwrap();
+    f.up();
+    f.close_tab("dev");
+    success(f.crew(&["up", "--agent", "claude", "--no-attach"]));
+    assert_eq!(
+        f.read(".herdr/crew.toml"),
+        config.replacen("kind = 'codex'", "kind = \"claude\"", 1)
+    );
+    assert_eq!(
+        fs::read_to_string(f.tab("dev").join("kind"))
+            .unwrap()
+            .trim(),
+        "claude"
+    );
+    f.close_tab("dev");
+    success(f.crew(&["up", "--agent", "codex", "--no-attach"]));
+    let starts = f
+        .calls()
+        .into_iter()
+        .filter(|call| starts_with(call, &["agent", "start", "dev"]))
+        .collect::<Vec<_>>();
+    assert!(
+        starts
+            .last()
+            .unwrap()
+            .contains(&"model=\"saved-model\"".to_string())
+    );
+    assert_eq!(f.count(&["agent", "start", "lead"]), 1);
+}
+
+#[test]
+fn up_agent_dry_run_and_failed_preflight_leave_configuration_unchanged() {
+    let f = Fixture::new();
+    f.codex_tools();
+    let original = f.read(".herdr/crew.toml");
+    let preview = success(f.crew(&["up", "--agent", "codex", "--dry-run"]));
+    assert!(
+        preview.contains("set the default agent to codex"),
+        "{preview}"
+    );
+    assert!(preview.contains("start dev (codex"), "{preview}");
+    assert_eq!(f.read(".herdr/crew.toml"), original);
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    failure(
+        f.command(CREW)
+            .env("CREW_TEST_TRUST", "untrusted")
+            .args(["up", "--agent", "codex", "--no-attach"])
+            .output()
+            .unwrap(),
+        "/hooks",
+    );
+    assert_eq!(f.read(".herdr/crew.toml"), original);
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    success(f.crew(&["up", "--agent", "codex", "--no-attach"]));
+    assert!(f.read(".herdr/crew.toml").starts_with("kind = \"codex\"\n"));
+    assert!(f.agents().iter().any(|name| name == "dev"));
+}
+
+#[test]
 fn mixed_agents_and_extras_use_their_effective_kind_and_settings() {
     let f = Fixture::new();
     f.codex_tools();

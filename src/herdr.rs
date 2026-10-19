@@ -322,6 +322,7 @@ pub fn execute(
     for step in &plan.steps {
         match step {
             Step::WritePrompt { path, .. }
+            | Step::SetAgent { path, .. }
             | Step::WriteSchema { path, .. }
             | Step::SeedStatus { path, .. } => {
                 files::validate(&c.root, path, files::Kind::File)?;
@@ -423,6 +424,18 @@ pub fn execute(
     };
     for step in &plan.steps {
         match step {
+            Step::SetAgent {
+                path,
+                kind,
+                content,
+            } => {
+                files::write(&c.root, path, content)?;
+                out.step(&format!(
+                    "default agent set to {} in {}",
+                    kind.as_str(),
+                    path.display()
+                ));
+            }
             Step::CreateWorkspace { label, cwd } => {
                 let cwd = cwd.to_string_lossy();
                 let mut args: Vec<String> = [

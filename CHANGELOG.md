@@ -10,14 +10,25 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-19
+
 ### Fixed
 
+- `init` prefers the remote default branch over a feature branch upstream,
+  respects existing Git ignore decisions and rejects worktree presets without
+  a remote before asking for an agent.
 - The global Codex hook ignores projects and panes without a crew binding before
   contacting Herdr. Stale inherited pane IDs no longer stop unrelated Codex
   sessions on startup, resume, clear or compaction.
 
 ### Added
 
+- `send <role>` and `{{PEERS}}` provide framed messages between crew sessions,
+  with project-scoped receiver lookup, dialog checks and repeat limits.
+- `up --agent claude|codex|pi` saves a new project default in `crew.toml` for
+  future sessions while preserving running agents, role overrides, worktrees,
+  formatting and comments. `--dry-run` previews the change. Options for inactive
+  agents remain saved and validated for switching back later.
 - `send <role>` uses Codex 0.163.0+'s native message queue for bound Codex
   recipients, addressing the saved UUID with the recipient's Codex home and profile.
   Slow enqueueing releases the runtime lock before waiting for Codex. It works
@@ -122,7 +133,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/rarce/herdr-crew/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rarce/herdr-crew/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rarce/herdr-crew/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rarce/herdr-crew/releases/tag/v0.1.0

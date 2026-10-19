@@ -177,6 +177,26 @@ const ROLE_KEYS: &[&str] = &[
 ];
 
 impl Config {
+    /// Change only the project default, preserving comments, formatting and role overrides.
+    pub fn select_agent(text: &str, root: &Path, kind: Kind) -> Result<(Self, String), Vec<Error>> {
+        let original = Self::parse(text, root)?;
+        if original.kind == kind {
+            return Ok((original, text.to_string()));
+        }
+        let table = DeTable::parse(text).expect("validated TOML");
+        let mut updated = text.to_string();
+        if let Some((_, span, _)) = string_spans(table.get_ref(), "kind")
+            .into_iter()
+            .find(|(place, _, _)| place == "kind")
+        {
+            updated.replace_range(span, &format!("\"{}\"", kind.as_str()));
+        } else {
+            updated.insert_str(0, &format!("kind = \"{}\"\n", kind.as_str()));
+        }
+        let config = Self::parse(&updated, root)?;
+        Ok((config, updated))
+    }
+
     /// Parses and validates `text`, the content of `<root>/.herdr/crew.toml`.
     pub fn parse(text: &str, root: &Path) -> Result<Config, Vec<Error>> {
         let path = root.join(CONFIG_FILE);
@@ -234,17 +254,11 @@ impl Config {
         }
         for (i, r) in raw.roles.iter().enumerate() {
             if let Some(options) = &r.codex {
-                if r.kind.unwrap_or(raw.kind) != Kind::Codex {
-                    err(format!("roles[{i}].codex requires kind = \"codex\""));
-                }
                 for problem in options.problems() {
                     err(format!("roles[{i}].codex.{problem}"));
                 }
             }
             if let Some(options) = &r.pi {
-                if r.kind.unwrap_or(raw.kind) != Kind::Pi {
-                    err(format!("roles[{i}].pi requires kind = \"pi\""));
-                }
                 for problem in options.problems() {
                     err(format!("roles[{i}].pi.{problem}"));
                 }
@@ -688,12 +702,42 @@ prompt = '''You are {{NAME}}.'''
     }
 
     #[test]
-    fn codex_options_require_a_codex_role_and_unknown_keys_have_positions() {
-        assert!(
-            errors(&format!("{MIN}[roles.codex]\nmodel = \"custom\"\n"))
-                .iter()
-                .any(|error| error.contains("requires kind"))
+    fn selecting_agent_preserves_source_role_overrides_and_inactive_options() {
+        let text = format!("# Crew «á»\nkind = 'claude' # default\n{WORKTREES}\n[roles.codex]\nmodel = 'saved-model'\n").replace("name = \"globex-lead\"", "name = \"globex-lead\"\nkind = 'claude' # keep this role");
+        let root = Path::new("/r/globex");
+        let (selected, updated) = Config::select_agent(&text, root, Kind::Codex).unwrap();
+        assert_eq!(
+            updated,
+            text.replacen("kind = 'claude'", "kind = \"codex\"", 1)
         );
+        assert_eq!(selected.roles[0].kind, Kind::Claude);
+        assert!(
+            selected.roles[1..]
+                .iter()
+                .all(|role| role.kind == Kind::Codex)
+        );
+        assert_eq!(
+            Config::select_agent(&updated, root, Kind::Codex).unwrap().1,
+            updated
+        );
+        let (restored, back) = Config::select_agent(&updated, root, Kind::Claude).unwrap();
+        assert!(restored.roles.iter().all(|role| role.kind == Kind::Claude));
+        assert!(back.contains("model = 'saved-model'"));
+        let (pi, _) = Config::select_agent(WORKTREES, root, Kind::Pi).unwrap();
+        assert!(pi.roles.iter().all(|role| role.kind == Kind::Pi));
+        let file_message = WORKTREES.replace("version = 1", "version = 1\nstart_message = '@file'");
+        assert!(Config::select_agent(&file_message, root, Kind::Pi).is_err());
+    }
+
+    #[test]
+    fn inactive_codex_options_are_preserved_and_unknown_keys_have_positions() {
+        let config = Config::parse(
+            &format!("{MIN}[roles.codex]\nmodel = \"custom\"\n"),
+            Path::new("/r/p"),
+        )
+        .unwrap();
+        assert_eq!(config.roles[0].agent(), AgentOptions::Claude);
+        assert_eq!(config.roles[0].codex.model.as_deref(), Some("custom"));
         let errors = errors(&format!(
             "{MIN}kind = \"codex\"\n[roles.codex]\nmodle = \"custom\"\n"
         ));
@@ -950,7 +994,7 @@ prompt = '''You are {{NAME}}.'''
     }
 
     #[test]
-    fn pi_roles_inherit_options_and_reject_foreign_ones() {
+    fn pi_roles_inherit_options_and_reject_unknown_ones() {
         let text = WORKTREES
             .replace("version = 1", "version = 1\nkind = \"pi\"")
             .replace(
@@ -962,11 +1006,13 @@ prompt = '''You are {{NAME}}.'''
         let extra = c.session_role("globex-dev-2").unwrap();
         assert_eq!(extra.pi.provider.as_deref(), Some("anthropic"));
         assert_eq!(extra.pi.thinking.as_deref(), Some("high"));
-        assert!(
-            errors(&format!("{MIN}[roles.pi]\nmodel = \"sonnet\"\n"))
-                .iter()
-                .any(|error| error.contains("roles[0].pi requires kind = \"pi\""))
-        );
+        let inactive = Config::parse(
+            &format!("{MIN}[roles.pi]\nmodel = \"sonnet\"\n"),
+            Path::new("/r/p"),
+        )
+        .unwrap();
+        assert_eq!(inactive.roles[0].agent(), AgentOptions::Claude);
+        assert_eq!(inactive.roles[0].pi.model.as_deref(), Some("sonnet"));
         let e = errors(&format!(
             "{MIN}kind = \"pi\"\n[roles.pi]\nsandbox = \"x\"\n"
         ));

@@ -221,7 +221,7 @@ The manifest declares only macOS and Linux. Artifact preparation uses a POSIX sh
 ### 4.1 Subcommands
 
 - `init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]`: initial setup without loading an existing configuration (§4.1.1).
-- `up [--no-attach] [--dry-run]`
+- `up [--agent claude|codex|pi] [--no-attach] [--dry-run]`
 - `add <role>`
 - `close <name>`
 - `board [--file PATH] [--once] [--interval S]`: `S` is a finite number of seconds above 0 and at most 3600 that does not round to a zero duration; anything else is a usage error (exit 2).

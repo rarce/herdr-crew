@@ -36,7 +36,8 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi]
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
-  up [--no-attach] [--dry-run]   start or complete the project's sessions
+  up [--agent claude|codex|pi] [--no-attach] [--dry-run]
+                                 start sessions; optionally save a new default agent
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
   send <session>                 send the message on stdin to another crew session
@@ -80,6 +81,7 @@ impl Fail {
 
 #[derive(Default)]
 struct Args {
+    agent: Option<agent::Kind>,
     root: Option<PathBuf>,
     command: String,
     positional: Vec<String>,
@@ -130,7 +132,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
                 })?);
             }
             "--agent" => {
-                a.init.agent = Some(
+                a.agent = Some(
                     agent::Kind::parse(&value("--agent")?)
                         .ok_or_else(|| Fail::usage("--agent must be claude, codex or pi"))?,
                 )
@@ -158,7 +160,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "yes",
             "dry_run",
         ],
-        "up" => &["no_attach", "dry_run"],
+        "up" => &["agent", "no_attach", "dry_run"],
         "add" | "close" | "send" | "check" | "startup" | "codex-install" | "codex-uninstall"
         | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" | "pi-install"
         | "pi-uninstall" => &[],
@@ -172,7 +174,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ("once", a.once),
         ("file", a.file.is_some()),
         ("interval", a.interval.is_some()),
-        ("agent", a.init.agent.is_some()),
+        ("agent", a.agent.is_some()),
         ("preset", a.init.preset.is_some()),
         ("name", a.init.name.is_some()),
         ("base", a.init.base.is_some()),
@@ -206,6 +208,9 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "{} takes {arity} argument(s)",
             a.command
         )));
+    }
+    if a.command == "init" {
+        a.init.agent = a.agent;
     }
     Ok(a)
 }
@@ -313,6 +318,21 @@ fn up(c: &Config, a: &Args) -> Result<(), Fail> {
     } else {
         Some(lock_project(c, &herdr)?)
     };
+    let selection = a
+        .agent
+        .map(|kind| {
+            let path = c.root.join(config::CONFIG_FILE);
+            files::validate(&c.root, &path, files::Kind::File).map_err(Fail::run)?;
+            let text = std::fs::read_to_string(&path).map_err(|e| Fail::run(e.to_string()))?;
+            let (selected, updated) =
+                Config::select_agent(&text, &c.root, kind).map_err(|errors| Fail {
+                    code: 2,
+                    lines: errors.iter().map(ToString::to_string).collect(),
+                })?;
+            Ok::<_, Fail>((selected, (text != updated).then_some(updated)))
+        })
+        .transpose()?;
+    let c = selection.as_ref().map_or(c, |(selected, _)| selected);
     let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
     let mut out = Output;
     let workspaces = if a.dry_run {
@@ -332,7 +352,17 @@ fn up(c: &Config, a: &Args) -> Result<(), Fail> {
         }
     };
     let e = env(c, &state, Some(&herdr), worktrees);
-    let p = plan::plan(c, &state, &e);
+    let mut p = plan::plan(c, &state, &e);
+    if let Some((_, Some(content))) = &selection {
+        p.steps.insert(
+            0,
+            plan::Step::SetAgent {
+                path: c.root.join(config::CONFIG_FILE),
+                kind: c.kind,
+                content: content.clone(),
+            },
+        );
+    }
     if a.dry_run {
         print!("{}", p.dry_run());
         return Ok(());
@@ -924,6 +954,17 @@ mod tests {
         assert_eq!(init.init.name.as_deref(), Some("acme"));
         assert_eq!(init.init.base.as_deref(), Some("upstream/trunk"));
         assert!(init.init.yes && init.init.no_ignore && init.dry_run);
+        for kind in agent::Kind::ALL {
+            let selected = args(&format!("up --agent {} --dry-run", kind.as_str())).unwrap();
+            assert_eq!(selected.agent, Some(kind));
+            assert_eq!(
+                args(&format!("init --agent {}", kind.as_str()))
+                    .unwrap()
+                    .init
+                    .agent,
+                Some(kind)
+            );
+        }
         let a = args("board --file /f --once --interval 2").unwrap();
         assert!(a.once && a.interval == Some(Duration::from_secs(2)));
     }
@@ -960,6 +1001,10 @@ mod tests {
             "board --interval 1e-300",
             "board --interval two",
             "up --x",
+            "up --agent",
+            "up --agent unknown",
+            "check --agent codex",
+            "add dev --agent codex",
             "board --file",
             "startup now",
             "startup --dry-run",
