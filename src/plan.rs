@@ -497,6 +497,20 @@ fn describe(agent: &Agent) -> String {
     }
 }
 
+fn warn_agent_mismatch(steps: &mut Vec<Step>, name: &str, kind: Kind, agent: &Agent) {
+    if let Some(running) = agent.kind.as_deref()
+        && running != kind.as_str()
+    {
+        steps.push(Step::Warn(format!(
+            "role {name} is still running {running}; configured agent is {} for new \
+             conversations. Its current instructions have not changed. Save its work and \
+             close its tab before running up to start a new conversation with the configured \
+             agent; recovery keeps the original agent and context",
+            kind.as_str()
+        )));
+    }
+}
+
 /// Verdict of a tab missing from a restored workspace (§4.4).
 const MISSING: &str = "missing after a restore";
 
@@ -527,6 +541,7 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
         {
             p.verdicts
                 .push((r.name.clone(), Verdict::Occupied(describe(a))));
+            warn_agent_mismatch(&mut p.steps, &r.name, r.kind, a);
             continue;
         }
         let same: Vec<&Tab> = tabs.iter().filter(|t| t.label == r.name).collect();
@@ -534,6 +549,7 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
             if let Some(a) = same.iter().find_map(|t| s.agent_in_tab(&t.id)) {
                 p.verdicts
                     .push((r.name.clone(), Verdict::Occupied(describe(a))));
+                warn_agent_mismatch(&mut p.steps, &r.name, r.kind, a);
             } else {
                 p.verdicts.push((r.name.clone(), Verdict::NoAgent));
                 let session_pane = ws.and_then(|w| {
@@ -1301,6 +1317,28 @@ mod tests {
             p.verdicts[0].1,
             Verdict::Occupied("unnamed agent in w1:p0".into())
         );
+    }
+
+    #[test]
+    fn changed_agent_warns_for_named_and_unnamed_live_roles_without_replacing_them() {
+        for named in [false, true] {
+            let mut c = basic();
+            c.roles[0].kind = Kind::Codex;
+            let mut s = state(&ALL, &ALL[..4]);
+            s.agents[0].kind = Some("claude".into());
+            if named {
+                s.agents[0].name = Some("acme-lead".into());
+            }
+            let p = plan(&c, &s, &settled(&c, Foreground::Other("x".into())));
+            assert!(matches!(p.verdicts[0].1, Verdict::Occupied(_)));
+            assert_eq!(p.steps.len(), 1, "{p:?}");
+            let Step::Warn(message) = &p.steps[0] else {
+                panic!("{p:?}")
+            };
+            assert!(message.contains("role acme-lead is still running claude"));
+            assert!(message.contains("configured agent is codex"));
+            assert!(message.contains("instructions have not changed"));
+        }
     }
 
     #[test]

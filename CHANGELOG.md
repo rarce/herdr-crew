@@ -10,6 +10,23 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-19
+
+### Fixed
+
+- New conversations always receive their effective coding agent's communication
+  instructions, including legacy configurations without `{{PEERS}}`. The generated
+  runtime block supersedes obsolete messaging instructions when switching between
+  Claude, Codex and pi, while preserving project tasks and permissions. Routing is
+  emitted once at the end of the prompt.
+- `up` warns when a live role still runs a different agent from its configured
+  selection, making clear that its existing instructions have not changed.
+
+### Added
+
+- Communication investigations for Codex, Claude Code and pi.dev, distinguishing
+  independent crew sessions, native subagents and optional extension tools.
+
 ## [0.4.0] - 2026-10-19
 
 ### Fixed
@@ -133,7 +150,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/rarce/herdr-crew/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/rarce/herdr-crew/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rarce/herdr-crew/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rarce/herdr-crew/compare/v0.1.0...v0.2.0

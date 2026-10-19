@@ -289,7 +289,9 @@ fn up_agent_saves_the_default_and_preserves_running_sessions_and_worktrees() {
     let lead_pane = fs::read(f.tab("lead").join("pane")).unwrap();
     f.git(&["-C", ".worktrees/dev", "switch", "-c", "in-progress"]);
     fs::write(f.repo.join(".worktrees/dev/local-work"), "keep").unwrap();
-    success(f.crew(&["up", "--agent", "codex", "--no-attach"]));
+    let changed = f.crew(&["up", "--agent", "codex", "--no-attach"]);
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("role lead is still running claude"));
+    success(changed);
     assert_eq!(
         f.read(".herdr/crew.toml"),
         format!("kind = \"codex\"\n{original}")
@@ -364,6 +366,60 @@ fn up_agent_can_switch_back_without_losing_options_or_explicit_role_kinds() {
             .contains(&"model=\"saved-model\"".to_string())
     );
     assert_eq!(f.count(&["agent", "start", "lead"]), 1);
+}
+
+#[test]
+fn up_agent_adapts_legacy_communication_for_new_conversations_and_extras() {
+    let f = Fixture::new();
+    f.codex_tools();
+    let tools = f.root.join("tools");
+    fs::write(tools.join("pi"), "#!/bin/sh\necho 1.1.0\n").unwrap();
+    fs::set_permissions(tools.join("pi"), fs::Permissions::from_mode(0o755)).unwrap();
+    success(f.crew(&["pi-install"]));
+    let original = f.read(".herdr/crew.toml").replace(
+        "Board {{STATUS}}; schema {{SCHEMA}}.",
+        "Only lead writes the board; communicate only through Claude SendMessage.",
+    );
+    fs::write(f.repo.join(".herdr/crew.toml"), &original).unwrap();
+    for (i, kind) in ["codex", "pi", "claude"].iter().enumerate() {
+        if i > 0 {
+            for name in ["lead", "dev", "dev-2"] {
+                f.close_tab(name);
+            }
+        }
+        success(f.crew(&["up", "--agent", kind, "--no-attach"]));
+        success(f.crew(&["add", "dev"]));
+        for name in ["lead", "dev", "dev-2"] {
+            let peer = if name == "dev" { "lead" } else { "dev" };
+            let text = f.read(&format!(".herdr/prompts/{name}.txt"));
+            let (authored, runtime) = text.split_once("Crew runtime communication:").unwrap();
+            assert!(authored.contains("Only lead writes the board"));
+            assert!(runtime.contains(&format!(
+                "Your crew role is {name}; your coding agent is {kind}"
+            )));
+            assert!(
+                runtime.contains("replaces earlier agent-specific messaging instructions only")
+            );
+            match *kind {
+                "codex" => {
+                    assert!(runtime.contains("no direct channel"));
+                    assert!(!runtime.contains("SendMessage to"));
+                    assert!(runtime.contains("not independent crew sessions"));
+                }
+                "pi" => {
+                    assert!(runtime.contains("optional pi-sessions"));
+                    assert!(!runtime.contains("SendMessage to"));
+                    assert!(runtime.contains(&format!("send {peer}")));
+                }
+                "claude" => assert!(runtime.contains(&format!("SendMessage to @{peer}"))),
+                _ => unreachable!(),
+            }
+        }
+        assert!(
+            f.read(".herdr/crew.toml")
+                .contains("communicate only through Claude SendMessage")
+        );
+    }
 }
 
 #[test]
