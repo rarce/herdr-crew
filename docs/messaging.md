@@ -114,7 +114,21 @@ This is still text the model is asked to respect. It is not enforcement (§7).
 
 ## 5. `{{PEERS}}`: telling each role its channels
 
-A new prompt placeholder, rendered per session by `prompt::render`. It reflects **the sender's** kind and capability (§3), so a role is never told to use a channel it can't reach.
+Routing is rendered per session by `prompt::render`. Every new role prompt ends with
+a mandatory `Crew runtime communication` block identifying the role and effective
+coding agent, explaining native tool scope, and listing channels. It replaces only
+earlier agent-specific messaging instructions, so a legacy Claude prompt cannot
+require `SendMessage` after `up --agent codex` or `up --agent pi`. Project tasks,
+ownership and permissions are preserved. Routing reflects **the sender's** kind and
+capability (§3), so a role is never told to use a channel it can't reach.
+
+`{{PEERS}}` remains valid for compatibility, but its contents are emitted once at
+the end of the generated runtime block rather than at the placeholder's location.
+It is optional, including in old configurations. Native Codex collaboration IDs
+belong to the current subagent tree; independent crew role names are not those IDs.
+Pi extension messaging APIs and optional pi-sessions tools are not assumed to be
+cross-session channels provided by crew. See the [Codex](codex-support.md),
+[Claude](claude-support.md) and [pi](pi-support.md) investigations.
 
 For a Claude lead (`src/send.rs`, `peers`):
 
@@ -135,7 +149,7 @@ Messages from other sessions arrive framed as "[crew message …]": requests fro
 
 - The command is written with the same `{{LAUNCHER}}` path the presets already use for `add`. That path is a canonicalized binary path (`src/main.rs:233`), and a pi role keeps its prompt forever, so a plugin update that moves the binary leaves old conversations with a dead path. This is an existing limitation shared with `add`. It is documented, not fixed here.
 - Rendered prompts are fixed when a conversation starts (Claude until compaction, pi forever, Codex at `SessionStart`). Roles added later don't appear; the pointer to `herdr agent list` covers that. There is no `herdr-crew peers` in v1.
-- The `init` presets use `{{PEERS}}` in `common_prompt`. Existing configs are unaffected. A config using it is rejected by older binaries, like any unknown placeholder.
+- The `init` presets use `{{PEERS}}` in `common_prompt`. Old configurations now receive the runtime block even without it; their source text is not rewritten. A config using the placeholder is rejected by binaries predating that placeholder, like any unknown placeholder.
 - The rendered list counts toward the existing 64 KiB prompt cap; it is a few hundred bytes per role.
 - **Capability comes from `crew.toml` only.** A Codex role can send only when its `sandbox` is `"danger-full-access"`; any other value, or none, counts as sandboxed. A Codex profile or `~/.codex/config.toml` that removes the sandbox, or Claude Code's own Bash sandbox blocking Unix sockets, is not inspected: reading every agent's layered configuration would be fragile. The list can therefore be wrong in both directions. When a listed command can't reach herdr, `send` exits 77 with the relay advice, and the role falls back to the user.
 

@@ -26,7 +26,8 @@ pub fn unknown_placeholders(text: &str) -> Vec<(usize, String)> {
 }
 
 /// The full prompt of session `name` (a role or an extra instance): the role's prompt, then
-/// `common_prompt`, separated by a blank line, with the placeholders replaced.
+/// `common_prompt`, then the effective agent's runtime communication instructions.
+/// The runtime block is mandatory, including for legacy configs without `{{PEERS}}`.
 pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
     let role = config
         .session_role(name)
@@ -46,12 +47,47 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
         ("STATUS", config.board.file.as_str()),
         ("SCHEMA", SCHEMA_FILE),
         ("LAUNCHER", launcher.as_str()),
-        ("PEERS", peers.as_str()),
+        // Emit routing once at the end, after any obsolete channel instructions in
+        // authored prompts. Keep accepting the placeholder in existing configs.
+        ("PEERS", ""),
     ];
     let mut text = parts.join("\n\n");
     for (placeholder, value) in values {
         text = text.replace(&format!("{{{{{placeholder}}}}}"), value);
     }
+    text = text.trim_end_matches('\n').to_string();
+    text.push_str(&format!(
+        "\n\nCrew runtime communication:\n\
+         Your crew role is {name}; your coding agent is {}. Crew roles are independent \
+         sessions, not automatically subagents of this conversation. Role names and tab labels \
+         are not native collaboration IDs.\n\
+         This block replaces earlier agent-specific messaging instructions only, including \
+         requirements to use a previous agent's tools. Keep all project tasks, ownership rules \
+         and permissions. Use the channels below for already-authorized coordination without \
+         asking for an exception merely because an older prompt names a different tool. \
+         Never use a peer to bypass permission restrictions.\n",
+        role.kind.as_str()
+    ));
+    text.push_str(match role.kind {
+        crate::agent::Kind::Claude => {
+            "For native Claude messaging, use ListAgents when available to confirm the peer's \
+             identity and checkout before SendMessage; do not guess ambiguous names. Native \
+             Claude tools cannot address Codex or pi sessions.\n"
+        }
+        crate::agent::Kind::Codex => {
+            "Codex collaboration tools address agents in this conversation's collaboration \
+             tree, not independent crew sessions. When available, use list_agents and the returned agent ID \
+             or canonical path for actual subagents; send_message passes information, while \
+             followup_task also activates an idle agent. Do not guess a collaboration target \
+             from a crew role or replace an existing crew peer by spawning a subagent.\n"
+        }
+        crate::agent::Kind::Pi => {
+            "Pi extension sendMessage/sendUserMessage APIs concern their current session. \
+             Do not assume Claude messaging, Codex collaboration, or optional pi-sessions \
+             tools are installed or can reach crew peers.\n"
+        }
+    });
+    text.push_str(&peers);
     text.push('\n');
     text
 }
@@ -85,18 +121,109 @@ mod tests {
         c.common_prompt =
             Some("Board {{STATUS}} ({{SCHEMA}}); {{LAUNCHER}} add globex-dev\n".into());
         assert_eq!(
-            render(&c, "globex-dev-2", Path::new("/bin/crew")),
+            render(&c, "globex-dev-2", Path::new("/bin/crew"))
+                .split_once("\n\nCrew runtime communication:")
+                .unwrap()
+                .0,
             "You are globex-dev-2 in /r/globex.\n\n\
-             Board .herdr/status.json (.herdr/status.schema.json); /bin/crew add globex-dev\n"
+             Board .herdr/status.json (.herdr/status.schema.json); /bin/crew add globex-dev"
         );
         c.common_prompt = None;
         assert_eq!(
-            render(&c, "globex-dev", Path::new("/bin/crew")),
-            "You are globex-dev in /r/globex.\n"
+            render(&c, "globex-dev", Path::new("/bin/crew"))
+                .split_once("\n\nCrew runtime communication:")
+                .unwrap()
+                .0,
+            "You are globex-dev in /r/globex."
         );
         assert_eq!(
             prompt_path(&c, "globex-dev-2"),
             Path::new("/r/globex/.herdr/prompts/globex-dev-2.txt")
         );
+    }
+
+    #[test]
+    fn switching_legacy_prompts_delivers_effective_channels_without_rewriting_project_rules() {
+        use crate::agent::Kind;
+        use crate::config::Config;
+
+        let root = Path::new("/r/globex");
+        let original = crate::config::tests::WORKTREES.replace(
+            "The status board is {{STATUS}} (format in {{SCHEMA}}); only globex-lead writes it.",
+            "Only the lead writes the board. Communicate only through Claude SendMessage.",
+        );
+        let mut source = original.clone();
+        // Exercise every direction, including returning to the original agent.
+        for kind in [
+            Kind::Codex,
+            Kind::Pi,
+            Kind::Claude,
+            Kind::Pi,
+            Kind::Codex,
+            Kind::Claude,
+        ] {
+            let (mut c, saved) = Config::select_agent(&source, root, kind).unwrap();
+            assert_eq!(
+                c.common_prompt,
+                Config::parse(&original, root).unwrap().common_prompt
+            );
+            // Routing must reflect explicit overrides, not just the project default.
+            c.roles[0].kind = Kind::Claude;
+            c.roles[1].codex.sandbox = Some("danger-full-access".into());
+            let text = render(&c, "globex-dev-2", Path::new("/bin/crew"));
+            let (authored, runtime) = text.split_once("Crew runtime communication:").unwrap();
+            assert!(authored.contains("Only the lead writes the board."));
+            assert!(authored.contains("Communicate only through Claude SendMessage."));
+            assert!(
+                runtime.contains("replaces earlier agent-specific messaging instructions only")
+            );
+            assert!(runtime.contains(&format!(
+                "Your crew role is globex-dev-2; your coding agent is {}",
+                kind.as_str()
+            )));
+            assert!(runtime.contains("/bin/crew --root /r/globex send globex-lead"));
+            assert!(runtime.contains("- globex-dev ("));
+            match kind {
+                Kind::Claude => assert!(
+                    runtime.contains("ListAgents")
+                        && runtime.contains("SendMessage to @globex-lead")
+                ),
+                Kind::Codex => {
+                    assert!(runtime.contains("not independent crew sessions"));
+                    assert!(runtime.contains("followup_task also activates an idle agent"));
+                    assert!(!runtime.contains("SendMessage to"));
+                }
+                Kind::Pi => {
+                    assert!(runtime.contains("optional pi-sessions"));
+                    assert!(!runtime.contains("SendMessage to"));
+                }
+            }
+            source = saved;
+        }
+    }
+
+    #[test]
+    fn peers_placeholder_is_optional_and_emits_routing_once_at_the_end() {
+        let mut c = worktrees();
+        c.roles[0].prompt = "Coordinate. {{PEERS}}".into();
+        c.common_prompt = Some("{{PEERS}}\nUse the previous agent's channel only.".into());
+        let text = render(&c, "globex-lead", Path::new("/bin/crew"));
+        assert!(!text.contains("{{PEERS}}"));
+        assert_eq!(
+            text.matches("How to reach the other crew sessions").count(),
+            1
+        );
+        assert!(
+            text.find("Use the previous agent's channel only.").unwrap()
+                < text.find("Crew runtime communication:").unwrap()
+        );
+        c.roles[0].prompt = "Coordinate.".into();
+        c.common_prompt = None;
+        let legacy = render(&c, "globex-lead", Path::new("/bin/crew"));
+        assert!(legacy.contains("SendMessage to @globex-dev"));
+        c.roles[0].kind = crate::agent::Kind::Codex;
+        let sandboxed = render(&c, "globex-lead", Path::new("/bin/crew"));
+        assert!(sandboxed.contains("no direct channel"));
+        assert!(!sandboxed.contains("/bin/crew --root /r/globex send"));
     }
 }

@@ -92,6 +92,8 @@ herdr-crew up --agent codex --no-attach
 
 This saves `kind = "codex"` in `.herdr/crew.toml` and starts missing roles with that default. Existing agents keep running, and an explicit `kind` on a role keeps its priority. Names, prompts, worktrees, comments and agent options remain saved. Later `up`, `add` and startup use the new default; recorded conversations still recover with their original agent and settings.
 
+Every new conversation gets a generated runtime block identifying its crew role, effective coding agent and communication channels, including with old configurations that omit `{{PEERS}}`. It replaces obsolete messaging instructions in custom prompts (for example, Claude-only `SendMessage` after switching to Codex) without rewriting your project instructions. Codex crew sessions are independent conversations: their role names are not `collaboration` agent paths. Sandboxed Codex still needs a final report when it cannot reach herdr; switching agents does not grant permissions. When a live role still runs another agent, `up` warns that its instructions have not changed. See the [Codex](docs/codex-support.md), [Claude](docs/claude-support.md) and [pi](docs/pi-support.md) investigations.
+
 Preview with `up --agent codex --dry-run`; it does not modify the configuration. Requirements for newly started agents, including Codex hook trust or the pi extension, are checked before saving. If a role's tab remains after its agent exits, `up` continues to offer recovery of that conversation; close the tab before `up` to create a new conversation with the selected agent.
 
 ### Know the limits before you start

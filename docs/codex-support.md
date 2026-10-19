@@ -1,5 +1,64 @@
 # Codex support implementation design
 
+## Agent communication and switching investigation (2026-10-19)
+
+An existing `erp-core` crew created for Claude was started with `up --agent codex`.
+The default changed, but its custom prompts still required Claude's `SendMessage`.
+The Codex coordinator tried `erp-reviewer` and `erp_reviewer` as collaboration targets;
+`list_agents` contained only `/root`, and `/root/erp_reviewer` was not found. Role
+names, native conversation UUIDs, and collaboration paths are different identities.
+
+Codex subagents belong to the coordinator's collaboration tree. Use the returned
+agent identifier/path, discover existing agents with `list_agents`, use
+`send_message` for information to an existing agent, and `followup_task` for work
+that must activate an idle agent. `wait_agent` waits for updates and
+`interrupt_agent` interrupts a turn. Tool names and availability depend on the
+installed runtime; never invent a peer from a tab label. Custom agent definitions
+do not create running agents. See [OpenAI subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents).
+
+Crew currently starts independent Codex sessions with `--no-daemon`, not a
+coordinator-owned tree. Use `herdr-crew send <role>` for those peers: it resolves the
+role inside the workspace and uses the bound UUID with `codex queue` on supported
+versions. The installed 0.163.0 CLI help and generated experimental App Server
+types were inspected locally. No public operation for adopting an independently
+started conversation into a collaboration tree was found in those types. Sharing
+a daemon or renaming a conversation is not evidence that collaboration can reach it.
+App Server exposes `thread/name/set` for display names, separately from thread
+identity; crew does not currently set that title. See [App Server](https://learn.chatgpt.com/docs/app-server).
+
+Two architectures are viable: retain independent sessions and native queue delivery,
+or add a separate Codex-only mode whose coordinator creates the roles as subagents.
+The latter changes role lifecycle, restoration and permission inheritance and is
+not part of this correction. No live subagent integration experiment was performed.
+
+The correction keeps independent sessions and always appends a generated runtime
+communication block, including for old configurations without `{{PEERS}}`. It
+identifies the effective agent and crew role and supersedes conflicting messaging
+instructions inherited from another agent. `{{PEERS}}` remains accepted; its channel
+list is emitted once in that final block. Authored role text, role overrides and
+permissions remain saved. Sandbox restrictions still apply: default sandboxed
+Codex can receive messages but cannot necessarily send through herdr. See
+[messaging](messaging.md) for that limitation, and the equivalent
+[Claude](claude-support.md) and [pi](pi-support.md) investigations.
+
+`up --agent` selects the default for new conversations. It does not transfer a
+Claude transcript to Codex, replace a live agent, refresh an immutable saved prompt,
+or remove explicit role overrides. A live agent whose kind differs from the
+configured kind should be reported explicitly, with its old context preserved.
+Regression checks must cover all three target agents, legacy conflicting prompts,
+mixed role overrides, extras, dry runs, occupied roles and saved recovery context.
+
+Validation of this correction: `cargo fmt --check`,
+`cargo clippy --locked --all-targets -- -D warnings`,
+`cargo build --release --locked`, and `cargo test --locked` passed (213 tests,
+5 optional integration tests ignored). The full suite needed permission to bind
+temporary local Unix sockets for its herdr simulator; the sandbox initially denied
+that operation. This is offline transport/context evidence, not a live model
+evaluation or a change to installed/running crews.
+
+The original implementation record follows; its dates and baseline versions are
+historical, not claims about the latest CLI.
+
 **Date:** 2026-10-06. **Status:** implemented; local offline tests, real Herdr restoration and real Codex request inspection pass. Remote CI/release validation remains pending.
 
 Full Codex support means that a crew may use Claude Code, Codex, or both; every session receives its role instructions; extra instances inherit their role's settings; and restoring a conversation preserves those instructions and the crew's explicit launch settings. Existing Claude configurations keep their behavior.
