@@ -82,6 +82,18 @@ The first time `claude` runs in a folder, it asks whether you trust it; answer i
 
 **Trust.** Plugins listed in the herdr marketplace are not reviewed. herdr-crew runs the selected agent, `git` and `herdr` on your machine with the prompts in your `crew.toml`; read the source before installing it. Treat a project's `crew.toml` like code: it chooses the agents, their prompts and, for Codex, their sandbox and approval policy, so read it before running `up` in a repository you did not write. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
+### Change the default agent
+
+For an existing crew, select a different project default without repeating `init`:
+
+```sh
+herdr-crew up --agent codex --no-attach
+```
+
+This saves `kind = "codex"` in `.herdr/crew.toml` and starts missing roles with that default. Existing agents keep running, and an explicit `kind` on a role keeps its priority. Names, prompts, worktrees, comments and agent options remain saved. Later `up`, `add` and startup use the new default; recorded conversations still recover with their original agent and settings.
+
+Preview with `up --agent codex --dry-run`; it does not modify the configuration. Requirements for newly started agents, including Codex hook trust or the pi extension, are checked before saving. If a role's tab remains after its agent exits, `up` continues to offer recovery of that conversation; close the tab before `up` to create a new conversation with the selected agent.
+
 ### Know the limits before you start
 
 - **How the crew starts depends on herdr.** With no server running, `cd repo && herdr` brings the project up through the startup hook. With a server already running, `herdr` only attaches: run `herdr-crew up --no-attach` or the `herdr-crew.up` action. After a herdr restart, herdr resumes the sessions and the hook repairs only the board; a tab whose agent stopped gets a resume command from `up`, never a second agent.
@@ -146,7 +158,7 @@ profile = "development"
 | `search` | `disabled`, `cached`, `live` |
 | `additional_dirs` | Existing directories, absolute or relative to the main checkout; `[]` clears inherited additional roots |
 
-Absent options inherit Codex settings. Codex-only role options on a Claude role are errors, and arbitrary `args` are unsupported. Crew starts the interactive CLI through native Herdr `agent start`, using `--no-daemon` to keep each pane's hook context local.
+Absent options inherit Codex settings. Options for inactive agents are preserved and validated but only the selected agent's options are used. Arbitrary `args` are unsupported. Crew starts the interactive CLI through native Herdr `agent start`, using `--no-daemon` to keep each pane's hook context local.
 
 `herdr-crew send <role>` resolves a running Codex role to its bound conversation and queues the framed message with `codex queue --thread <UUID> --message ...` on Codex 0.163.0+. Native delivery works with `--no-daemon`, including while the recipient is working: Codex processes the queue after the current turn. The role name remains scoped to this crew; delivery does not depend on Codex's display names. The command uses the recipient's saved `CODEX_HOME` and profile, including a profile-specific `sqlite_home`, keeps the same repeat and dialog checks, and never retries a failed native delivery through terminal input. Sending still requires access to herdr and to the recipient's Codex home and queue store; this adds no sandbox permissions.
 
@@ -195,7 +207,7 @@ thinking = "high"
 | `model` | A model pattern or ID, as for `pi --model` |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 
-`[pi]` sets defaults and `[roles.pi]` overrides individual options; extras inherit their base role's. pi-only options on another kind are errors. If a pi tab loses its agent, `up` suggests `pi --session <file>` with the session herdr recorded; the extension restores the role from it. A role whose conversation never sent a request has no session file to resume: close its tab and run `herdr-crew up`. pi has no permission prompts of its own, so a pi role can run any command its tools allow; keep that in mind when choosing its prompt and checkout.
+`[pi]` sets defaults and `[roles.pi]` overrides individual options; extras inherit their base role's. Options for an inactive agent remain saved for a later switch and are not passed to the selected agent. If a pi tab loses its agent, `up` suggests `pi --session <file>` with the session herdr recorded; the extension restores the role from it. A role whose conversation never sent a request has no session file to resume: close its tab and run `herdr-crew up`. pi has no permission prompts of its own, so a pi role can run any command its tools allow; keep that in mind when choosing its prompt and checkout.
 
 ## Configure a crew
 
@@ -237,7 +249,8 @@ herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi]
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
-  up [--no-attach] [--dry-run]   start or complete the project's sessions
+  up [--agent claude|codex|pi] [--no-attach] [--dry-run]
+                                 start sessions; optionally save a new default agent
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
   send <session>                 send the message on stdin to another crew session
@@ -314,8 +327,8 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
 | `codex`            | no               | Typed defaults for Codex roles, described above. |
 | `pi`               | no               | Typed defaults for pi roles, described above. |
 | `roles[].kind`     | no               | Overrides the project agent default. |
-| `roles[].codex`    | no               | Overrides individual Codex defaults. Requires an effective Codex kind. |
-| `roles[].pi`       | no               | Overrides individual pi defaults. Requires an effective pi kind. |
+| `roles[].codex`    | no               | Overrides individual Codex defaults; used when the role runs Codex. |
+| `roles[].pi`       | no               | Overrides individual pi defaults; used when the role runs pi. |
 | `version`          | yes              | Always `1`.                                                                                                                                                                                         |
 | `common_prompt`    | no               | Text appended to every role's prompt.                                                                                                                                                               |
 | `start_message`    | no               | The first message of each new conversation, one line of at most 200 bytes. Sent only when a tab is created (`up`, the startup hook's first bring-up, `add`), never on a resume or a repair. It costs one request per role on every fresh start, so it should not ask for changes to the tree. |

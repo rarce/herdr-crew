@@ -256,6 +256,11 @@ impl fmt::Display for WorkspaceRef {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
+    SetAgent {
+        path: PathBuf,
+        kind: Kind,
+        content: String,
+    },
     CreateWorkspace {
         label: String,
         cwd: PathBuf,
@@ -315,6 +320,14 @@ pub enum Step {
 impl fmt::Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Step::SetAgent { path, kind, .. } => {
+                write!(
+                    f,
+                    "set the default agent to {} in {}",
+                    kind.as_str(),
+                    path.display()
+                )
+            }
             Step::CreateWorkspace { label, cwd } => {
                 write!(f, "create workspace \"{label}\" in {}", cwd.display())
             }
@@ -1080,6 +1093,7 @@ mod tests {
         p.steps
             .iter()
             .map(|s| match s {
+                Step::SetAgent { .. } => "config".into(),
                 Step::CreateWorkspace { .. } => "workspace".into(),
                 Step::AdoptWorkspace { initial, .. } => format!("adopt {}", initial.workspace),
                 Step::RenameTab { label } => format!("rename {label}"),

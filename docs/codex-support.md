@@ -79,7 +79,7 @@ profile = "development"            # existing user profile, never generated
 
 Resolve each role's kind as role override, project default, then Claude. Resolve each Codex option independently as role override, project default, then the user's Codex configuration. Missing and empty values must not be conflated. An explicit empty additional-directory list clears the project default; extra instances use their base role's effective settings.
 
-Support structured Codex options for model, profile, reasoning effort, sandbox, approval policy, search, and additional writable directories. Model IDs must remain user-selected strings; do not hard-code a model or silently migrate it. Validate Codex-only role options against the effective kind, use strict unknown-key handling, and preserve source positions in errors.
+Support structured Codex options for model, profile, reasoning effort, sandbox, approval policy, search, and additional writable directories. Model IDs must remain user-selected strings; do not hard-code a model or silently migrate it. Validate all stored agent options, including inactive options preserved across `up --agent` changes, use strict unknown-key handling, and preserve source positions in errors. Only the effective agent's options are passed at launch.
 
 Do not introduce unrestricted `args` in this implementation. Subcommands, `--cd`, `--worktree`, prompt overrides, and bypass flags can conflict with the role and isolation contract. The adapter owns the working directory, initial message, instruction delivery, and resume selection. Future additional options can be added with explicit semantics.
 
