@@ -39,6 +39,13 @@ For research, deliver observations, rejected hypotheses, source locations and un
 
 herdr-crew sets up the team; it does not run it. It gives you persistent sessions with role prompts, optional worktrees, a shared status board and a versioned configuration. It routes messages through herdr or Codex's native queue, without a crew-owned inbox, task queue, automatic assignment or task graph. Sessions follow the handoff protocol in their prompts, and you stay in the loop.
 
+This section describes the standard mode with a Herdr tab per role. The separate
+[experimental native Codex tree](codex-tree-experiment.md) uses one coordinator tab
+and native worker threads inspected through `/subagents`. Workers' final responses
+return to the coordinator automatically, and it activates further work with
+`followup_task`. That prototype has passed both offline runtime checks and a
+live-model review/fix and restart test; it is not enabled by `up --agent codex`.
+
 What herdr-crew provides:
 
 - **Roles that survive.** Each role is a named herdr agent in its own tab. The sessions keep their context across tasks, herdr restores them after a restart, and `up` repairs what is missing without starting duplicates.

@@ -36,3 +36,22 @@ fn native_codex_queue_reaches_two_roles_and_survives_restore() {
         .expect("python3 must be installed for the real Codex queue test");
     assert!(status.success());
 }
+
+#[test]
+#[ignore = "needs CREW_REAL_HERDR=1, CREW_REAL_CODEX=1, Herdr, Codex 0.163.0+ and Python 3.11+; isolated native tree experiment"]
+fn native_codex_tree_coordinates_roles_and_survives_restore() {
+    if std::env::var_os("CREW_REAL_HERDR").is_none()
+        || std::env::var_os("CREW_REAL_CODEX").is_none()
+    {
+        return;
+    }
+    let status = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/support/codex_collaboration.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_herdr-crew"))
+        .status()
+        .expect("python3 must be installed for the native Codex tree experiment");
+    assert!(status.success());
+}

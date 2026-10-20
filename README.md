@@ -92,7 +92,7 @@ herdr-crew up --agent codex --no-attach
 
 This saves `kind = "codex"` in `.herdr/crew.toml` and starts missing roles with that default. Existing agents keep running, and an explicit `kind` on a role keeps its priority. Names, prompts, worktrees, comments and agent options remain saved. Later `up`, `add` and startup use the new default; recorded conversations still recover with their original agent and settings.
 
-Every new conversation gets a generated runtime block identifying its crew role, effective coding agent and communication channels, including with old configurations that omit `{{PEERS}}`. It replaces obsolete messaging instructions in custom prompts (for example, Claude-only `SendMessage` after switching to Codex) without rewriting your project instructions. Codex crew sessions are independent conversations: their role names are not `collaboration` agent paths. Sandboxed Codex still needs a final report when it cannot reach herdr; switching agents does not grant permissions. When a live role still runs another agent, `up` warns that its instructions have not changed. See the [Codex](docs/codex-support.md), [Claude](docs/claude-support.md) and [pi](docs/pi-support.md) investigations.
+Every new conversation gets a generated runtime block identifying its crew role, effective coding agent and communication channels, including with old configurations that omit `{{PEERS}}`. It replaces obsolete messaging instructions in custom prompts (for example, Claude-only `SendMessage` after switching to Codex) without rewriting your project instructions. In the standard mode, Codex crew sessions are independent conversations: their role names are not `collaboration` agent paths. Sandboxed Codex still needs a final report when it cannot reach herdr; switching agents does not grant permissions. When a live role still runs another agent, `up` warns that its instructions have not changed. See the [Codex](docs/codex-support.md), [Claude](docs/claude-support.md) and [pi](docs/pi-support.md) investigations, or the separate [experimental native tree mode](docs/codex-tree-experiment.md).
 
 Preview with `up --agent codex --dry-run`; it does not modify the configuration. Requirements for newly started agents, including Codex hook trust or the pi extension, are checked before saving. If a role's tab remains after its agent exits, `up` continues to offer recovery of that conversation; close the tab before `up` to create a new conversation with the selected agent.
 
@@ -173,6 +173,14 @@ Each activation saves instructions, explicit options, working directory and Code
 For manual recovery, find the binding with `herdr-crew codex-list`, then run `herdr-crew codex-resume <binding>` inside the matching role tab and checkout. Recovery never resends `start_message`. Renamed tabs/workspaces and duplicate session ownership are rejected. Following a Herdr restart, crew's `startup` continues to repair only the board.
 
 Codex sandbox permissions remain in effect. Git metadata can require approvals even in workspace-write mode. If a board writer uses a worktree, explicitly include the main checkout's `.herdr` directory in `additional_dirs` when it needs to write the board. Crew supplies absolute board/schema paths and does not automatically grant access to the entire main checkout. `check` validates only the agents selected by the crew; repairing an existing board does not require a working Codex installation or trusted hook.
+
+### Experimental native Codex tree
+
+A separate prototype starts one Codex coordinator in Herdr and lets it create worker roles as native subagents in the same collaboration tree. The coordinator assigns followups through `collaboration`; each worker's final response returns to it automatically. This coordination works within `workspace-write` without giving workers access to the Herdr socket. In the tested CLI, workers have no `send_message` tool for intermediate updates, so the coordinator forwards results and handles questions returned in their final responses.
+
+Herdr shows a coordinator tab and a board tab. Inspect the worker threads with Codex `/subagents`; they do not have their own Herdr tabs. The prototype supports Codex roles in a shared checkout and inherits the parent's permissions. It was verified with Codex 0.163.0, Herdr 0.9.5 and the real `gpt-6.1-sol` model, including review/fix handoff and the same worker identities after a cold restart.
+
+This mode is available through the experiment scripts, not a released `up` option. `up --agent codex` continues to start independent role sessions. See the [native tree guide](docs/codex-tree-experiment.md) for preparation, offline and live test commands, communication behavior, recovery requirements and remaining limits.
 
 ## pi
 

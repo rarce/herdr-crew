@@ -2,6 +2,16 @@
 
 ## Agent communication and switching investigation (2026-10-19)
 
+**Follow-up:** the separate [native tree experiment](codex-tree-experiment.md) now
+implements and tests a single coordinator with two native worker roles using real
+Codex and Herdr and a local scripted provider. It verifies sandbox enforcement,
+automatic worker reports, followups, handoffs and the same thread IDs after a cold
+Herdr restart. Children lack collaboration tools in the tested CLI; the working
+topology routes coordination through the parent. A follow-up acceptance run with
+the real `gpt-6.1-sol` model also passes creation, native worker replies to main,
+review/fix handoff and the same workers' memory recall after cold Herdr restart.
+This remains an isolated prototype, not a change to production startup.
+
 An existing `erp-core` crew created for Claude was started with `up --agent codex`.
 The default changed, but its custom prompts still required Claude's `SendMessage`.
 The Codex coordinator tried `erp-reviewer` and `erp_reviewer` as collaboration targets;
@@ -29,7 +39,8 @@ identity; crew does not currently set that title. See [App Server](https://learn
 Two architectures are viable: retain independent sessions and native queue delivery,
 or add a separate Codex-only mode whose coordinator creates the roles as subagents.
 The latter changes role lifecycle, restoration and permission inheritance and is
-not part of this correction. No live subagent integration experiment was performed.
+not part of this correction. No live subagent integration experiment was performed
+for that correction; the follow-up linked above supplies the later runtime evidence.
 
 The correction keeps independent sessions and always appends a generated runtime
 communication block, including for old configurations without `{{PEERS}}`. It

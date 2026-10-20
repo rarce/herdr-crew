@@ -1,0 +1,27 @@
+version = 1
+kind = "codex"
+common_prompt = "Shared checkout {{REPO}}. Only tree-lead writes {{STATUS}}. Preserve ownership and approvals. {{PEERS}}"
+
+[codex]
+sandbox = "workspace-write"
+approval_policy = "on-request"
+
+[workspace]
+label = "tree-crew"
+
+[board]
+tab = "status"
+writer = "tree-lead"
+file = ".herdr/status.json"
+
+[[roles]]
+name = "tree-lead"
+prompt = "You are {{NAME}}. Coordinate the reviewer and coder. Do not implement their tasks."
+
+[[roles]]
+name = "tree-reviewer"
+prompt = "You are {{NAME}}. Review assigned code and report verified findings. Do not edit code."
+
+[[roles]]
+name = "tree-coder"
+prompt = "You are {{NAME}}. Implement only assigned work and report validations."
