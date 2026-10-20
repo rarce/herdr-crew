@@ -28,6 +28,7 @@ class Preparation(unittest.TestCase):
         original = copy.deepcopy(self.source)
         generated, roles = experiment.prepare(self.source, "/tmp/tree-sandbox")
         parsed = tomllib.loads(generated)
+        self.assertTrue(parsed["experimental_codex_tree"])
         self.assertEqual([role["name"] for role in parsed["roles"]], ["tree-lead"])
         self.assertEqual([role["task_name"] for role in roles], ["tree_reviewer", "tree_coder"])
         prompt = parsed["roles"][0]["prompt"]
@@ -64,6 +65,18 @@ class Preparation(unittest.TestCase):
                 source["roles"][1].update(change)
                 with self.assertRaises(ValueError):
                     experiment.prepare(source, "/tmp/tree-sandbox")
+
+    def test_extras_and_initial_messages_are_rejected_instead_of_discarded(self):
+        for change in [{"extra": True}, {"start_message": "Initialize"}, {"start_message": ""}]:
+            for index in [0, 1]:
+                with self.subTest(change=change, role=index):
+                    source = copy.deepcopy(self.source)
+                    source["roles"][index].update(change)
+                    with self.assertRaisesRegex(ValueError, "unsupported"):
+                        experiment.prepare(source, "/tmp/tree-sandbox")
+        self.source["start_message"] = "Initialize all roles"
+        with self.assertRaisesRegex(ValueError, "start_message is unsupported"):
+            experiment.prepare(self.source, "/tmp/tree-sandbox")
 
     def test_preparation_never_overwrites_an_existing_crew(self):
         with tempfile.TemporaryDirectory() as directory:

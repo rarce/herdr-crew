@@ -2,6 +2,23 @@
 
 Date: 2026-10-19 (America/Santiago). Prototype only; no production startup changes.
 
+Prompt/validation correction: 2026-10-20. Generated configurations now set
+`experimental_codex_tree = true`. This selects the coordinator's native-tree
+communication block instead of appending independent-session routing and relay
+advice. The flag requires exactly one Codex role without worktrees or extras; it
+does not create workers or add persistent host-managed role ownership. Ordinary
+crews retain their existing topology. Regenerate earlier experiment configurations
+in a new disposable checkout to exercise the corrected prompt; existing snapshots
+retain the instructions with which their conversations started.
+
+Correction validation: 217 Rust tests, 7 preparation tests, formatting, Clippy and
+the release build passed. The isolated real Codex 0.163.0 / Herdr 0.9.5 integration
+also passed with a local scripted provider: 20 native calls, worker final reports,
+sandbox checks and the same three UUIDs after restart. It checks the final rendered
+coordinator block as well as the runtime behavior. The evidence report is
+`/tmp/crew-codex-review-tree.json`. This correction did not repeat the external
+live-model acceptance described below.
+
 This mode makes the coordinator responsible for creating and directing Codex
 worker roles inside one native collaboration tree. It is available through the
 experiment scripts. `herdr-crew up --agent codex` by itself still starts independent
@@ -90,7 +107,10 @@ python3 experiments/codex_tree.py \
 Preparation writes the experiment's coordinator configuration; it does not start
 the crew. All source roles must select Codex and share the checkout, and
 `board.writer` must identify the coordinator. Worktrees and per-role Codex overrides
-are rejected. Start with the fixture and provided test runners below to reproduce
+are rejected. `extra = true`, a top-level `start_message`, and any role
+`start_message` (including an empty override) are also rejected: the experiment
+supplies its own bootstrap and cannot preserve those lifecycle settings. Start
+with the fixture and provided test runners below to reproduce
 the validated environment before adapting another crew.
 
 The generated crew requires `features.multi_agent_v2 = true` in its Codex test

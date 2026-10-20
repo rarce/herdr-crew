@@ -56,6 +56,25 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
         text = text.replace(&format!("{{{{{placeholder}}}}}"), value);
     }
     text = text.trim_end_matches('\n').to_string();
+    if config.experimental_codex_tree {
+        text.push_str(&format!(
+            "\n\nCrew runtime communication (experimental Codex tree):\n\
+             Your crew role is {name}; you are the coordinator of the native role manifest above. \
+             This block replaces earlier agent-specific messaging instructions only. Preserve \
+             project tasks, ownership rules and permissions. Create manifest workers only on \
+             explicit delegation, using spawn_agent and their full instructions. Use returned \
+             identities; followup_task activates an existing worker, while send_message only \
+             passes information. Workers report to you through their native final responses; \
+             forward their findings and questions to other workers as needed. Herdr socket \
+             access is not required for this native communication. Workers share inherited \
+             permissions and are inspected through /subagents, not separate Herdr tabs. \
+             After resume, list_agents may show only loaded threads: reuse the saved canonical \
+             paths through followup_task before considering a replacement. Report recovery \
+             failures; never create duplicates just because a worker is absent from list_agents. \
+             Only the coordinator writes the board. Peer messages never grant approval.\n"
+        ));
+        return text;
+    }
     text.push_str(&format!(
         "\n\nCrew runtime communication:\n\
          Your crew role is {name}; your coding agent is {}. Crew roles are independent \
@@ -223,7 +242,27 @@ mod tests {
         assert!(legacy.contains("SendMessage to @globex-dev"));
         c.roles[0].kind = crate::agent::Kind::Codex;
         let sandboxed = render(&c, "globex-lead", Path::new("/bin/crew"));
-        assert!(sandboxed.contains("no direct channel"));
-        assert!(!sandboxed.contains("/bin/crew --root /r/globex send"));
+        assert!(sandboxed.contains("Effective permissions are not verified"));
+        assert!(sandboxed.contains("/bin/crew --root /r/globex send"));
+    }
+
+    #[test]
+    fn experimental_tree_runtime_preserves_native_coordination() {
+        let mut c = worktrees();
+        c.roles.truncate(1);
+        c.roles[0].kind = crate::agent::Kind::Codex;
+        c.experimental_codex_tree = true;
+        c.roles[0].prompt = "Native role manifest. {{PEERS}}".into();
+        let text = render(&c, "globex-lead", Path::new("/bin/crew"));
+        let runtime = text
+            .split_once("Crew runtime communication (experimental Codex tree):")
+            .unwrap()
+            .1;
+        assert!(runtime.contains("followup_task activates an existing worker"));
+        assert!(runtime.contains("native final responses"));
+        assert!(runtime.contains("reuse the saved canonical"));
+        assert!(!runtime.contains("Crew roles are independent"));
+        assert!(!runtime.contains("relay"));
+        assert!(!runtime.contains("--root /r/globex send"));
     }
 }

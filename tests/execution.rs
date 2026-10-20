@@ -402,7 +402,7 @@ fn up_agent_adapts_legacy_communication_for_new_conversations_and_extras() {
             );
             match *kind {
                 "codex" => {
-                    assert!(runtime.contains("no direct channel"));
+                    assert!(runtime.contains("Effective permissions are not verified"));
                     assert!(!runtime.contains("SendMessage to"));
                     assert!(runtime.contains("not independent crew sessions"));
                 }

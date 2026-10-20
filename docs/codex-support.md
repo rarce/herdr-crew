@@ -1,5 +1,21 @@
 # Codex support implementation design
 
+## Review corrections (2026-10-20)
+
+The native-tree experiment now marks its generated single-coordinator configuration
+with `experimental_codex_tree = true`. The final runtime prompt describes native
+workers and automatic results, avoiding the independent-session block that used
+to override its instructions. Config validation restricts this marker to one
+Codex coordinator with no worktree or extras. The preparation script rejects
+unsupported extras and initial messages instead of discarding them.
+
+Independent-session prompts now present `herdr-crew send` routes with an explicit
+permission qualification. They do not infer effective socket/store access solely
+from `crew.toml`: profiles, managed policy and runtime changes can differ. The
+default workspace sandbox normally blocks access. Actual failures must be reported;
+the prompt grants no additional access and does not authorize bypassing restrictions.
+These changes do not add worker lifecycle management or migrate existing snapshots.
+
 ## Agent communication and switching investigation (2026-10-19)
 
 **Follow-up:** the separate [native tree experiment](codex-tree-experiment.md) now

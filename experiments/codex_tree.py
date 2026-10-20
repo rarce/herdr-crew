@@ -26,10 +26,14 @@ def prepare(source, root):
     if len(set(names)) != len(names) or coordinator not in names:
         raise ValueError("roles must be unique and board.writer must name the coordinator")
     defaults = source.get("codex", {})
+    if "start_message" in source:
+        raise ValueError("start_message is unsupported: the experiment supplies its own bootstrap")
     if defaults.get("sandbox", "workspace-write") != "workspace-write":
         raise ValueError("this experiment requires workspace-write")
     # Native children inherit permissions; differing settings must not be silently lost.
     for role in roles:
+        if role.get("extra") or "start_message" in role:
+            raise ValueError("extra roles and role start_message are unsupported in the tree experiment")
         if role.get("kind", source.get("kind", "claude")) != "codex":
             raise ValueError("this experiment supports only Codex roles")
         if role.get("worktree") or role.get("codex", {}):
@@ -78,7 +82,8 @@ def prepare(source, root):
     if len(prompt.encode()) > 60 * 1024:
         raise ValueError("experimental coordinator context exceeds 60 KiB")
     # JSON strings/arrays are TOML-compatible. Keep only supported typed Codex options.
-    lines = ["version = 1", 'kind = "codex"', "start_message = " + json.dumps(BOOTSTRAP), "[codex]"]
+    lines = ["version = 1", 'kind = "codex"', "experimental_codex_tree = true",
+             "start_message = " + json.dumps(BOOTSTRAP), "[codex]"]
     for key, value in {**defaults, "sandbox": "workspace-write"}.items():
         if key not in {"sandbox", "approval_policy", "model", "profile", "reasoning_effort", "search", "additional_dirs"}:
             raise ValueError("unsupported Codex option: " + key)

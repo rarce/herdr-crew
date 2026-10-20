@@ -37,6 +37,8 @@ impl fmt::Display for Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub root: PathBuf,
+    /// Prompt topology for the separate single-coordinator experiment; no worker lifecycle.
+    pub experimental_codex_tree: bool,
     pub kind: Kind,
     pub codex: CodexOptions,
     pub pi: PiOptions,
@@ -94,6 +96,8 @@ impl Role {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
+    experimental_codex_tree: bool,
+    #[serde(default)]
     kind: Kind,
     #[serde(default)]
     codex: CodexOptions,
@@ -147,6 +151,7 @@ struct RawRole {
 
 /// Known keys per table; checked before `serde` so that all of them are reported at once.
 const ROOT_KEYS: &[&str] = &[
+    "experimental_codex_tree",
     "version",
     "kind",
     "codex",
@@ -245,6 +250,15 @@ impl Config {
         }
         if raw.roles.is_empty() {
             err("roles[] is empty: at least one role is needed".to_string());
+        }
+        if raw.experimental_codex_tree
+            && (raw.roles.len() != 1
+                || raw
+                    .roles
+                    .iter()
+                    .any(|r| r.kind.unwrap_or(raw.kind) != Kind::Codex || r.worktree || r.extra))
+        {
+            err("experimental_codex_tree requires exactly one Codex coordinator without worktree or extra".into());
         }
         for problem in raw.codex.problems() {
             err(format!("codex.{problem}"));
@@ -371,6 +385,7 @@ impl Config {
         }
         Ok(Config {
             root: root.to_path_buf(),
+            experimental_codex_tree: raw.experimental_codex_tree,
             kind: raw.kind,
             codex: raw.codex.clone(),
             pi: raw.pi.clone(),
@@ -1073,5 +1088,25 @@ prompt = '''You are {{NAME}}.'''
         // A role override to Claude leaves partial pi options inactive.
         let mixed = role_provider.replace("prompt =", "kind = \"claude\"\nprompt =");
         assert!(Config::select_agent(&mixed, root, Kind::Pi).is_ok());
+    }
+
+    #[test]
+    fn experimental_tree_requires_one_shared_codex_coordinator() {
+        let text = format!("experimental_codex_tree = true\nkind = \"codex\"\n{MIN}");
+        let root = Path::new("/r/p");
+        assert!(Config::parse(&text, root).unwrap().experimental_codex_tree);
+        assert!(Config::select_agent(&text, root, Kind::Pi).is_err());
+        for suffix in [
+            "extra = true\n",
+            "worktree = true\n",
+            "[[roles]]\nname = \"second\"\nprompt = \"Worker\"\n",
+        ] {
+            assert!(
+                errors(&format!("{text}{suffix}"))
+                    .iter()
+                    .any(|error| error.contains("exactly one Codex coordinator"))
+            );
+        }
+        assert!(!Config::parse(MIN, root).unwrap().experimental_codex_tree);
     }
 }
