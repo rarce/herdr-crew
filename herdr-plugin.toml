@@ -1,6 +1,6 @@
 id = "herdr-crew"
 name = "herdr crew"
-version = "0.4.1"
+version = "0.4.2"
 min_herdr_version = "0.9.1"
 platforms = ["macos", "linux"]
 

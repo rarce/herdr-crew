@@ -10,6 +10,32 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-20
+
+### Fixed
+
+- Codex peer prompts distinguish available communication routes from effective
+  runtime permissions instead of inferring channel availability from the sandbox
+  setting alone. Existing saved conversation prompts are not rewritten.
+- Pi provider/model validation follows effective role inheritance, and Pi 1.3's
+  `max` thinking level is accepted.
+
+### Added
+
+- An experimental Codex tree generator creates one coordinator conversation with
+  native subagents. Generated configurations use dedicated coordination prompts
+  and reject worktrees, extra instances, initial messages and per-worker Codex
+  overrides that cannot be preserved. Workers appear in Codex `/subagents`, not
+  separate Herdr tabs. The coordinator receives final reports; direct worker tools
+  depend on the runtime. This remains separate from normal `up` behavior.
+- An opt-in Pi sessions experiment scopes peer messaging to explicit conversation
+  UUIDs and checkouts while keeping separate Herdr tabs. The optional package is
+  not installed automatically.
+- Experiment documentation and isolated checks cover message delivery and restored
+  conversation identities. Codex and Pi prototypes were also exercised with real
+  models; the final Codex prompt corrections were checked with a controlled local
+  provider.
+
 ## [0.4.1] - 2026-10-19
 
 ### Fixed
@@ -150,7 +176,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/rarce/herdr-crew/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/rarce/herdr-crew/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/rarce/herdr-crew/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rarce/herdr-crew/compare/v0.2.0...v0.3.0
