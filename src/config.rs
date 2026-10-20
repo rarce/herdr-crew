@@ -263,6 +263,15 @@ impl Config {
                     err(format!("roles[{i}].pi.{problem}"));
                 }
             }
+            if r.kind.unwrap_or(raw.kind) == Kind::Pi
+                && let Some(problem) =
+                    r.pi.clone()
+                        .unwrap_or_default()
+                        .inherit(&raw.pi)
+                        .launch_problem()
+            {
+                err(format!("roles[{i}].pi.{problem}"));
+            }
             // pi reads a positional argument that starts with "@" as a file to attach.
             if r.kind.unwrap_or(raw.kind) == Kind::Pi
                 && r.start_message
@@ -999,7 +1008,7 @@ prompt = '''You are {{NAME}}.'''
             .replace("version = 1", "version = 1\nkind = \"pi\"")
             .replace(
                 "[workspace]",
-                "[pi]\nprovider = \"anthropic\"\nthinking = \"high\"\n[workspace]",
+                "[pi]\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nthinking = \"high\"\n[workspace]",
             );
         let c = Config::parse(&text, Path::new("/r/globex")).unwrap();
         assert!(c.roles.iter().all(|role| role.kind == Kind::Pi));
@@ -1021,11 +1030,11 @@ prompt = '''You are {{NAME}}.'''
             "{e:?}"
         );
         let e = errors(&format!(
-            "{MIN}kind = \"pi\"\n[roles.pi]\nthinking = \"max\"\n"
+            "{MIN}kind = \"pi\"\n[roles.pi]\nthinking = \"ultra\"\n"
         ));
         assert!(
             e[0].ends_with(
-                "roles[0].pi.thinking: expected one of off, minimal, low, medium, high, xhigh"
+                "roles[0].pi.thinking: expected one of off, minimal, low, medium, high, xhigh, max"
             ),
             "{e:?}"
         );
@@ -1038,5 +1047,31 @@ prompt = '''You are {{NAME}}.'''
             "{e:?}"
         );
         assert!(Config::parse(&format!("{MIN}{mention}"), Path::new("/r/p")).is_ok());
+    }
+
+    #[test]
+    fn pi_launch_requirements_use_effective_options_and_agent_kind() {
+        let root = Path::new("/r/p");
+        let defaults = format!("{MIN}[pi]\nprovider = \"anthropic\"\n");
+        // Inactive options are preserved, but switching to pi validates the launch.
+        assert!(Config::parse(&defaults, root).is_ok());
+        let errors = Config::select_agent(&defaults, root, Kind::Pi).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.msg.contains("requires an effective model"))
+        );
+        let role_model = format!("{defaults}[roles.pi]\nmodel = \"sonnet\"\nthinking = \"max\"\n");
+        let (c, _) = Config::select_agent(&role_model, root, Kind::Pi).unwrap();
+        assert_eq!(c.roles[0].pi.provider.as_deref(), Some("anthropic"));
+        assert_eq!(c.roles[0].pi.thinking.as_deref(), Some("max"));
+        let default_model =
+            format!("{MIN}[pi]\nmodel = \"sonnet\"\n[roles.pi]\nprovider = \"anthropic\"\n");
+        assert!(Config::select_agent(&default_model, root, Kind::Pi).is_ok());
+        let role_provider = format!("{MIN}[roles.pi]\nprovider = \"anthropic\"\n");
+        assert!(Config::select_agent(&role_provider, root, Kind::Pi).is_err());
+        // A role override to Claude leaves partial pi options inactive.
+        let mixed = role_provider.replace("prompt =", "kind = \"claude\"\nprompt =");
+        assert!(Config::select_agent(&mixed, root, Kind::Pi).is_ok());
     }
 }

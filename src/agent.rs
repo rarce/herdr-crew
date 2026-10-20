@@ -243,12 +243,19 @@ impl PiOptions {
                 ));
                 continue;
             }
-            let choices = ["off", "minimal", "low", "medium", "high", "xhigh"];
+            let choices = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
             if key == "thinking" && !choices.contains(&value.as_str()) {
                 errors.push(format!("thinking: expected one of {}", choices.join(", ")));
             }
         }
         errors
+    }
+
+    /// Check launch requirements after defaults and role options have been merged.
+    /// Partial options for inactive agents can remain saved until that agent is selected.
+    pub fn launch_problem(&self) -> Option<&'static str> {
+        (self.provider.is_some() && self.model.is_none())
+            .then_some("provider: requires an effective model in [pi] or [roles.pi]")
     }
 
     /// Separate arguments, never interpolated by a shell.
@@ -340,10 +347,25 @@ mod tests {
         );
         let bad = PiOptions {
             model: Some("--session".into()),
-            thinking: Some("max".into()),
+            thinking: Some("ultra".into()),
             provider: Some("a\nb".into()),
         };
         assert_eq!(bad.problems().len(), 3);
         assert!(PiOptions::default().args().is_empty());
+    }
+
+    #[test]
+    fn pi_accepts_max_and_requires_a_model_only_with_an_explicit_provider() {
+        let mut options = PiOptions {
+            thinking: Some("max".into()),
+            ..Default::default()
+        };
+        assert!(options.problems().is_empty());
+        assert!(options.launch_problem().is_none());
+        assert_eq!(options.args(), ["--thinking", "max"]);
+        options.provider = Some("anthropic".into());
+        assert!(options.launch_problem().is_some());
+        options.model = Some("sonnet".into());
+        assert!(options.launch_problem().is_none());
     }
 }

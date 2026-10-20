@@ -196,6 +196,8 @@ herdr resumes pi with a plain `pi --session <file>`, and pi builds its system pr
 
 `up` and `check` require herdr 0.9.3 or newer (executable and running server), pi 1.1.0 or newer and the installed extension to match this version exactly; run `pi-install` again after updating herdr-crew. Without the extension, pi refuses the crew flags, so a role never starts without its prompt. `pi-uninstall` removes only that file, and neither command touches a file it did not write. `init` and the other commands do not install it.
 
+Pi 1.3.0 also passes the isolated Herdr lifecycle and messaging experiment: separate role tabs, role context on custom-message turns, restored active tools and the same conversations after a restart. The optional `pi-sessions` package is loaded only by the [experiment](docs/pi-sessions-experiment.md); standard `up` keeps its existing messaging behavior. See the [pi support investigation](docs/pi-support.md) for release differences and validation scope.
+
 ```toml
 kind = "pi"
 
@@ -213,11 +215,13 @@ thinking = "high"
 
 | pi option | Values |
 | --- | --- |
-| `provider` | A provider pi knows; otherwise pi's default |
+| `provider` | A provider pi knows; pi 1.3.0 requires an effective `model` when this is set |
 | `model` | A model pattern or ID, as for `pi --model` |
-| `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 
-`[pi]` sets defaults and `[roles.pi]` overrides individual options; extras inherit their base role's. Options for an inactive agent remain saved for a later switch and are not passed to the selected agent. If a pi tab loses its agent, `up` suggests `pi --session <file>` with the session herdr recorded; the extension restores the role from it. A role whose conversation never sent a request has no session file to resume: close its tab and run `herdr-crew up`. pi has no permission prompts of its own, so a pi role can run any command its tools allow; keep that in mind when choosing its prompt and checkout.
+Crew validates the effective provider/model combination after applying defaults and role overrides. An active pi role with a provider and no model fails before startup; partial settings for inactive agents remain saved and are checked when switching to pi. Pi clamps the requested thinking level to what the selected model supports.
+
+`[pi]` sets defaults and `[roles.pi]` overrides individual options; extras inherit their base role's. Options for an inactive agent remain saved for a later switch and are not passed to the selected agent. If a pi tab loses its agent, `up` suggests `pi --session <file>` with the session herdr recorded; the extension restores the role from it. A role whose conversation never sent a request has no session file to resume: close its tab and run `herdr-crew up`. Pi's project trust controls resource loading, rather than approving each tool call; a pi role can run commands with the permissions of its process. See [pi's trust and isolation model](https://pi.dev/docs/latest/security).
 
 ## Configure a crew
 

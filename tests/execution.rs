@@ -636,7 +636,10 @@ fn pi_roles_need_the_extension_then_carry_their_prompt_and_options() {
     let config = f
         .read(".herdr/crew.toml")
         .replace("version = 1", "version = 1\nkind = \"pi\"")
-        .replace("[workspace]", "[pi]\nprovider = \"anthropic\"\n[workspace]");
+        .replace(
+            "[workspace]",
+            "[pi]\nprovider = \"anthropic\"\nmodel = \"sonnet\"\n[workspace]",
+        );
     fs::write(
         f.repo.join(".herdr/crew.toml"),
         format!("{config}\n[roles.pi]\nmodel = \"sonnet\"\nthinking = \"high\"\n"),
@@ -728,7 +731,11 @@ fn pi_roles_need_the_extension_then_carry_their_prompt_and_options() {
         .collect();
     assert_eq!(starts.len(), 3);
     for (call, role, options) in [
-        (&starts[0], "lead", vec!["--provider", "anthropic"]),
+        (
+            &starts[0],
+            "lead",
+            vec!["--provider", "anthropic", "--model", "sonnet"],
+        ),
         (
             &starts[1],
             "dev",
