@@ -659,6 +659,66 @@ pub fn resume(token: &str, root_flag: Option<&Path>) -> Result<(), String> {
     }
 }
 
+/// Project-local discovery for optional host thread tools. A binding is a candidate,
+/// not proof that its process is alive or reachable on the caller's app server.
+/// Read only current binding files, never historical snapshots or global Codex history.
+pub fn peers(c: &Config) -> Result<Value, String> {
+    let directory = c.root.join(RUNTIME).join("bindings");
+    files::validate(&c.root, &directory, files::Kind::Directory)?;
+    let mut peers = Vec::new();
+    if directory.exists() {
+        let _lock = Lock::acquire(&c.root)?;
+        for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
+            let file = entry.map_err(|e| e.to_string())?.path();
+            let binding: Binding = read(&c.root, &file)?;
+            if file != path(&c.root, "bindings", &context_key(&binding.context)) {
+                return Err("Codex binding filename does not match its context".into());
+            }
+            let snapshot = snapshot(&c.root, &binding.token)?;
+            if snapshot.workspace != c.label || c.session_role(&snapshot.name).is_none() {
+                continue;
+            }
+            let session_path = path(&c.root, "sessions", &binding.token);
+            files::validate(&c.root, &session_path, files::Kind::File)?;
+            if !session_path.exists() {
+                continue;
+            }
+            let session: Session = read(&c.root, &session_path)?;
+            if session.context != binding.context {
+                // A cold Herdr restart creates a new terminal binding for the same
+                // snapshot. The old binding file remains, but is no longer a candidate.
+                continue;
+            }
+            // Host tools address conversation UUIDs, never display names or collaboration paths.
+            if !messaging::uuid(&session.id) {
+                continue;
+            }
+            let owner: String = read(&c.root, &path(&c.root, "claims", &session.id))?;
+            if owner != binding.token {
+                return Err("Codex peer conversation is owned by another binding".into());
+            }
+            peers.push(json!({
+                "role": snapshot.name,
+                "threadId": session.id,
+                "cwd": snapshot.cwd,
+            }));
+        }
+    }
+    peers.sort_by(|a, b| {
+        a["role"]
+            .as_str()
+            .cmp(&b["role"].as_str())
+            .then_with(|| a["threadId"].as_str().cmp(&b["threadId"].as_str()))
+    });
+    Ok(json!({
+        "schemaVersion": 1,
+        "root": c.root,
+        "workspace": c.label,
+        "verificationRequired": true,
+        "peers": peers,
+    }))
+}
+
 pub fn list(root: &Path) -> Result<(), String> {
     let directory = root.join(RUNTIME).join("snapshots");
     files::validate(root, &directory, files::Kind::Directory)?;

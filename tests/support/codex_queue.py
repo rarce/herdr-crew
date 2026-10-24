@@ -255,6 +255,25 @@ try:
     assert ids["lead"] != ids["dev"]
     send("lead", "dev", "PROBE_TO_DEV\nUnicode «á»; quotes ' and `commands` stay literal.")
     verify_delivery("PROBE_TO_DEV", "dev")
+    peer_map = json.loads(run_crew("codex-peers"))
+    assert peer_map["verificationRequired"] is True
+    assert {item["role"]: item["threadId"] for item in peer_map["peers"]} == ids, peer_map
+    assert all(item["cwd"] == str(repo) for item in peer_map["peers"]), peer_map
+    # Inspect the actual model-visible tools of a real --no-daemon TUI, rather than
+    # assuming that the host tools exposed by the desktop app also exist in CLI.
+    tool_names = set()
+    for item in deliveries("PROBE_TO_DEV")[0].get("tools", []):
+        if item.get("name"):
+            tool_names.add(item["name"])
+        for child in item.get("tools", []):
+            tool_names.add(item.get("name", "") + "." + child["name"])
+    native_available = any(name.endswith("send_message_to_thread") for name in tool_names)
+    context = json.dumps(deliveries("PROBE_TO_DEV")[0].get("input", []))
+    assert "codex_tui.send_message_to_thread" in context
+    assert "codex-peers" in context
+    assert "use the authorized crew send route" in context
+    print("Real CLI send_message_to_thread available: " + str(native_available)
+          + "; project-local discovery verified; testing crew queue fallback.", flush=True)
     send("dev", "lead", "PROBE_TO_LEAD")
     verify_delivery("PROBE_TO_LEAD", "lead")
     send("lead", "dev", "PROBE_HOLD")
@@ -273,6 +292,8 @@ try:
     # Wait for both actual SessionStart hooks, not a cached idle status from the old process.
     wait_for("both restored role hooks", lambda: all(path.stat().st_mtime_ns > modified for path, modified in saved_sessions.items()))
     wait_for("restored interactive agents", agents_ready)
+    restored_peers = json.loads(run_crew("codex-peers"))
+    assert {item["role"]: item["threadId"] for item in restored_peers["peers"]} == ids
     send("lead", "dev", "PROBE_AFTER_RESTORE")
     verify_delivery("PROBE_AFTER_RESTORE", "dev")
     assert len(list(repo.joinpath(".herdr/codex/snapshots").glob("*.json"))) == 2

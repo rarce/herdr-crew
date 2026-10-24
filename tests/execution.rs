@@ -2345,6 +2345,75 @@ fn native_codex_delivery_preserves_the_recipients_saved_profile() {
 }
 
 #[test]
+fn codex_peers_discovers_only_current_owned_uuid_bindings_without_herdr() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(false);
+    // Discovery before startup returns no candidates and creates no runtime files.
+    let empty: Value = serde_json::from_str(&success(f.crew(&["codex-peers"]))).unwrap();
+    assert_eq!(empty["peers"], json!([]));
+    assert!(!f.repo.join(".herdr/codex").exists());
+    f.up();
+    let host = RpcHost::new(&f);
+    for (role, id) in [("lead", LEAD_UUID), ("dev", DEV_UUID)] {
+        let hook = host.hook(&f, role, "startup", id);
+        assert!(hook.get("continue").is_none(), "{hook}");
+    }
+    let discover = || -> Value {
+        // Deliberately unusable Herdr binary: local discovery must not contact it.
+        serde_json::from_str(&success(
+            f.command(CREW)
+                .arg("codex-peers")
+                .env("HERDR_BIN_PATH", "/no/herdr-for-peer-discovery")
+                .output()
+                .unwrap(),
+        ))
+        .unwrap()
+    };
+    let peers = discover();
+    assert_eq!(peers["verificationRequired"], true);
+    assert_eq!(peers["root"], json!(f.repo));
+    assert_eq!(peers["peers"].as_array().unwrap().len(), 2);
+    assert_eq!(peers["peers"][0]["role"], "dev");
+    assert_eq!(peers["peers"][0]["threadId"], DEV_UUID);
+    assert_eq!(peers["peers"][1]["threadId"], LEAD_UUID);
+    assert!(
+        peers["peers"][0]["cwd"]
+            .as_str()
+            .unwrap()
+            .ends_with("/.worktrees/dev")
+    );
+    let dev = f
+        .snapshots()
+        .into_iter()
+        .find(|s| s["name"] == "dev")
+        .unwrap();
+    let token = dev["token"].as_str().unwrap();
+    let session_path = f.repo.join(format!(".herdr/codex/sessions/{token}.json"));
+    let original_session = fs::read(&session_path).unwrap();
+    let mut rebound: Value = serde_json::from_slice(&original_session).unwrap();
+    rebound["context"]["terminal"] = json!("replacement-terminal");
+    fs::write(&session_path, serde_json::to_vec(&rebound).unwrap()).unwrap();
+    assert_eq!(discover()["peers"].as_array().unwrap().len(), 1);
+    fs::write(&session_path, original_session).unwrap();
+    assert_eq!(discover()["peers"].as_array().unwrap().len(), 2);
+    let binding_path = fs::read_dir(f.repo.join(".herdr/codex/bindings"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            value["token"] == token
+        })
+        .unwrap();
+    // Historical sessions and snapshots remain, but a removed binding must disappear.
+    fs::remove_file(binding_path).unwrap();
+    assert_eq!(discover()["peers"].as_array().unwrap().len(), 1);
+    let claim = f.repo.join(format!(".herdr/codex/claims/{LEAD_UUID}.json"));
+    fs::write(claim, "\"other-owner\"").unwrap();
+    failure(f.crew(&["codex-peers"]), "owned by another binding");
+}
+
+#[test]
 fn native_codex_delivery_allows_concurrent_role_startup_and_hooks() {
     use std::time::{Duration, Instant};
 

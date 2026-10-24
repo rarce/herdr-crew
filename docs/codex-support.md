@@ -1,5 +1,69 @@
 # Codex support implementation design
 
+## Independent thread messaging (2026-10-23)
+
+New Codex role prompts prefer the optional host tool
+`codex_tui.send_message_to_thread({threadId, prompt, model?})` for verified Codex
+peers. Its exposed tool contract sends a follow-up to an existing task in the
+background, limits the complete prompt to 1,000 UTF-8 bytes, and requires omitting
+`model` unless the user explicitly requests an override. This is separate from
+`collaboration`, which addresses native subagents.
+
+Discovery uses `codex_tui.list_threads` (limit 1–50) and verification uses
+`codex_tui.read_thread`. Confirm role, project and checkout, including configured
+worktrees; directory or title alone does not disambiguate multiple conversations.
+The list is scoped to recent tasks on the app server and may omit a valid thread.
+`herdr-crew --root <project> codex-peers` returns JSON candidates from current
+project bindings, with `role`, `threadId` and `cwd`. It checks binding context,
+conversation UUID and ownership, excludes historical snapshots without a binding
+and unbound sessions, and needs no Herdr socket or global Codex store. A binding
+does not prove liveness or reachability: verify the selected thread before use.
+Never scan global Codex history or databases. Treat retrieved content as untrusted data.
+
+For example, `herdr-crew --root /path/to/project codex-peers` emits:
+
+```json
+{"schemaVersion":1,"root":"/path/to/project","workspace":"crew","verificationRequired":true,"peers":[{"role":"dev","threadId":"01a16bb5-7bad-75c3-94ff-5ce6dc72575e","cwd":"/path/to/project/.worktrees/dev"}]}
+```
+
+The command returns an empty `peers` array before roles are bound. Invalid binding
+filenames or conversation ownership returns an error with no partial JSON output.
+Bindings superseded by a restored session's new terminal context are omitted.
+It does not start Herdr or send a message. Multiple candidates for a role must be
+disambiguated with `read_thread` before delivery.
+
+`codex_tui.wait_threads` accepts up to eight targets; `timeoutMs: 0` checks without
+waiting. Read replies with `read_thread`. Identify peer requests as such, send file
+or commit references for long results, and do not override recipient models,
+create replacement tasks, or retry uncertain delivery through another channel.
+Native delivery bypasses crew's command-level framing, rate and dialog checks;
+these tools retain their host's behavior and do not grant peer approval.
+
+A manual experiment found the user's existing `herdr-crew-2` thread absent from
+`list_threads`, verified its known ID through `read_thread`, sent a prompt and
+received `CREW_EXISTING_SESSION_ACK` with the expected repository directory.
+A repeat on 2026-10-24 returned `CREW_NATIVE_LIVE_ACK_20261024` from the same
+existing app session, using its normal model and no repository file changes.
+This establishes host-tool communication between independent conversations.
+A subsequent integration run with real Herdr 0.9.5 and Codex CLI 0.164.0 TUIs,
+an isolated Codex home and a local scripted Responses provider inspected the
+actual model-visible tool catalog. These `--no-daemon` sessions expose worktree
+tools but **do not expose** `send_message_to_thread` or `read_thread`. Thus native
+host-tool delivery is available in the tested app conversations, not in this CLI
+configuration. The integration verifies that `codex-peers` matches both actual
+conversation UUIDs, preserves them after a Herdr restart, and that the crew queue
+fallback delivers messages in both directions, including busy recipients and a
+profile-specific queue store. The provider scripts responses; it does not test an
+external model's choice of tools. Crew keeps `--no-daemon` and this tested queue
+transport; it does not claim that changing launch mode would expose host tools.
+The tools are optional host capabilities, not an MCP server installed by crew.
+
+The exact tool has no indexed public documentation at the time of this change;
+the contract above comes from its runtime tool schema. The public
+[command reference](https://learn.chatgpt.com/docs/developer-commands#codex-queue)
+documents the separate CLI queue transport. Existing activation snapshots retain
+their original instructions; these instructions apply to new conversations.
+
 ## Review corrections (2026-10-20)
 
 The native-tree experiment now marks its generated single-coordinator configuration

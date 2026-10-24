@@ -12,7 +12,7 @@ const MIN_QUEUE_VERSION: (u32, u32, u32) = (0, 163, 0);
 
 /// `queue --thread` also accepts names. Only pass a UUID so a malformed/stale ID cannot
 /// accidentally select an unrelated named conversation from the user's Codex home.
-fn uuid(id: &str) -> bool {
+pub(super) fn uuid(id: &str) -> bool {
     id.len() == 36
         && id.bytes().enumerate().all(|(i, b)| {
             if matches!(i, 8 | 13 | 18 | 23) {

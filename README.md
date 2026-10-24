@@ -162,6 +162,8 @@ profile = "development"
 
 Absent options inherit Codex settings. Options for inactive agents are preserved and validated but only the selected agent's options are used. Arbitrary `args` are unsupported. Crew starts the interactive CLI through native Herdr `agent start`, using `--no-daemon` to keep each pane's hook context local.
 
+Codex role instructions prefer `codex_tui.send_message_to_thread` for independent Codex peers when the host exposes it. The agent verifies the recipient's role, project and checkout with `read_thread`; `list_threads` is a recent list and can omit existing sessions. `herdr-crew --root <project> codex-peers` supplies JSON candidates (role, threadId and cwd) from current project bindings and verifies session ownership without contacting Herdr. These candidates still require verification with `read_thread`; a binding does not prove liveness or host reachability. Native prompts are limited to 1,000 UTF-8 bytes and omit model overrides unless requested. Replies can be read with `read_thread` and awaited with `wait_threads`. These optional host tools are not installed by crew, and the tested Codex CLI 0.164.0 `--no-daemon` sessions do not expose these messaging tools and use the crew command below. The crew command below remains available when the tools are absent or a recipient cannot be verified. Delivery with an uncertain outcome must not be retried through another channel.
+
 `herdr-crew send <role>` resolves a running Codex role to its bound conversation and queues the framed message with `codex queue --thread <UUID> --message ...` on Codex 0.163.0+. Native delivery works with `--no-daemon`, including while the recipient is working: Codex processes the queue after the current turn. The role name remains scoped to this crew; delivery does not depend on Codex's display names. The command uses the recipient's saved `CODEX_HOME` and profile, including a profile-specific `sqlite_home`, keeps the same repeat and dialog checks, and never retries a failed native delivery through terminal input. Sending still requires access to herdr and to the recipient's Codex home and queue store; this adds no sandbox permissions.
 
 Both the recipient's recorded launch version and the installed CLI must support native queues. Existing sessions with older or unversioned bindings keep terminal delivery until configured recovery through `codex-resume` records the newer version. Updating the executable alone does not change a running process.
@@ -273,6 +275,7 @@ herdr-crew [--root DIR] <command>
   codex-install                  install the crew hook; review it in Codex /hooks
   codex-uninstall                remove only the crew hook
   codex-list                     list saved role bindings and Codex session IDs
+  codex-peers                    JSON candidates from current Codex role bindings
   codex-resume <binding>          recover a saved Codex session in its role tab
   pi-install                     install the crew pi extension that keeps role prompts
   pi-uninstall                   remove only the crew pi extension

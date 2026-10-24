@@ -46,6 +46,7 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   codex-install                  install the crew hook; review it in Codex /hooks
   codex-uninstall                remove only the crew hook
   codex-list                     list saved role bindings and Codex session IDs
+  codex-peers                    JSON candidates from current Codex role bindings
   codex-resume <binding>          recover a saved Codex session in its role tab
   pi-install                     install the crew pi extension that keeps role prompts
   pi-uninstall                   remove only the crew pi extension
@@ -162,8 +163,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ],
         "up" => &["agent", "no_attach", "dry_run"],
         "add" | "close" | "send" | "check" | "startup" | "codex-install" | "codex-uninstall"
-        | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" | "pi-install"
-        | "pi-uninstall" => &[],
+        | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" | "codex-peers"
+        | "pi-install" | "pi-uninstall" => &[],
         "board" => &["file", "once", "interval"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
@@ -915,6 +916,10 @@ fn run() -> Result<(), Fail> {
         "close" => close(&c, &a.positional[0]),
         "send" => send(&c, &a.positional[0]),
         "board" => board(&c, &a),
+        "codex-peers" => {
+            println!("{}", codex::peers(&c).map_err(Fail::run)?);
+            Ok(())
+        }
         "check" => check(&c),
         _ => unreachable!("validated in parse_args"),
     }
