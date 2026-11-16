@@ -37,7 +37,10 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
   up [--agent claude|codex|pi] [--no-attach] [--dry-run]
-                                 start sessions; optionally save a new default agent
+     [--preset ...] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes]
+                                 start sessions; without a crew.toml, set one up first
+                                 (setup options as for init); --agent on an existing
+                                 crew saves a new default agent
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
   send <session>                 send the message on stdin to another crew session
@@ -161,7 +164,18 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "yes",
             "dry_run",
         ],
-        "up" => &["agent", "no_attach", "dry_run"],
+        // The setup options apply when `up` finds no configuration and sets one up first.
+        "up" => &[
+            "agent",
+            "no_attach",
+            "dry_run",
+            "preset",
+            "name",
+            "base",
+            "shared_checkout",
+            "no_ignore",
+            "yes",
+        ],
         "add" | "close" | "send" | "check" | "startup" | "codex-install" | "codex-uninstall"
         | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" | "codex-peers"
         | "pi-install" | "pi-uninstall" => &[],
@@ -210,7 +224,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             a.command
         )));
     }
-    if a.command == "init" {
+    if a.command == "init" || a.command == "up" {
         a.init.agent = a.agent;
     }
     Ok(a)
@@ -312,15 +326,182 @@ fn lock_project(c: &Config, herdr: &Herdr) -> Result<ProjectLock, Fail> {
     })
 }
 
-fn up(c: &Config, a: &Args) -> Result<(), Fail> {
+/// Whether `up` sets up a project that has no `.herdr/crew.toml` yet, and how.
+#[derive(Debug, PartialEq, Eq)]
+enum Setup {
+    /// The interactive wizard, on a terminal.
+    Wizard,
+    /// `--yes`: the defaults and the given options, without questions.
+    Defaults,
+    /// An action, or no terminal to ask in: explain how to set the crew up instead.
+    Refuse,
+}
+
+fn setup_mode(action: bool, yes: bool, terminal: bool) -> Setup {
+    if action {
+        Setup::Refuse
+    } else if yes {
+        Setup::Defaults
+    } else if terminal {
+        Setup::Wizard
+    } else {
+        Setup::Refuse
+    }
+}
+
+/// `up` in a project without a configuration: run the setup wizard, then bring the new crew up.
+fn up_new(root: &Path, a: &Args) -> Result<(), Fail> {
     let herdr = Herdr::from_env();
+    let terminal = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    match setup_mode(herdr.action, a.init.yes, terminal) {
+        Setup::Refuse if herdr.action => {
+            return Err(fail_notify(
+                &herdr,
+                format!(
+                    "no crew is configured in {} ({} is missing). Set one up from a terminal in \
+                     the project with `herdr-crew up`, which asks for a workflow and an agent and \
+                     then starts the sessions, or `herdr-crew up --yes` for the defaults; then \
+                     run this action again",
+                    root.display(),
+                    config::CONFIG_FILE
+                ),
+            ));
+        }
+        Setup::Refuse => {
+            return Err(Fail::run(format!(
+                "no crew is configured in {} ({} is missing) and there is no terminal to ask in. \
+                 Run `herdr-crew up` in a terminal to choose a workflow, or pass --yes to set up \
+                 the defaults (a solo crew; see --preset, --name, --agent and --base)",
+                root.display(),
+                config::CONFIG_FILE
+            )));
+        }
+        Setup::Wizard | Setup::Defaults => {}
+    }
+    if !init::setup(root, &a.init, a.dry_run, init::Purpose::Up)? {
+        return Ok(());
+    }
+    let c = load_config(root)?;
+    println!();
+    // The wizard already saved the selected agent; nothing to switch.
+    up(&c, a, None)
+}
+
+/// The agents of a crew, for the opening line: `claude`, `codex + claude`…
+fn agent_kinds(c: &Config) -> String {
+    let mut kinds: Vec<&str> = Vec::new();
+    for role in &c.roles {
+        if !kinds.contains(&role.kind.as_str()) {
+            kinds.push(role.kind.as_str());
+        }
+    }
+    kinds.join(" + ")
+}
+
+/// What a verdict means once `up` has run, for the closing summary.
+fn outcome(verdict: &plan::Verdict, board: bool) -> String {
+    match (verdict, board) {
+        (plan::Verdict::Create, false) => "started".into(),
+        (plan::Verdict::Create, true) => "board tab created".into(),
+        (plan::Verdict::Repair, _) => {
+            "board checked (viewer restarted if its shell was idle)".into()
+        }
+        (plan::Verdict::Occupied(why), _) => format!("already running ({why})"),
+        (plan::Verdict::NoAgent, _) => "tab without an agent: see the warning above".into(),
+        (plan::Verdict::LeaveAlone(why), _) => format!("left alone ({why})"),
+    }
+}
+
+/// The closing summary of `up`: one line per session and the board, then what to do next.
+fn summary(c: &Config, p: &plan::Plan, attaching: bool) -> String {
+    let width = p.verdicts.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    let mut out = format!("herdr-crew: crew \"{}\":\n", c.label);
+    for (name, verdict) in &p.verdicts {
+        out.push_str(&format!(
+            "  {name:<width$}  {}\n",
+            outcome(verdict, *name == c.board.tab)
+        ));
+    }
+    let started = p
+        .verdicts
+        .iter()
+        .any(|(n, v)| *v == plan::Verdict::Create && *n != c.board.tab);
+    if started {
+        out.push_str(
+            "herdr-crew: the new sessions wait for a task: give one in a role's tab. The first \
+             time an agent runs in a folder it may ask whether you trust it; answer in its tab.\n",
+        );
+    }
+    if !attaching {
+        let open = if herdr::inside_herdr() {
+            format!("switch to the workspace \"{}\"", c.label)
+        } else {
+            format!(
+                "run `herdr` from {} to open the workspace \"{}\"",
+                c.root.display(),
+                c.label
+            )
+        };
+        out.push_str(&format!("herdr-crew: to see them, {open}.\n"));
+    }
+    out
+}
+
+/// What to try when `up` fails, appended to its error.
+fn up_hints(c: &Config, action: bool) -> Vec<String> {
+    let mut hints = vec![
+        "herdr-crew: troubleshooting:".to_string(),
+        "  - `herdr-crew check` validates the configuration, herdr, git and the agents".into(),
+        "  - `herdr-crew up --dry-run` shows each role's verdict and the steps up would take"
+            .into(),
+        "  - up is safe to run again: it only creates what is still missing".into(),
+    ];
+    if c.roles.iter().any(|r| r.kind == agent::Kind::Codex) {
+        hints.push(
+            "  - Codex roles need `herdr-crew codex-install` and the crew hook trusted in Codex \
+             /hooks"
+                .into(),
+        );
+    }
+    if c.roles.iter().any(|r| r.kind == agent::Kind::Pi) {
+        hints.push(
+            "  - pi roles need `herdr-crew pi-install` (again after updating herdr-crew)".into(),
+        );
+    }
+    if c.worktrees.is_some() {
+        hints.push(
+            "  - new worktrees start from worktrees.base: push what the crew needs and check \
+             that the remote is reachable"
+                .into(),
+        );
+    }
+    if action {
+        hints.push(
+            "  - this action's full output is in `herdr plugin log list --plugin herdr-crew`"
+                .into(),
+        );
+    }
+    hints
+}
+
+fn up(c: &Config, a: &Args, select: Option<agent::Kind>) -> Result<(), Fail> {
+    let herdr = Herdr::from_env();
+    up_inner(c, a, select, &herdr).map_err(|mut f| {
+        // A usage or configuration error already says what to change.
+        if f.code == 1 {
+            f.lines.extend(up_hints(c, herdr.action));
+        }
+        f
+    })
+}
+
+fn up_inner(c: &Config, a: &Args, select: Option<agent::Kind>, herdr: &Herdr) -> Result<(), Fail> {
     let lock = if a.dry_run {
         None
     } else {
-        Some(lock_project(c, &herdr)?)
+        Some(lock_project(c, herdr)?)
     };
-    let selection = a
-        .agent
+    let selection = select
         .map(|kind| {
             let path = c.root.join(config::CONFIG_FILE);
             files::validate(&c.root, &path, files::Kind::File).map_err(Fail::run)?;
@@ -336,23 +517,34 @@ fn up(c: &Config, a: &Args) -> Result<(), Fail> {
     let c = selection.as_ref().map_or(c, |(selected, _)| selected);
     let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
     let mut out = Output;
+    if !a.dry_run {
+        let roles = c.roles.len();
+        out.step(&format!(
+            "bringing up \"{}\" from {}: {roles} role{} ({}) and the board tab \"{}\"",
+            c.label,
+            c.root.display(),
+            if roles == 1 { "" } else { "s" },
+            agent_kinds(c),
+            c.board.tab
+        ));
+    }
     let workspaces = if a.dry_run {
         herdr.call(&["workspace", "list"]).ok()
     } else {
         Some(
             herdr
                 .ensure_server(&c.root, &mut out)
-                .map_err(|e| fail_notify(&herdr, e))?,
+                .map_err(|e| fail_notify(herdr, e))?,
         )
     };
     let state = match &workspaces {
-        Some(w) => herdr.state(w, c).map_err(|e| fail_notify(&herdr, e))?,
+        Some(w) => herdr.state(w, c).map_err(|e| fail_notify(herdr, e))?,
         None => {
             println!("(no herdr server: the plan assumes an empty one)");
             HerdrState::default()
         }
     };
-    let e = env(c, &state, Some(&herdr), worktrees);
+    let e = env(c, &state, Some(herdr), worktrees);
     let mut p = plan::plan(c, &state, &e);
     if let Some((_, Some(content))) = &selection {
         p.steps.insert(
@@ -368,9 +560,23 @@ fn up(c: &Config, a: &Args) -> Result<(), Fail> {
         print!("{}", p.dry_run());
         return Ok(());
     }
-    let ws = herdr::execute(&herdr, c, &state, &p, &mut out).map_err(|e| fail_notify(&herdr, e))?;
+    let ws = herdr::execute(herdr, c, &state, &p, &mut out).map_err(|e| fail_notify(herdr, e))?;
     if p.actions().next().is_none() {
-        out.step("nothing to do");
+        out.step("everything is already up; nothing to do");
+    }
+    let attaching = ws.is_some() && herdr.will_attach(!a.no_attach);
+    print!("{}", summary(c, &p, attaching));
+    let started = p
+        .verdicts
+        .iter()
+        .filter(|(n, v)| *v == plan::Verdict::Create && *n != c.board.tab)
+        .count();
+    if started > 0 {
+        herdr.notify(&format!(
+            "crew \"{}\": started {started} session{}",
+            c.label,
+            if started == 1 { "" } else { "s" }
+        ));
     }
     // Attaching lasts until the user detaches; other commands may change the project meanwhile.
     drop(lock);
@@ -909,9 +1115,29 @@ fn run() -> Result<(), Fail> {
     if a.command == "init" {
         return init::run(&root, &a.init, a.dry_run);
     }
+    if a.command == "up" {
+        let path = root.join(config::CONFIG_FILE);
+        if matches!(std::fs::symlink_metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        {
+            return up_new(&root, &a);
+        }
+        let i = &a.init;
+        if i.preset.is_some()
+            || i.name.is_some()
+            || i.base.is_some()
+            || i.shared_checkout
+            || i.no_ignore
+        {
+            return Err(Fail::usage(format!(
+                "--preset, --name, --base, --shared-checkout and --no-ignore only apply when up \
+                 sets up a new crew; {} already exists, so edit it instead",
+                path.display()
+            )));
+        }
+    }
     let c = load_config(&root)?;
     match a.command.as_str() {
-        "up" => up(&c, &a),
+        "up" => up(&c, &a, a.agent),
         "add" => add(&c, &a.positional[0]),
         "close" => close(&c, &a.positional[0]),
         "send" => send(&c, &a.positional[0]),
@@ -972,6 +1198,68 @@ mod tests {
         }
         let a = args("board --file /f --once --interval 2").unwrap();
         assert!(a.once && a.interval == Some(Duration::from_secs(2)));
+        // Without a configuration, up sets one up first and takes init's options for it.
+        let up = args("up --preset review --name acme --agent codex --yes --no-attach").unwrap();
+        assert_eq!(up.init.preset, Some(init::Preset::Review));
+        assert_eq!(up.init.agent, Some(agent::Kind::Codex));
+        assert!(up.init.yes && up.no_attach);
+    }
+
+    #[test]
+    fn up_sets_up_only_where_someone_can_answer() {
+        assert_eq!(setup_mode(false, false, true), Setup::Wizard);
+        assert_eq!(setup_mode(false, true, false), Setup::Defaults);
+        assert_eq!(setup_mode(false, true, true), Setup::Defaults);
+        // A script without --yes would hang on the questions, and an action has no terminal.
+        assert_eq!(setup_mode(false, false, false), Setup::Refuse);
+        assert_eq!(setup_mode(true, true, true), Setup::Refuse);
+    }
+
+    #[test]
+    fn up_summarizes_what_happened_and_how_to_see_it() {
+        let root = Path::new("/repo");
+        let c = Config::parse(
+            "version = 1\n[workspace]\nlabel = \"acme\"\n[board]\ntab = \"acme-status\"\nwriter = \"acme-lead\"\n\
+             [[roles]]\nname = \"acme-lead\"\nprompt = \"Lead.\"\n[[roles]]\nname = \"acme-dev\"\nprompt = \"Dev.\"\nkind = \"codex\"\n",
+            root,
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(agent_kinds(&c), "claude + codex");
+        let p = plan::Plan {
+            verdicts: vec![
+                ("acme-lead".into(), plan::Verdict::Create),
+                (
+                    "acme-dev".into(),
+                    plan::Verdict::Occupied("agent in w1:p1".into()),
+                ),
+                ("acme-status".into(), plan::Verdict::Create),
+            ],
+            steps: Vec::new(),
+        };
+        let text = summary(&c, &p, false);
+        assert!(
+            text.starts_with("herdr-crew: crew \"acme\":\n  acme-lead    started\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("acme-dev     already running (agent in w1:p1)"),
+            "{text}"
+        );
+        assert!(text.contains("acme-status  board tab created"), "{text}");
+        assert!(text.contains("wait for a task"), "{text}");
+        assert!(text.contains("to see them"), "{text}");
+        let attached = summary(&c, &p, true);
+        assert!(!attached.contains("to see them"), "{attached}");
+        let hints = up_hints(&c, true).join("\n");
+        for hint in [
+            "herdr-crew check",
+            "--dry-run",
+            "codex-install",
+            "plugin log list",
+        ] {
+            assert!(hints.contains(hint), "{hint}: {hints}");
+        }
+        assert!(!hints.contains("pi-install"), "{hints}");
     }
 
     #[test]
@@ -1015,7 +1303,7 @@ mod tests {
             "startup --dry-run",
             "init --preset unknown",
             "init --base",
-            "up --preset solo",
+            "up --preset unknown",
             "check --name acme",
             "board --yes",
         ] {

@@ -68,9 +68,15 @@ Launcher removal also works after the plugin has been uninstalled. Use `--bin-di
 
 ## Quick start
 
+The shortest path is to run `herdr-crew up` inside your Git repository. If the project has no `.herdr/crew.toml` yet, `up` runs the [setup wizard](#configure-a-crew) first: choose a workflow and an agent, review the preview, and once it is saved `up` creates the workspace and starts the sessions. `up --yes` takes the defaults (a solo crew) without asking, and accepts `init`'s options (`--preset`, `--name`, `--agent`, `--base`, `--shared-checkout`, `--no-ignore`). Without a terminal to ask in, and as the `herdr-crew.up` action, `up` does not guess: it explains how to set the crew up and changes nothing. Codex and pi crews still need their one-time setup (`codex-install`, `pi-install`) before their roles can start; `up` says so if it is missing.
+
+To review the configuration before anything starts:
+
 1. Run `herdr-crew init` inside your Git repository to choose a workflow and create `.herdr/crew.toml`. Review the generated prompts. You can also write [the configuration](#herdrcrewtoml) yourself.
 2. Run `herdr-crew check` from the repository, or `herdr-crew up --dry-run` to see the plan.
 3. Start herdr from the repository with no herdr server running: `cd repo && herdr`. The startup hook creates the workspace, the role tabs and the board when herdr opens its initial workspace there.
+
+`up` reports what it is bringing up, each step it takes, and a closing summary with each session's outcome (started, already running, left alone and why) and how to open the workspace. When it fails, it ends with troubleshooting steps for the crew at hand: `check`, `up --dry-run`, the Codex or pi setup commands, the worktree base and, for the action, the plugin log. `up` is safe to run again after fixing the cause.
 
 If a herdr server is already running, `herdr` only attaches and its startup hook does not run. Focus this project's workspace and invoke the `herdr-crew.up` action (or run `herdr plugin action invoke herdr-crew.up`). If the project has no workspace yet, run `herdr-crew up --no-attach` from its directory. This also covers a restored server that ignored the project's launch directory. Without the public launcher, find `plugin_root` with `herdr plugin list --plugin herdr-crew --json` and run `<plugin_root>/bin/herdr-crew` directly. A live agent in an unrelated tab such as `1` will prevent new roles from starting; rename that tab to its role if it belongs to the crew, or close it after saving its work.
 
@@ -266,7 +272,10 @@ herdr-crew [--root DIR] <command>
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
   up [--agent claude|codex|pi] [--no-attach] [--dry-run]
-                                 start sessions; optionally save a new default agent
+     [--preset ...] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes]
+                                 start sessions; without a crew.toml, set one up first
+                                 (setup options as for init); --agent on an existing
+                                 crew saves a new default agent
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
   send <session>                 send the message on stdin to another crew session
@@ -288,6 +297,7 @@ herdr-crew [--root DIR] <command>
 - **Workspace ownership.** A matching workspace label must be unique. Its first pane and every crew-labelled pane must resolve to this project's main Git checkout, including linked worktrees. If that cannot be verified, the command stops before changing tabs or files. Rename a colliding workspace or restore the pane's project directory before retrying. Other tabs are left alone.
 - **The `herdr-crew.up` action.** It works on the workspace you have focused in herdr.
 - **Starting the server.** From a plain terminal, `up` starts a herdr server if none is running and then opens herdr. Pass `--no-attach` to skip opening it.
+- **`up` without a configuration** runs the setup wizard on a terminal, or the defaults with `--yes`, then starts the new crew. Setup options with an existing `crew.toml` are a usage error (exit 2): edit the file instead. `up --dry-run` without a configuration previews the setup and writes nothing.
 - **`--dry-run`** prints each role's verdict and the steps `up` would take, without doing anything.
 - **`send <session>`** reads a message on stdin and frames it as coming from the calling session (from `HERDR_PANE_ID`). It queues native Codex messages when the CLI and live crew binding support them, and otherwise types into the recipient's terminal. It delivers to idle and working agents. It refuses an agent waiting at a dialog (exit 76), a repeated or bursty message (exit 75), and reports an unreachable herdr, typically a sandbox, with exit 77. Success means queued or typed, not that the recipient has acted on the request. It is a convenience, not a security boundary: see [messaging](docs/messaging.md).
 - **One command at a time.** `up`, `add` and `close` on the same project wait for each other (up to two minutes) instead of racing; the startup hook leaves a project another command is changing to that command. The lock is released automatically, even after a crash.
