@@ -10,6 +10,8 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-16
+
 ### Changed
 
 - `up` in a project without `.herdr/crew.toml` runs the setup wizard and then starts the
@@ -19,6 +21,19 @@ change between minor versions.
 - `up` opens with a line naming the crew it brings up and closes with each session's
   outcome and how to open the workspace. When it fails, it lists troubleshooting steps
   for the crew (`check`, `up --dry-run`, Codex or pi setup, worktree base, plugin log).
+
+### Added
+
+- Codex role instructions prefer the host's native thread messaging
+  (`send_message_to_thread`) for Codex peers when it is available, after verifying the
+  recipient with `read_thread`, and keep `herdr-crew send` as the fallback.
+- `codex-peers` prints JSON candidates (role, thread ID and working directory) from the
+  project's current Codex role bindings, for that verification.
+
+### Security
+
+- Update `rustix` to 1.1.6 for RUSTSEC-2026-0486 (unsound xattr functions with a
+  zero-length buffer). herdr-crew does not call the affected functions.
 
 ## [0.4.2] - 2026-10-20
 
@@ -186,7 +201,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/rarce/herdr-crew/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/rarce/herdr-crew/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/rarce/herdr-crew/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/rarce/herdr-crew/compare/v0.3.0...v0.4.0
