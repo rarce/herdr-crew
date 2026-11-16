@@ -30,6 +30,11 @@ change between minor versions.
 - `codex-peers` prints JSON candidates (role, thread ID and working directory) from the
   project's current Codex role bindings, for that verification.
 
+### Security
+
+- Update `rustix` to 1.1.6 for RUSTSEC-2026-0486 (unsound xattr functions with a
+  zero-length buffer). herdr-crew does not call the affected functions.
+
 ## [0.4.2] - 2026-10-20
 
 ### Fixed
