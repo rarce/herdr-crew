@@ -655,20 +655,47 @@ fn same_path(line: &str, rule: &str) -> bool {
     normalize(line) == normalize(rule)
 }
 
+/// Who runs the wizard: `init` only creates the configuration; `up` creates it and then starts
+/// the sessions, so its intro and closing lines say so.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    Init,
+    Up,
+}
+
+/// The setup wizard. Returns whether it created `.herdr/crew.toml` (not on a dry run or a
+/// cancellation).
 fn wizard(
     root: &Path,
     options: &Options,
     dry_run: bool,
+    purpose: Purpose,
     input: &mut impl BufRead,
     output: &mut impl Write,
-) -> Result<(), Fail> {
+) -> Result<bool, Fail> {
     ensure_new_config(root)?;
-    writeln!(
-        output,
-        "Crew setup for {}\nCreates configuration only; assign tasks after starting your sessions.",
-        root.display()
-    )
-    .map_err(io_fail)?;
+    let intro = match purpose {
+        Purpose::Init => format!(
+            "Crew setup for {}\nCreates configuration only; assign tasks after starting your sessions.",
+            root.display()
+        ),
+        Purpose::Up if options.yes => format!(
+            "No crew is configured in {} yet ({} is missing).\n\
+             Setting one up with the defaults and the given options, then starting its sessions.",
+            root.display(),
+            config::CONFIG_FILE
+        ),
+        Purpose::Up => format!(
+            "No crew is configured in {} yet ({} is missing).\n\
+             Let's create one: choose a workflow and an agent, review the preview, and herdr-crew \
+             starts the sessions right after saving it.\n\
+             (Ctrl-C or end of input cancels without changing anything; `herdr-crew init` only \
+             creates the configuration.)",
+            root.display(),
+            config::CONFIG_FILE
+        ),
+    };
+    writeln!(output, "{intro}").map_err(io_fail)?;
     let selection = choose(root, options, input, output)?;
     let text = render(&selection, root)?;
     let IgnoreCheck { addition, warning } =
@@ -698,7 +725,14 @@ fn wizard(
     }
     if dry_run {
         writeln!(output, "Dry run: no files created or changed.").map_err(io_fail)?;
-        return Ok(());
+        if purpose == Purpose::Up {
+            writeln!(
+                output,
+                "Without --dry-run, up would save this configuration and then start the sessions above."
+            )
+            .map_err(io_fail)?;
+        }
+        return Ok(false);
     }
     let question = if addition.is_empty() {
         "Create .herdr/crew.toml?"
@@ -707,7 +741,7 @@ fn wizard(
     };
     if !options.yes && !yes_no(input, output, question, true)? {
         writeln!(output, "Cancelled: no files created or changed.").map_err(io_fail)?;
-        return Ok(());
+        return Ok(false);
     }
     ensure_new_config(root)?;
     fs::create_dir_all(root.join(".herdr")).map_err(io_fail)?;
@@ -746,21 +780,44 @@ fn wizard(
             )));
         }
     }
-    writeln!(output, "Created {}\nNext: review the prompts, run herdr-crew check, then herdr-crew up --dry-run.\nStart sessions with herdr or herdr-crew up --no-attach when ready.", path.display()).map_err(io_fail)?;
-    if selection.agent == crate::agent::Kind::Codex {
-        writeln!(output, "Codex setup: run herdr-crew codex-install, then review/trust the crew hook in Codex /hooks before launching roles.").map_err(io_fail)?;
+    match purpose {
+        Purpose::Init => {
+            writeln!(output, "Created {}\nNext: review the prompts, run herdr-crew check, then herdr-crew up --dry-run.\nStart sessions with herdr or herdr-crew up --no-attach when ready.", path.display()).map_err(io_fail)?;
+            if selection.agent == crate::agent::Kind::Codex {
+                writeln!(output, "Codex setup: run herdr-crew codex-install, then review/trust the crew hook in Codex /hooks before launching roles.").map_err(io_fail)?;
+            }
+            if selection.agent == crate::agent::Kind::Pi {
+                writeln!(output, "pi setup: run herdr-crew pi-install once; its extension keeps each role's prompt across herdr restores.").map_err(io_fail)?;
+            }
+        }
+        Purpose::Up => {
+            writeln!(
+                output,
+                "Created {}; edit it any time and run herdr-crew up again.",
+                path.display()
+            )
+            .map_err(io_fail)?;
+        }
     }
-    if selection.agent == crate::agent::Kind::Pi {
-        writeln!(output, "pi setup: run herdr-crew pi-install once; its extension keeps each role's prompt across herdr restores.").map_err(io_fail)?;
-    }
-    Ok(())
+    Ok(true)
 }
 
 pub fn run(root: &Path, options: &Options, dry_run: bool) -> Result<(), Fail> {
+    setup(root, options, dry_run, Purpose::Init).map(|_| ())
+}
+
+/// The wizard on the terminal. Returns whether it created the configuration.
+pub fn setup(
+    root: &Path,
+    options: &Options,
+    dry_run: bool,
+    purpose: Purpose,
+) -> Result<bool, Fail> {
     wizard(
         root,
         options,
         dry_run,
+        purpose,
         &mut io::stdin().lock(),
         &mut io::stdout().lock(),
     )

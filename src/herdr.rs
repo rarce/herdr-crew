@@ -196,6 +196,16 @@ impl Herdr {
         let _ = self.call(&["notification", "show", "herdr-crew", "--body", message]);
     }
 
+    /// Whether `focus_and_attach` opens the herdr UI: only from a plain terminal outside herdr,
+    /// not in an action, and not with `--no-attach`.
+    pub fn will_attach(&self, attach: bool) -> bool {
+        attach
+            && !self.action
+            && !inside_herdr()
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+    }
+
     /// `workspace focus` and, from a plain terminal, opens the herdr UI (step 10).
     pub fn focus_and_attach(
         &self,
@@ -204,13 +214,7 @@ impl Herdr {
         attach: bool,
     ) -> Result<(), String> {
         let _ = self.call(&["workspace", "focus", workspace]);
-        let inside = std::env::var("HERDR_ENV").is_ok_and(|v| v == "1");
-        if inside
-            || !attach
-            || self.action
-            || !std::io::stdin().is_terminal()
-            || !std::io::stdout().is_terminal()
-        {
+        if !self.will_attach(attach) {
             return Ok(());
         }
         let mut cmd = Command::new(&self.bin);
@@ -227,6 +231,11 @@ impl Herdr {
                 .map_err(|e| format!("could not open herdr: {e}"))
         }
     }
+}
+
+/// Whether this process runs in a herdr pane (`HERDR_ENV=1`).
+pub fn inside_herdr() -> bool {
+    std::env::var("HERDR_ENV").is_ok_and(|v| v == "1")
 }
 
 /// The first pane anchors the workspace's project, just as in startup discovery. Known crew

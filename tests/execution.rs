@@ -451,6 +451,82 @@ fn up_agent_dry_run_and_failed_preflight_leave_configuration_unchanged() {
 }
 
 #[test]
+fn up_without_configuration_sets_up_the_crew_and_starts_it() {
+    let f = Fixture::new();
+    fs::remove_file(f.repo.join(".herdr/crew.toml")).unwrap();
+    // No terminal to ask in and no --yes: explain, change nothing.
+    let refused = f.crew(&["up", "--no-attach"]);
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("no crew is configured"), "{stderr}");
+    assert!(stderr.contains("--yes"), "{stderr}");
+    assert!(!f.repo.join(".herdr/crew.toml").exists());
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    // A dry run previews the setup and starts nothing.
+    let preview = success(f.crew(&["up", "--yes", "--name", "demo", "--dry-run"]));
+    assert!(preview.contains("Dry run: no files created"), "{preview}");
+    assert!(!f.repo.join(".herdr/crew.toml").exists());
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    // --yes: the defaults, saved, then brought up in the same command.
+    let out = success(f.crew(&["up", "--yes", "--name", "demo", "--no-attach"]));
+    assert!(f.read(".herdr/crew.toml").contains("label = \"demo\""));
+    assert!(out.contains("Created "), "{out}");
+    assert!(out.contains("herdr-crew: bringing up \"demo\""), "{out}");
+    assert!(out.contains("started"), "{out}");
+    assert!(out.contains("to see them"), "{out}");
+    assert_eq!(f.count(&["workspace", "create"]), 1);
+    assert!(f.agents().iter().any(|name| name.starts_with("demo-")));
+    // The second run finds the configuration and only reports.
+    let again = success(f.crew(&["up", "--yes", "--no-attach"]));
+    assert!(again.contains("already running"), "{again}");
+    assert_eq!(f.count(&["workspace", "create"]), 1);
+    // Setup options with an existing configuration are a usage error.
+    let late = f.crew(&["up", "--preset", "review", "--no-attach"]);
+    assert_eq!(late.status.code(), Some(2), "{late:?}");
+    assert!(String::from_utf8_lossy(&late.stderr).contains("edit it instead"));
+}
+
+#[test]
+fn up_without_configuration_as_an_action_explains_where_to_set_it_up() {
+    let f = Fixture::new();
+    fs::remove_file(f.repo.join(".herdr/crew.toml")).unwrap();
+    let context = json!({ "workspace_cwd": f.repo }).to_string();
+    let out = f
+        .command(CREW)
+        .env("HERDR_PLUGIN_ID", "herdr-crew")
+        .env("HERDR_PLUGIN_CONTEXT_JSON", context)
+        .args(["up", "--yes"])
+        .output()
+        .unwrap();
+    failure(out, "from a terminal in the project with `herdr-crew up`");
+    assert!(!f.repo.join(".herdr/crew.toml").exists());
+    assert_eq!(f.count(&["notification", "show"]), 1);
+}
+
+#[test]
+fn failed_up_lists_troubleshooting_steps() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(false);
+    let out = f
+        .command(CREW)
+        .env("CREW_TEST_TRUST", "untrusted")
+        .args(["up", "--no-attach"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    failure(out, "/hooks");
+    for hint in [
+        "troubleshooting:",
+        "herdr-crew check",
+        "up --dry-run",
+        "codex-install",
+    ] {
+        assert!(stderr.contains(hint), "{hint}: {stderr}");
+    }
+}
+
+#[test]
 fn mixed_agents_and_extras_use_their_effective_kind_and_settings() {
     let f = Fixture::new();
     f.codex_tools();

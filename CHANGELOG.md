@@ -10,6 +10,16 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Changed
+
+- `up` in a project without `.herdr/crew.toml` runs the setup wizard and then starts the
+  new crew, instead of failing. `up --yes` takes the defaults and accepts `init`'s setup
+  options. Without a terminal, and as the `herdr-crew.up` action, it changes nothing and
+  explains how to set the crew up. `init` still only creates the configuration.
+- `up` opens with a line naming the crew it brings up and closes with each session's
+  outcome and how to open the workspace. When it fails, it lists troubleshooting steps
+  for the crew (`check`, `up --dry-run`, Codex or pi setup, worktree base, plugin log).
+
 ## [0.4.2] - 2026-10-20
 
 ### Fixed
