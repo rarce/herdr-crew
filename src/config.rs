@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use toml::de::{DeTable, DeValue};
 
-use crate::agent::{AgentOptions, CODEX_KEYS, CodexOptions, Kind, PI_KEYS, PiOptions};
+use crate::agent::{
+    AgentOptions, CLAUDE_KEYS, CODEX_KEYS, ClaudeOptions, CodexOptions, Kind, PI_KEYS, PiOptions,
+};
 use crate::{files, prompt};
 
 pub const CONFIG_FILE: &str = ".herdr/crew.toml";
@@ -40,6 +42,7 @@ pub struct Config {
     /// Prompt topology for the separate single-coordinator experiment; no worker lifecycle.
     pub experimental_codex_tree: bool,
     pub kind: Kind,
+    pub claude: ClaudeOptions,
     pub codex: CodexOptions,
     pub pi: PiOptions,
     pub label: String,
@@ -71,6 +74,7 @@ pub struct Worktrees {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Role {
     pub kind: Kind,
+    pub claude: ClaudeOptions,
     pub codex: CodexOptions,
     pub pi: PiOptions,
     pub name: String,
@@ -85,7 +89,7 @@ impl Role {
     /// The agent this role starts, with only its kind's options.
     pub fn agent(&self) -> AgentOptions {
         match self.kind {
-            Kind::Claude => AgentOptions::Claude,
+            Kind::Claude => AgentOptions::Claude(self.claude.clone()),
             Kind::Codex => AgentOptions::Codex(self.codex.clone()),
             Kind::Pi => AgentOptions::Pi(self.pi.clone()),
         }
@@ -99,6 +103,8 @@ struct RawConfig {
     experimental_codex_tree: bool,
     #[serde(default)]
     kind: Kind,
+    #[serde(default)]
+    claude: ClaudeOptions,
     #[serde(default)]
     codex: CodexOptions,
     #[serde(default)]
@@ -138,6 +144,7 @@ struct RawWorktrees {
 #[serde(deny_unknown_fields)]
 struct RawRole {
     kind: Option<Kind>,
+    claude: Option<ClaudeOptions>,
     codex: Option<CodexOptions>,
     pi: Option<PiOptions>,
     name: String,
@@ -154,6 +161,7 @@ const ROOT_KEYS: &[&str] = &[
     "experimental_codex_tree",
     "version",
     "kind",
+    "claude",
     "codex",
     "pi",
     "workspace",
@@ -164,6 +172,7 @@ const ROOT_KEYS: &[&str] = &[
     "roles",
 ];
 const TABLE_KEYS: &[(&str, &[&str])] = &[
+    ("claude", CLAUDE_KEYS),
     ("codex", CODEX_KEYS),
     ("pi", PI_KEYS),
     ("workspace", &["label"]),
@@ -177,6 +186,7 @@ const ROLE_KEYS: &[&str] = &[
     "extra",
     "start_message",
     "kind",
+    "claude",
     "codex",
     "pi",
 ];
@@ -260,6 +270,9 @@ impl Config {
         {
             err("experimental_codex_tree requires exactly one Codex coordinator without worktree or extra".into());
         }
+        for problem in raw.claude.problems() {
+            err(format!("claude.{problem}"));
+        }
         for problem in raw.codex.problems() {
             err(format!("codex.{problem}"));
         }
@@ -267,6 +280,11 @@ impl Config {
             err(format!("pi.{problem}"));
         }
         for (i, r) in raw.roles.iter().enumerate() {
+            if let Some(options) = &r.claude {
+                for problem in options.problems() {
+                    err(format!("roles[{i}].claude.{problem}"));
+                }
+            }
             if let Some(options) = &r.codex {
                 for problem in options.problems() {
                     err(format!("roles[{i}].codex.{problem}"));
@@ -387,6 +405,7 @@ impl Config {
             root: root.to_path_buf(),
             experimental_codex_tree: raw.experimental_codex_tree,
             kind: raw.kind,
+            claude: raw.claude.clone(),
             codex: raw.codex.clone(),
             pi: raw.pi.clone(),
             label: raw.workspace.label,
@@ -406,6 +425,7 @@ impl Config {
                 .into_iter()
                 .map(|r| Role {
                     kind: r.kind.unwrap_or(raw.kind),
+                    claude: r.claude.unwrap_or_default().inherit(&raw.claude),
                     codex: r.codex.unwrap_or_default().inherit(&raw.codex),
                     pi: r.pi.unwrap_or_default().inherit(&raw.pi),
                     name: r.name,
@@ -514,7 +534,11 @@ fn unknown_keys(root: &DeTable<'_>) -> Vec<(Range<usize>, String)> {
             for (i, item) in items.iter().enumerate() {
                 if let DeValue::Table(t) = item.get_ref() {
                     check(t, ROLE_KEYS, &format!("roles[{i}]"));
-                    for (agent, known) in [("codex", CODEX_KEYS), ("pi", PI_KEYS)] {
+                    for (agent, known) in [
+                        ("claude", CLAUDE_KEYS),
+                        ("codex", CODEX_KEYS),
+                        ("pi", PI_KEYS),
+                    ] {
                         if let Some(value) = t.get(agent)
                             && let DeValue::Table(options) = value.get_ref()
                         {
@@ -754,13 +778,45 @@ prompt = '''You are {{NAME}}.'''
     }
 
     #[test]
+    fn claude_options_have_defaults_role_overrides_and_positions() {
+        let text = MIN.replace(
+            "version = 1",
+            "version = 1\n[claude]\nmodel = \"opus\"\neffort = \"high\"",
+        );
+        let config = Config::parse(
+            &format!("{text}[roles.claude]\nmodel = \"sonnet\"\n"),
+            Path::new("/r/p"),
+        )
+        .unwrap();
+        let AgentOptions::Claude(options) = config.roles[0].agent() else {
+            panic!("a Claude role");
+        };
+        assert_eq!(options.model.as_deref(), Some("sonnet"));
+        assert_eq!(options.effort.as_deref(), Some("high"));
+        let e = errors(&format!("{text}[roles.claude]\neffrot = \"low\"\n"));
+        assert_eq!(e.len(), 1);
+        assert!(
+            e[0].contains("unknown key \"effrot\" in roles[0].claude"),
+            "{e:?}"
+        );
+        let e = errors(&format!("{MIN}[roles.claude]\neffort = \"ultra\"\n"));
+        assert!(
+            e[0].contains("roles[0].claude.effort: expected one of"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
     fn inactive_codex_options_are_preserved_and_unknown_keys_have_positions() {
         let config = Config::parse(
             &format!("{MIN}[roles.codex]\nmodel = \"custom\"\n"),
             Path::new("/r/p"),
         )
         .unwrap();
-        assert_eq!(config.roles[0].agent(), AgentOptions::Claude);
+        assert_eq!(
+            config.roles[0].agent(),
+            AgentOptions::Claude(Default::default())
+        );
         assert_eq!(config.roles[0].codex.model.as_deref(), Some("custom"));
         let errors = errors(&format!(
             "{MIN}kind = \"codex\"\n[roles.codex]\nmodle = \"custom\"\n"
@@ -1035,7 +1091,10 @@ prompt = '''You are {{NAME}}.'''
             Path::new("/r/p"),
         )
         .unwrap();
-        assert_eq!(inactive.roles[0].agent(), AgentOptions::Claude);
+        assert_eq!(
+            inactive.roles[0].agent(),
+            AgentOptions::Claude(Default::default())
+        );
         assert_eq!(inactive.roles[0].pi.model.as_deref(), Some("sonnet"));
         let e = errors(&format!(
             "{MIN}kind = \"pi\"\n[roles.pi]\nsandbox = \"x\"\n"

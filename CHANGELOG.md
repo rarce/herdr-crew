@@ -10,6 +10,25 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Added
+
+- Claude roles accept `model`, `effort` and `fallback_model` in `[claude]` and
+  `[roles.claude]`, passed to Claude Code as `--model`, `--effort` and `--fallback-model`.
+- Model profiles (`init --models inherit|economy|balanced|quality`, default `balanced`) give
+  each role a model and effort by its duty: strongest judgment for lead and review, efficient
+  developers, cheaper researchers. See `docs/models.md`.
+- `init` opens a full-screen setup wizard in a terminal, with live previews of each role's
+  model and the generated configuration; `--no-tui` keeps the line-by-line questions.
+- `herdr-crew config`: a terminal editor for the agent, model and effort of the defaults and
+  of each role. Edits are validated before they apply, and saving keeps comments and
+  formatting.
+- Codex `reasoning_effort` accepts `ultra`.
+
+### Changed
+
+- `init` now writes per-role model settings (`balanced` profile) unless `--models inherit`
+  is given. The line-by-line wizard asks for the profile after the agent.
+
 ## [0.5.0] - 2026-11-16
 
 ### Changed

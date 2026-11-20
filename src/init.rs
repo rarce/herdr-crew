@@ -6,9 +6,11 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::agent::{AgentOptions, ClaudeOptions, CodexOptions, PiOptions};
+use crate::models::{Duty, Profile};
 use crate::{Fail, config, git};
 
-const MAX_PREFIX: usize = 21; // Leave room for "-research-a" within a 32-byte agent name.
+pub(crate) const MAX_PREFIX: usize = 21; // Leave room for "-research-a" within a 32-byte agent name.
 /// Each generated-file rule with the paths it must ignore, to ask Git whether the repository
 /// already covers them with rules of its own. A directory rule needs both the directory, so
 /// that a rule for some of its files such as `*.txt` is not enough, and a file of the shape
@@ -38,7 +40,7 @@ pub enum Preset {
 }
 
 impl Preset {
-    const ALL: [Self; 4] = [Self::Solo, Self::Review, Self::Parallel, Self::Research];
+    pub(crate) const ALL: [Self; 4] = [Self::Solo, Self::Review, Self::Parallel, Self::Research];
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -50,7 +52,7 @@ impl Preset {
         }
     }
 
-    fn id(self) -> &'static str {
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Solo => "solo",
             Self::Review => "review",
@@ -59,7 +61,7 @@ impl Preset {
         }
     }
 
-    fn description(self) -> &'static str {
+    pub(crate) fn description(self) -> &'static str {
         match self {
             Self::Solo => {
                 "Solo developer (1 session): focused fixes and sequential work; start here if unsure"
@@ -76,24 +78,24 @@ impl Preset {
         }
     }
 
-    fn roles(self) -> &'static [(&'static str, Kind)] {
+    pub(crate) fn roles(self) -> &'static [(&'static str, Duty)] {
         match self {
-            Self::Solo => &[("dev", Kind::Solo)],
+            Self::Solo => &[("dev", Duty::Solo)],
             Self::Review => &[
-                ("lead", Kind::Lead),
-                ("dev", Kind::Developer),
-                ("reviewer", Kind::Reviewer),
+                ("lead", Duty::Lead),
+                ("dev", Duty::Developer),
+                ("reviewer", Duty::Reviewer),
             ],
             Self::Parallel => &[
-                ("lead", Kind::Lead),
-                ("dev-a", Kind::Developer),
-                ("dev-b", Kind::Developer),
-                ("reviewer", Kind::Reviewer),
+                ("lead", Duty::Lead),
+                ("dev-a", Duty::Developer),
+                ("dev-b", Duty::Developer),
+                ("reviewer", Duty::Reviewer),
             ],
             Self::Research => &[
-                ("lead", Kind::Lead),
-                ("research-a", Kind::Researcher),
-                ("research-b", Kind::Researcher),
+                ("lead", Duty::Lead),
+                ("research-a", Duty::Researcher),
+                ("research-b", Duty::Researcher),
             ],
         }
     }
@@ -103,28 +105,23 @@ impl Preset {
 pub struct Options {
     pub agent: Option<crate::agent::Kind>,
     pub preset: Option<Preset>,
+    pub models: Option<Profile>,
     pub name: Option<String>,
     pub base: Option<String>,
     pub shared_checkout: bool,
     pub yes: bool,
     pub no_ignore: bool,
+    /// Use the line-by-line wizard even in a terminal.
+    pub no_tui: bool,
 }
 
-#[derive(Clone, Copy)]
-enum Kind {
-    Solo,
-    Lead,
-    Developer,
-    Reviewer,
-    Researcher,
-}
-
-struct Selection {
-    agent: crate::agent::Kind,
-    name: String,
-    preset: Preset,
-    base: Option<String>,
-    ignore: bool,
+pub struct Selection {
+    pub agent: crate::agent::Kind,
+    pub name: String,
+    pub preset: Preset,
+    pub profile: Profile,
+    pub base: Option<String>,
+    pub ignore: bool,
 }
 
 #[derive(Serialize)]
@@ -164,13 +161,19 @@ struct Role {
     prompt: String,
     worktree: bool,
     extra: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claude: Option<ClaudeOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex: Option<CodexOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pi: Option<PiOptions>,
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     name.len() <= MAX_PREFIX && config::is_agent_name(name)
 }
 
-fn suggested_name(root: &Path) -> String {
+pub(crate) fn suggested_name(root: &Path) -> String {
     let folder = root.file_name().unwrap_or_default().to_string_lossy();
     let mut name = String::new();
     for ch in folder.chars().flat_map(char::to_lowercase) {
@@ -344,6 +347,42 @@ fn choose(
             writeln!(output, "Enter one of: {}.", names.join(", ")).map_err(io_fail)?;
         }
     };
+    let profile = if let Some(profile) = options.models {
+        profile
+    } else if options.yes {
+        Profile::default()
+    } else {
+        writeln!(output, "\nChoose models and effort per role:").map_err(io_fail)?;
+        for (i, profile) in Profile::ALL.iter().enumerate() {
+            writeln!(
+                output,
+                "  {}. {}: {}",
+                i + 1,
+                profile.as_str(),
+                profile.description()
+            )
+            .map_err(io_fail)?;
+        }
+        let default = Profile::ALL
+            .iter()
+            .position(|p| *p == Profile::default())
+            .unwrap()
+            + 1;
+        loop {
+            let choice = ask(input, output, "Models", Some(&default.to_string()))?;
+            if let Some(profile) = Profile::parse(&choice.to_ascii_lowercase()).or_else(|| {
+                choice
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| i.checked_sub(1))
+                    .and_then(|i| Profile::ALL.get(i).copied())
+            }) {
+                break profile;
+            }
+            writeln!(output, "Enter 1-4 or inherit, economy, balanced, quality.")
+                .map_err(io_fail)?;
+        }
+    };
     let suggested_base = git::default_base(root);
     let isolated = match preset {
         Preset::Parallel => true,
@@ -410,49 +449,50 @@ fn choose(
         agent,
         name,
         preset,
+        profile,
         base,
         ignore,
     })
 }
 
-fn no_remote() -> Fail {
+pub(crate) fn no_remote() -> Fail {
     Fail::usage(
         "worktrees require a configured Git remote; configure one first, or use solo, research, or review --shared-checkout",
     )
 }
 
-fn unfetched(base: &str) -> String {
+pub(crate) fn unfetched(base: &str) -> String {
     format!(
         "Warning: {base} is not among the fetched remote branches. Check its name; `up` fetches it and stops if the remote lacks it."
     )
 }
 
-fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
+pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
     let coordinator = format!("{}-{}", selection.name, selection.preset.roles()[0].0);
     let mut roles = Vec::new();
     for (suffix, kind) in selection.preset.roles() {
-        let worktree = selection.base.is_some() && matches!(kind, Kind::Developer | Kind::Reviewer);
+        let worktree = selection.base.is_some() && matches!(kind, Duty::Developer | Duty::Reviewer);
         let responsibilities = match kind {
-            Kind::Solo => {
+            Duty::Solo => {
                 "Own the full task: clarify acceptance, reproduce or understand the problem, implement a focused change, and validate it using the repository's actual commands. Keep investigation, editing and test feedback in one loop. Report the result and remaining limitations to the user."
             }
-            Kind::Lead if selection.preset == Preset::Research => {
+            Duty::Lead if selection.preset == Preset::Research => {
                 "Define a common reproduction and independent hypotheses for research-a and research-b. Assign a bounded question, expected evidence and stopping condition to each researcher. Compare their reports, resolve contradictions with observations, and select one implementation decision. Perform or assign the chosen fix after consolidation, and validate the result before reporting it to the user."
             }
-            Kind::Lead => {
+            Duty::Lead => {
                 "Coordinate the user's task. Define acceptance, dependencies, base commit, file ownership and a bounded assignment for each worker. Agree interfaces before parallel edits. Collect evidence and exact commits, request corrections, and integrate only reviewed deliveries in dependency order. Validate the combined result before accepting it. Handle requirements and architecture decisions yourself unless a separate investigation is useful."
             }
-            Kind::Developer => {
+            Duty::Developer => {
                 "Implement only your assigned component. Reproduce relevant failures, preserve interfaces and file ownership, make focused changes, and run relevant reproduction and regression checks. Deliver the exact commit, affected files, commands and results, and limitations to the coordinator. Address reviewer findings; do not integrate another worker's changes yourself."
             }
-            Kind::Reviewer => {
+            Duty::Reviewer => {
                 "Review the exact delivered commit against its acceptance criteria. Check correctness, regressions, interfaces and missing validation. Return actionable findings with file locations, consequences and reproduction steps. Request changes or explicitly accept with evidence. Do not silently fix the implementation; the developer owns corrections and the coordinator owns integration."
             }
-            Kind::Researcher => {
+            Duty::Researcher => {
                 "Investigate only the assigned hypothesis or question. Gather commands, observations, relevant code locations and primary references. Explain evidence for and against the hypothesis, uncertainty and a recommended next step. Report to the coordinator before any implementation. Do not edit source files, change Git state, or start shared services."
             }
         };
-        let reporting = if matches!(kind, Kind::Solo | Kind::Lead) {
+        let reporting = if matches!(kind, Duty::Solo | Duty::Lead) {
             "Report progress, blockers and accepted results to the user.".to_string()
         } else {
             format!(
@@ -464,11 +504,21 @@ fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
         } else {
             "You share the main checkout. Preserve the user's changes and do not switch or reset branches while other sessions use it. Only the assigned implementer edits source files; review and research are read-only. Coordinate validation commands that generate files with the implementer."
         };
+        let (mut claude, mut codex, mut pi) = (None, None, None);
+        match selection.profile.options(selection.agent, *kind) {
+            AgentOptions::Claude(o) if o != ClaudeOptions::default() => claude = Some(o),
+            AgentOptions::Codex(o) if o != CodexOptions::default() => codex = Some(o),
+            AgentOptions::Pi(o) if o != PiOptions::default() => pi = Some(o),
+            _ => {}
+        }
         roles.push(Role {
             name: format!("{}-{suffix}", selection.name),
             prompt: format!("You are {{{{NAME}}}} in {{{{REPO}}}}.\n{responsibilities}\n{reporting}\n{isolation}\n"),
             worktree,
-            extra: worktree && matches!(kind, Kind::Developer),
+            extra: worktree && matches!(kind, Duty::Developer),
+            claude,
+            codex,
+            pi,
         });
     }
     let workflow = match selection.preset {
@@ -511,8 +561,9 @@ fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
         roles,
     };
     let text = format!(
-        "# Generated by herdr-crew init ({} workflow). Edit prompts and roles for your project.\n# Workflow guidance: https://github.com/rarce/herdr-crew/blob/main/docs/workflows.md\n{}",
+        "# Generated by herdr-crew init ({} workflow, {} models). Edit prompts and roles for your project.\n# Workflow guidance: https://github.com/rarce/herdr-crew/blob/main/docs/workflows.md\n# Models and effort: https://github.com/rarce/herdr-crew/blob/main/docs/models.md; change them with herdr-crew config\n{}",
         selection.preset.id(),
+        selection.profile.as_str(),
         toml::to_string_pretty(&template)
             .map_err(|e| Fail::run(format!("cannot render crew configuration: {e}")))?
     );
@@ -523,7 +574,7 @@ fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
     Ok(text)
 }
 
-fn ensure_new_config(root: &Path) -> Result<(), Fail> {
+pub(crate) fn ensure_new_config(root: &Path) -> Result<(), Fail> {
     let path = root.join(config::CONFIG_FILE);
     match fs::symlink_metadata(&path) {
         Ok(_) => {
@@ -547,15 +598,19 @@ fn ensure_new_config(root: &Path) -> Result<(), Fail> {
 
 /// What setup would append to `.gitignore`, and a warning when existing rules ignore
 /// `crew.toml`.
-struct IgnoreCheck {
-    addition: String,
-    warning: Option<String>,
+pub(crate) struct IgnoreCheck {
+    pub addition: String,
+    pub warning: Option<String>,
 }
 
 /// One `git check-ignore` query for the generated-file rules (when `ignore` is set) and for
 /// `crew.toml`. Without Git's answer, setup falls back to exact `.gitignore` lines and gives
 /// no warning: an advisory check must not block setup.
-fn ignore_check(root: &Path, worktrees: bool, ignore: bool) -> Result<IgnoreCheck, Fail> {
+pub(crate) fn ignore_check(
+    root: &Path,
+    worktrees: bool,
+    ignore: bool,
+) -> Result<IgnoreCheck, Fail> {
     let mut rules = Vec::new();
     let mut contents = String::new();
     if ignore {
@@ -663,8 +718,26 @@ pub enum Purpose {
     Up,
 }
 
-/// The setup wizard. Returns whether it created `.herdr/crew.toml` (not on a dry run or a
-/// cancellation).
+/// The summary shown before saving: workflow, project, agent, models and board writer.
+pub(crate) fn summary(selection: &Selection) -> String {
+    format!(
+        "{}\nWorkspace: {}\nAgent: {}\nModels: {} ({})\nWorktree base: {}\nBoard writer: {}-{}",
+        selection.preset.description(),
+        selection.name,
+        selection.agent.as_str(),
+        selection.profile.as_str(),
+        selection.profile.description(),
+        selection
+            .base
+            .as_deref()
+            .unwrap_or("none (main checkout only)"),
+        selection.name,
+        selection.preset.roles()[0].0
+    )
+}
+
+/// The line-by-line setup wizard. Returns whether it created `.herdr/crew.toml` (not on a dry
+/// run or a cancellation).
 fn wizard(
     root: &Path,
     options: &Options,
@@ -700,20 +773,7 @@ fn wizard(
     let text = render(&selection, root)?;
     let IgnoreCheck { addition, warning } =
         ignore_check(root, selection.base.is_some(), selection.ignore)?;
-    writeln!(
-        output,
-        "\n{}\nWorkspace: {}\nAgent: {}\nWorktree base: {}\nBoard writer: {}-{}\n",
-        selection.preset.description(),
-        selection.name,
-        selection.agent.as_str(),
-        selection
-            .base
-            .as_deref()
-            .unwrap_or("none (main checkout only)"),
-        selection.name,
-        selection.preset.roles()[0].0
-    )
-    .map_err(io_fail)?;
+    writeln!(output, "\n{}\n", summary(&selection)).map_err(io_fail)?;
     if !options.yes || dry_run {
         writeln!(output, "{text}").map_err(io_fail)?;
     }
@@ -724,14 +784,7 @@ fn wizard(
         writeln!(output, "{warning}\n").map_err(io_fail)?;
     }
     if dry_run {
-        writeln!(output, "Dry run: no files created or changed.").map_err(io_fail)?;
-        if purpose == Purpose::Up {
-            writeln!(
-                output,
-                "Without --dry-run, up would save this configuration and then start the sessions above."
-            )
-            .map_err(io_fail)?;
-        }
+        dry_run_note(purpose, output)?;
         return Ok(false);
     }
     let question = if addition.is_empty() {
@@ -743,6 +796,30 @@ fn wizard(
         writeln!(output, "Cancelled: no files created or changed.").map_err(io_fail)?;
         return Ok(false);
     }
+    create(root, &selection, &text, purpose, output)?;
+    Ok(true)
+}
+
+fn dry_run_note(purpose: Purpose, output: &mut impl Write) -> Result<(), Fail> {
+    writeln!(output, "Dry run: no files created or changed.").map_err(io_fail)?;
+    if purpose == Purpose::Up {
+        writeln!(
+            output,
+            "Without --dry-run, up would save this configuration and then start the sessions above."
+        )
+        .map_err(io_fail)?;
+    }
+    Ok(())
+}
+
+/// Saves a confirmed configuration and the `.gitignore` rules, then prints the next steps.
+pub(crate) fn create(
+    root: &Path,
+    selection: &Selection,
+    text: &str,
+    purpose: Purpose,
+    output: &mut impl Write,
+) -> Result<(), Fail> {
     ensure_new_config(root)?;
     fs::create_dir_all(root.join(".herdr")).map_err(io_fail)?;
     let path = root.join(config::CONFIG_FILE);
@@ -782,7 +859,7 @@ fn wizard(
     }
     match purpose {
         Purpose::Init => {
-            writeln!(output, "Created {}\nNext: review the prompts, run herdr-crew check, then herdr-crew up --dry-run.\nStart sessions with herdr or herdr-crew up --no-attach when ready.", path.display()).map_err(io_fail)?;
+            writeln!(output, "Created {}\nNext: review the prompts, run herdr-crew check, then herdr-crew up --dry-run.\nChange models and effort per role with herdr-crew config.\nStart sessions with herdr or herdr-crew up --no-attach when ready.", path.display()).map_err(io_fail)?;
             if selection.agent == crate::agent::Kind::Codex {
                 writeln!(output, "Codex setup: run herdr-crew codex-install, then review/trust the crew hook in Codex /hooks before launching roles.").map_err(io_fail)?;
             }
@@ -799,20 +876,37 @@ fn wizard(
             .map_err(io_fail)?;
         }
     }
-    Ok(true)
+    Ok(())
 }
 
 pub fn run(root: &Path, options: &Options, dry_run: bool) -> Result<(), Fail> {
     setup(root, options, dry_run, Purpose::Init).map(|_| ())
 }
 
-/// The wizard on the terminal. Returns whether it created the configuration.
+/// The wizard on the terminal: full screen when a person can answer it, otherwise line by
+/// line. Returns whether it created the configuration.
 pub fn setup(
     root: &Path,
     options: &Options,
     dry_run: bool,
     purpose: Purpose,
 ) -> Result<bool, Fail> {
+    if !options.yes && !options.no_tui && crate::tui::interactive() {
+        ensure_new_config(root)?;
+        let Some((selection, text)) = crate::tui::wizard::run(root, options).map_err(io_fail)?
+        else {
+            println!("Cancelled: no files created or changed.");
+            return Ok(false);
+        };
+        let mut out = io::stdout().lock();
+        if dry_run {
+            writeln!(out, "{}\n\n{text}", summary(&selection)).map_err(io_fail)?;
+            dry_run_note(purpose, &mut out)?;
+            return Ok(false);
+        }
+        create(root, &selection, &text, purpose, &mut out)?;
+        return Ok(true);
+    }
     wizard(
         root,
         options,
@@ -836,6 +930,7 @@ mod tests {
                 agent: crate::agent::Kind::Claude,
                 name: "a".repeat(MAX_PREFIX),
                 preset,
+                profile: Profile::Balanced,
                 base,
                 ignore: true,
             };
@@ -893,7 +988,7 @@ mod tests {
     #[test]
     fn the_wizard_asks_for_the_agent_and_retries_unknown_ones() {
         let root = git::test_repo("init-agent");
-        let (selection, output) = choose_with(&root, &Options::default(), "\n1\ngpt\nPi\n\n");
+        let (selection, output) = choose_with(&root, &Options::default(), "\n1\ngpt\nPi\n\n\n");
         assert_eq!(selection.agent, crate::agent::Kind::Pi);
         assert!(
             output.contains("Enter one of: claude, codex, pi."),
@@ -914,7 +1009,7 @@ mod tests {
         git::test_remote_branch(&root, "origin/main");
         // A typo is refused at the confirmation, then the suggested default is accepted.
         let (selection, output) =
-            choose_with(&root, &Options::default(), "\n3\n\norigin/mian\n\n\n\n");
+            choose_with(&root, &Options::default(), "\n3\n\n\norigin/mian\n\n\n\n");
         assert_eq!(selection.base.as_deref(), Some("origin/main"));
         assert!(
             output.contains("origin/mian is not among the fetched"),
@@ -922,7 +1017,7 @@ mod tests {
         );
         assert!(output.contains("Use origin/mian anyway? [y/N]"), "{output}");
         // An explicit answer keeps it, since `up` fetches before creating worktrees.
-        let (selection, _) = choose_with(&root, &Options::default(), "\n3\n\norigin/next\ny\n\n");
+        let (selection, _) = choose_with(&root, &Options::default(), "\n3\n\n\norigin/next\ny\n\n");
         assert_eq!(selection.base.as_deref(), Some("origin/next"));
 
         let flag = Options {
@@ -938,7 +1033,7 @@ mod tests {
         // Without --yes, the flag's value needs the same confirmation as a typed one, and
         // declining it falls back to the prompt.
         let interactive = Options { yes: false, ..flag };
-        let (selection, output) = choose_with(&root, &interactive, "\n\n\n\n\n");
+        let (selection, output) = choose_with(&root, &interactive, "\n\n\n\n\n\n");
         assert_eq!(selection.base.as_deref(), Some("origin/main"));
         assert!(output.contains("Use origin/mian anyway? [y/N]"), "{output}");
         std::fs::remove_dir_all(&root).unwrap();

@@ -37,7 +37,7 @@ impl Kind {
 /// The agent a role starts, with the options of its kind only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentOptions {
-    Claude,
+    Claude(ClaudeOptions),
     Codex(CodexOptions),
     Pi(PiOptions),
 }
@@ -45,10 +45,86 @@ pub enum AgentOptions {
 impl AgentOptions {
     pub fn kind(&self) -> Kind {
         match self {
-            Self::Claude => Kind::Claude,
+            Self::Claude(_) => Kind::Claude,
             Self::Codex(_) => Kind::Codex,
             Self::Pi(_) => Kind::Pi,
         }
+    }
+}
+
+/// Claude Code's model selection: `--model`, `--effort` and `--fallback-model`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeOptions {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fallback_model: Option<String>,
+}
+
+pub const CLAUDE_KEYS: &[&str] = &["model", "effort", "fallback_model"];
+/// `claude --effort` levels.
+pub const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+/// Codex `model_reasoning_effort` values; each model supports a subset.
+pub const CODEX_EFFORTS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+/// `pi --thinking` levels; pi clamps them to what the model supports.
+pub const PI_THINKING: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// A value passed as its own argument: nonempty, one line, and not readable as an option.
+fn plain_value_problem(key: &str, value: &str) -> Option<String> {
+    (value.is_empty() || value.starts_with('-') || value.chars().any(char::is_control)).then(|| {
+        format!("{key}: must be a nonempty value without control characters or a leading '-'")
+    })
+}
+
+impl ClaudeOptions {
+    pub fn inherit(&self, defaults: &Self) -> Self {
+        Self {
+            model: self.model.clone().or_else(|| defaults.model.clone()),
+            effort: self.effort.clone().or_else(|| defaults.effort.clone()),
+            fallback_model: self
+                .fallback_model
+                .clone()
+                .or_else(|| defaults.fallback_model.clone()),
+        }
+    }
+
+    pub fn problems(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (key, value) in [
+            ("model", &self.model),
+            ("effort", &self.effort),
+            ("fallback_model", &self.fallback_model),
+        ] {
+            let Some(value) = value else { continue };
+            if let Some(problem) = plain_value_problem(key, value) {
+                errors.push(problem);
+            } else if key == "effort" && !CLAUDE_EFFORTS.contains(&value.as_str()) {
+                errors.push(format!(
+                    "effort: expected one of {}",
+                    CLAUDE_EFFORTS.join(", ")
+                ));
+            } else if key == "fallback_model" && value.split(',').any(|m| m.trim().is_empty()) {
+                errors.push("fallback_model: a comma-separated list of model names".into());
+            }
+        }
+        errors
+    }
+
+    /// Separate arguments, never interpolated by a shell.
+    pub fn args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for (flag, value) in [
+            ("--model", &self.model),
+            ("--effort", &self.effort),
+            ("--fallback-model", &self.fallback_model),
+        ] {
+            if let Some(value) = value {
+                args.extend([flag.to_string(), value.clone()]);
+            }
+        }
+        args
     }
 }
 
@@ -113,9 +189,7 @@ impl CodexOptions {
                     continue;
                 }
                 let choices: Option<&[&str]> = match key {
-                    "reasoning_effort" => {
-                        Some(&["none", "minimal", "low", "medium", "high", "xhigh", "max"])
-                    }
+                    "reasoning_effort" => Some(CODEX_EFFORTS),
                     "sandbox" => Some(&["read-only", "workspace-write", "danger-full-access"]),
                     "approval_policy" => Some(&["on-request", "never"]),
                     "search" => Some(&["disabled", "cached", "live"]),
@@ -243,9 +317,11 @@ impl PiOptions {
                 ));
                 continue;
             }
-            let choices = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-            if key == "thinking" && !choices.contains(&value.as_str()) {
-                errors.push(format!("thinking: expected one of {}", choices.join(", ")));
+            if key == "thinking" && !PI_THINKING.contains(&value.as_str()) {
+                errors.push(format!(
+                    "thinking: expected one of {}",
+                    PI_THINKING.join(", ")
+                ));
             }
         }
         errors
@@ -352,6 +428,49 @@ mod tests {
         };
         assert_eq!(bad.problems().len(), 3);
         assert!(PiOptions::default().args().is_empty());
+    }
+
+    #[test]
+    fn claude_options_inherit_validate_and_become_flags() {
+        let defaults = ClaudeOptions {
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        let role = ClaudeOptions {
+            model: Some("sonnet".into()),
+            fallback_model: Some("opus,haiku".into()),
+            ..Default::default()
+        }
+        .inherit(&defaults);
+        assert_eq!(
+            role.args(),
+            [
+                "--model",
+                "sonnet",
+                "--effort",
+                "high",
+                "--fallback-model",
+                "opus,haiku"
+            ]
+        );
+        assert!(role.problems().is_empty());
+        let bad = ClaudeOptions {
+            model: Some("--dangerously-skip-permissions".into()),
+            effort: Some("ultra".into()),
+            fallback_model: Some("opus,".into()),
+        };
+        assert_eq!(bad.problems().len(), 3);
+        assert!(ClaudeOptions::default().args().is_empty());
+    }
+
+    #[test]
+    fn codex_accepts_ultra_effort() {
+        let options = CodexOptions {
+            reasoning_effort: Some("ultra".into()),
+            ..Default::default()
+        };
+        assert!(options.problems().is_empty());
     }
 
     #[test]
