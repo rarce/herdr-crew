@@ -367,7 +367,12 @@ impl fmt::Display for Step {
             Step::StartAgent {
                 name, pane, agent, ..
             } => match agent {
-                AgentOptions::Claude => write!(f, "start {name} in {pane}"),
+                AgentOptions::Claude(o) if o.args().is_empty() => {
+                    write!(f, "start {name} in {pane}")
+                }
+                AgentOptions::Claude(o) => {
+                    write!(f, "start {name} (claude, {:?}) in {pane}", o.args())
+                }
                 AgentOptions::Codex(o) => {
                     write!(f, "start {name} (codex, {:?}) in {pane}", o.args())
                 }

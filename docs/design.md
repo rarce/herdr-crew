@@ -220,7 +220,8 @@ The manifest declares only macOS and Linux. Artifact preparation uses a POSIX sh
 
 ### 4.1 Subcommands
 
-- `init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]`: initial setup without loading an existing configuration (§4.1.1).
+- `init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi] [--models inherit|economy|balanced|quality] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes] [--dry-run]`: initial setup without loading an existing configuration (§4.1.1).
+- `config`: full-screen editor for the agent, model and effort of the defaults and each role (§4.1.2). It needs a terminal.
 - `up [--agent claude|codex|pi] [--no-attach] [--dry-run] [init's setup options]`: the setup options apply only when there is no configuration yet (§4.1.1); with one, they are a usage error.
 - `add <role>`
 - `close <name>`
@@ -233,6 +234,12 @@ Global option: `--root DIR`. `--dry-run` prints the plan (§6.2) without running
 ### 4.1.1 Initial setup
 
 `init` resolves the main Git checkout like other commands but runs before `load_config`. Its line-based wizard asks for a project prefix, one of four software workflows, the agent kind, an optional remote worktree base and ignore rules. The summary before saving names the agent and the worktree base, also with `--yes`. `--yes` uses explicit arguments and defaults without reading stdin; `--dry-run` previews the generated configuration and missing ignore entries without writing.
+
+The wizard also asks for a model profile (`docs/models.md`), which `models::Profile` turns into each role's `[roles.<agent>]` model and effort by its duty. When stdin and stdout are terminals and neither `--yes` nor `--no-tui` is given, `tui::wizard` asks the same questions full screen, with flags as prefilled answers, and returns the same `Selection`; validation (name, remote, base) and file creation are shared with the line wizard.
+
+### 4.1.2 Configuration editor
+
+`config` loads `crew.toml` with `toml_edit` (`config_edit`), so edits keep comments, order and formatting. Each change is applied to a copy and accepted only if `Config::parse` accepts the result; otherwise the editor keeps the previous document and shows the first error. Saving goes through `files::write`. Model and effort go to the table of the row's effective agent: `[<agent>]` for the defaults, `[roles.<agent>]` for a role. Applying a profile guesses each role's duty from its name and the board writer (`models::Duty::guess`).
 
 The generated TOML uses the existing version-1 schema and passes `Config::parse` before any write. Solo development is the default. Reviewed delivery separates coordination, implementation and review; parallel delivery uses two developers and requires worktrees; investigation uses two read-only researchers. The mappings and evidence are in [workflows.md](workflows.md). These are prompt protocols, not runtime task orchestration or messaging.
 
@@ -444,6 +451,9 @@ herdr-plugin.toml  Cargo.toml  Cargo.lock  README.md  LICENSE  docs/design.md
 src/main.rs            arguments, dispatch, exit codes (adapter)
 src/files.rs           project paths and generated-file replacement (adapter)
 src/config.rs          parsing and validation of crew.toml (pure)
+src/config_edit.rs     format-preserving edits of crew.toml (pure)
+src/models.rs          model profiles, tiers and catalogs (pure)
+src/tui/               setup wizard and configuration editor screens (adapter)
 src/prompt.rs          placeholders and the combined prompt (pure)
 src/plan.rs            HerdrState, Step and plan(config, state, env) (pure)
 src/board/model.rs     status.json: types, validation, order, age (pure)
@@ -461,6 +471,7 @@ tests/                 fixtures, snapshots and the real test of §7.2
 | `ratatui` (with `crossterm`) | Boxes with titles, colours, clipping, and `TestBackend` to test drawing without a terminal. `crossterm` is its default backend and works on Windows. Default features are off (calendar, macros); it enables `crossterm` and `unstable-rendered-line-info`, which `Paragraph::line_count` needs. |
 | `serde`, `serde_json`        | Types of `status.json` and of herdr's answers; `deny_unknown_fields` replaces a JSON Schema validator; `json!` builds the schema.                                                                                                                                                  |
 | `toml`                       | `crew.toml`, with line and column in errors and the spans of keys and prompts.                                                                                                                                                                                                      |
+| `toml_edit`                  | `config` edits `crew.toml` without losing comments or formatting; only the `parse` and `display` features.                                                                                                                                                                          |
 | `jiff`                       | RFC 3339 with a required offset, and conversion to local time, which `std` lacks.                                                                                                                                                                                                  |
 | `rustix` (Unix, `fs`) | Safe directory-relative operations with no symlink following for generated-file writes and cleanup. |
 

@@ -6,16 +6,19 @@ mod agent;
 mod board;
 mod codex;
 mod config;
+mod config_edit;
 mod files;
 mod git;
 mod herdr;
 mod init;
 mod lock;
+mod models;
 mod pi;
 mod plan;
 mod process;
 mod prompt;
 mod send;
+mod tui;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -34,10 +37,13 @@ use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, Worksp
 
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi]
-       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
+       [--models inherit|economy|balanced|quality] [--base REMOTE/BRANCH]
+       [--shared-checkout] [--no-ignore] [--no-tui] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
+  config                         edit each role's agent, model and effort in a terminal UI
   up [--agent claude|codex|pi] [--no-attach] [--dry-run]
-     [--preset ...] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes]
+     [--preset ...] [--models ...] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout]
+     [--no-ignore] [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
                                  (setup options as for init); --agent on an existing
                                  crew saves a new default agent
@@ -141,6 +147,13 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
                         .ok_or_else(|| Fail::usage("--agent must be claude, codex or pi"))?,
                 )
             }
+            "--models" => {
+                let profile = value("--models")?;
+                a.init.models = Some(models::Profile::parse(&profile).ok_or_else(|| {
+                    Fail::usage("--models must be inherit, economy, balanced or quality")
+                })?);
+            }
+            "--no-tui" => a.init.no_tui = true,
             "--name" => a.init.name = Some(value("--name")?),
             "--base" => a.init.base = Some(value("--base")?),
             "--shared-checkout" => a.init.shared_checkout = true,
@@ -157,6 +170,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         "init" => &[
             "agent",
             "preset",
+            "models",
+            "no_tui",
             "name",
             "base",
             "shared_checkout",
@@ -170,15 +185,17 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "no_attach",
             "dry_run",
             "preset",
+            "models",
+            "no_tui",
             "name",
             "base",
             "shared_checkout",
             "no_ignore",
             "yes",
         ],
-        "add" | "close" | "send" | "check" | "startup" | "codex-install" | "codex-uninstall"
-        | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" | "codex-peers"
-        | "pi-install" | "pi-uninstall" => &[],
+        "add" | "close" | "send" | "check" | "config" | "startup" | "codex-install"
+        | "codex-uninstall" | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list"
+        | "codex-peers" | "pi-install" | "pi-uninstall" => &[],
         "board" => &["file", "once", "interval"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
@@ -191,6 +208,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ("interval", a.interval.is_some()),
         ("agent", a.agent.is_some()),
         ("preset", a.init.preset.is_some()),
+        ("models", a.init.models.is_some()),
+        ("no_tui", a.init.no_tui),
         ("name", a.init.name.is_some()),
         ("base", a.init.base.is_some()),
         ("shared_checkout", a.init.shared_checkout),
@@ -1123,14 +1142,16 @@ fn run() -> Result<(), Fail> {
         }
         let i = &a.init;
         if i.preset.is_some()
+            || i.models.is_some()
+            || i.no_tui
             || i.name.is_some()
             || i.base.is_some()
             || i.shared_checkout
             || i.no_ignore
         {
             return Err(Fail::usage(format!(
-                "--preset, --name, --base, --shared-checkout and --no-ignore only apply when up \
-                 sets up a new crew; {} already exists, so edit it instead",
+                "--preset, --models, --name, --base, --shared-checkout, --no-ignore and --no-tui \
+                 only apply when up sets up a new crew; {} already exists, so edit it instead",
                 path.display()
             )));
         }
@@ -1147,6 +1168,15 @@ fn run() -> Result<(), Fail> {
             Ok(())
         }
         "check" => check(&c),
+        "config" => {
+            if !tui::interactive() {
+                return Err(Fail::run(format!(
+                    "config needs a terminal; edit {} directly",
+                    c.root.join(config::CONFIG_FILE).display()
+                )));
+            }
+            tui::editor::run(&c.root).map_err(Fail::run)
+        }
         _ => unreachable!("validated in parse_args"),
     }
 }

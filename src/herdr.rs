@@ -559,12 +559,16 @@ pub fn execute(
                     codex::prepare(herdr, c, name, &pane, prompt_of(name)?, options)?;
                 }
                 let native = match agent {
-                    AgentOptions::Claude => vec![
-                        "-n".into(),
-                        name.clone(),
-                        "--append-system-prompt-file".into(),
-                        prompt.display().to_string(),
-                    ],
+                    AgentOptions::Claude(options) => {
+                        let mut args = vec![
+                            "-n".into(),
+                            name.clone(),
+                            "--append-system-prompt-file".into(),
+                            prompt.display().to_string(),
+                        ];
+                        args.extend(options.args());
+                        args
+                    }
                     AgentOptions::Codex(options) => {
                         let mut effective = options.clone();
                         effective.resolve_dirs(&c.root)?;

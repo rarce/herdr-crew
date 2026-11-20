@@ -160,7 +160,7 @@ profile = "development"
 | --- | --- |
 | `model` | An available model ID; otherwise inherit the user's configuration |
 | `profile` | Existing profile name, using letters, digits, `_` and `-` |
-| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; the selected model must support it |
+| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; the selected model must support it |
 | `sandbox` | `read-only`, `workspace-write`, `danger-full-access` |
 | `approval_policy` | `on-request`, `never` |
 | `search` | `disabled`, `cached`, `live` |
@@ -189,6 +189,30 @@ A separate prototype starts one Codex coordinator in Herdr and lets it create wo
 Herdr shows a coordinator tab and a board tab. Inspect the worker threads with Codex `/subagents`; they do not have their own Herdr tabs. The prototype supports Codex roles in a shared checkout and inherits the parent's permissions. Its generator sets `experimental_codex_tree = true` to select native coordination instructions for the single coordinator; it rejects unsupported extras and initial messages. It was verified with Codex 0.163.0, Herdr 0.9.5 and the real `gpt-6.1-sol` model, including review/fix handoff and the same worker identities after a cold restart.
 
 This mode is available through the experiment scripts, not a released `up` option. `up --agent codex` continues to start independent role sessions. See the [native tree guide](docs/codex-tree-experiment.md) for preparation, offline and live test commands, communication behavior, recovery requirements and remaining limits.
+
+## Claude Code options
+
+Claude roles take optional launch options, with project defaults in `[claude]` and per-role overrides in `[roles.claude]`:
+
+```toml
+[claude]
+effort = "high"
+
+[[roles]]
+name = "payments-reviewer"
+prompt = "Review the delivered commit."
+
+[roles.claude]
+model = "opus"
+```
+
+| Claude option | Values |
+| --- | --- |
+| `model` | An alias (`fable`, `opus`, `sonnet`, `haiku`) or a full model name; passed as `--model` |
+| `effort` | `low`, `medium`, `high`, `xhigh`, `max`; passed as `--effort` |
+| `fallback_model` | Comma-separated models to try when the main one is busy or unavailable; `--fallback-model` |
+
+Absent options keep Claude Code's own settings. Options apply when crew starts a conversation; herdr resumes Claude sessions without them, so see [models and effort](docs/models.md#when-a-change-takes-effect) for what a restart keeps.
 
 ## pi
 
@@ -237,7 +261,7 @@ Crew validates the effective provider/model combination after applying defaults 
 herdr-crew init
 ```
 
-The wizard asks for a project name, a workflow, the agent (`claude`, `codex` or `pi`), worktree settings and generated-file ignore rules. It previews the complete configuration before saving. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
+The wizard asks for a project name, a workflow, the agent (`claude`, `codex` or `pi`), a model profile, worktree settings and generated-file ignore rules. It previews the complete configuration before saving. In a terminal it opens a full-screen wizard (arrow keys or numbers to choose, Enter to continue, Esc to go back) that shows each role's model and effort as you pick a profile; command-line flags prefill its answers. `--no-tui` keeps the line-by-line questions, which also run whenever input is not a terminal. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
 
 | Preset | Agent sessions | Use it for |
 | --- | --- | --- |
@@ -247,6 +271,21 @@ The wizard asks for a project name, a workflow, the agent (`claude`, `codex` or 
 | `research` | Lead, two researchers | Competing hypotheses and evidence before implementation |
 
 These presets are practical starting points, informed by [workflow research and role guidelines](docs/workflows.md). Each prompt defines ownership, evidence to deliver, review and integration. The first role writes the board. All base roles start with `up`; prompts tell them to wait for an explicit task. Communication and task assignment remain part of your team's process.
+
+### Models and effort per role
+
+Each role can run its own model and effort. `init` writes them from a profile, by what each role does:
+
+| `--models` | Lead / solo | Developers | Reviewer | Researchers |
+| --- | --- | --- | --- | --- |
+| `inherit` | agent default | agent default | agent default | agent default |
+| `economy` | sonnet · high | sonnet · medium | opus · medium | haiku · medium |
+| `balanced` (default) | opus · high | sonnet · high | opus · high | sonnet · medium |
+| `quality` | fable · high | opus · xhigh | fable · high | opus · high |
+
+Claude Code names are shown; Codex roles get `gpt-6.2-astra`, `gpt-6.2-sol` or `gpt-6-luna`, and pi roles keep their provider's model and get only the thinking level. The reasoning behind these choices and when a change takes effect are in [models and effort](docs/models.md).
+
+Change them later with `herdr-crew config`, a terminal editor for the agent, model and effort of the defaults and of each role. `p` applies a profile to every role, `Del` returns a value to its default, `s` saves. Edits are validated before they apply, and saving keeps the file's comments and formatting.
 
 Use `--yes` for non-interactive setup. Preview a parallel crew with:
 
@@ -269,10 +308,13 @@ Generated board files, prompts and optional `.worktrees/` entries are appended t
 ```text
 herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi]
-       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes] [--dry-run]
+       [--models inherit|economy|balanced|quality] [--base REMOTE/BRANCH]
+       [--shared-checkout] [--no-ignore] [--no-tui] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
+  config                         edit each role's agent, model and effort in a terminal UI
   up [--agent claude|codex|pi] [--no-attach] [--dry-run]
-     [--preset ...] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--yes]
+     [--preset ...] [--models ...] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout]
+     [--no-ignore] [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
                                  (setup options as for init); --agent on an existing
                                  crew saves a new default agent
