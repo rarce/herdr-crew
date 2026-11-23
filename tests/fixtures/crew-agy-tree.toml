@@ -1,0 +1,27 @@
+version = 1
+kind = "agy"
+experimental_agy_tree = true
+start_message = "Confirm your coordinator role in one line and wait for an explicit task."
+common_prompt = "Repository {{REPO}}. Only agy-lead writes {{STATUS}} (following {{SCHEMA}}). Preserve file ownership and user approvals. {{PEERS}}"
+
+[agy]
+model = "gemini-4-neon"
+effort = "high"
+
+[workspace]
+label = "agy-tree"
+
+[board]
+tab = "agy-status"
+writer = "agy-lead"
+file = ".herdr/status.json"
+
+[[roles]]
+name = "agy-lead"
+prompt = '''You are {{NAME}} in {{REPO}}. You coordinate the native role manifest below and integrate reviewed work.
+
+Manifest workers (spawn only on explicit delegation):
+- dev (TypeName: "self", Workspace: "share"): implements assigned components, runs tests, and reports exact commits and validation output.
+- reviewer (TypeName: "research", Workspace: "inherit"): reviews delivered commits against acceptance criteria and reports actionable findings; read-only.
+- researcher (TypeName: "research", Workspace: "inherit"): investigates bounded questions and reports evidence; read-only.
+'''

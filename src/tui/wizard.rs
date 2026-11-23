@@ -295,6 +295,7 @@ impl Wizard {
                     AgentOptions::Claude(o) => (o.model, o.effort),
                     AgentOptions::Codex(o) => (o.model, o.reasoning_effort),
                     AgentOptions::Pi(o) => (o.model, o.thinking),
+                    AgentOptions::Agy(o) => (o.model, o.effort),
                 };
                 let or_default = |v: Option<String>| v.unwrap_or_else(|| "agent default".into());
                 Row::new(vec![
@@ -371,6 +372,7 @@ impl Wizard {
                     Kind::Claude => "Claude Code; native SendMessage between sessions",
                     Kind::Codex => "OpenAI Codex CLI; run herdr-crew codex-install after setup",
                     Kind::Pi => "pi; run herdr-crew pi-install after setup",
+                    Kind::Agy => "Antigravity CLI (agy); run herdr-crew agy-install after setup",
                 };
                 let items: Vec<(String, String)> = Kind::ALL
                     .iter()

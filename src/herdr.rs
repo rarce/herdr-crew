@@ -132,6 +132,7 @@ impl Herdr {
             .env_remove("CLAUDE_CODE_ENTRYPOINT")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CREW_CODEX_BINDING")
+            .env_remove(crate::agy::PROMPT_ENV)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -374,6 +375,7 @@ pub fn execute(
     };
     let mut pi_roles = Vec::new();
     let mut codex_roles = Vec::new();
+    let mut agy_roles = Vec::new();
     for step in &plan.steps {
         match step {
             Step::StartAgent {
@@ -386,6 +388,11 @@ pub fn execute(
                 agent: AgentOptions::Codex(options),
                 ..
             } => codex_roles.push((name.as_str(), options)),
+            Step::StartAgent {
+                name,
+                agent: AgentOptions::Agy(options),
+                ..
+            } => agy_roles.push((name.as_str(), options)),
             _ => {}
         }
     }
@@ -393,14 +400,20 @@ pub fn execute(
         crate::pi::preflight()?;
         crate::pi::require_version("pi")?;
     }
+    if !agy_roles.is_empty() {
+        crate::agy::preflight()?;
+        crate::agy::require_version("agy")?;
+    }
     if !codex_roles.is_empty() {
         codex::validate_runtime(&c.root)?;
     }
-    // Every Codex and pi role needs the same herdr.
+    // Every Codex, pi and agy role needs herdr's native integrations.
     let native = if !codex_roles.is_empty() {
         Some("Codex")
     } else if !pi_roles.is_empty() {
         Some("pi")
+    } else if !agy_roles.is_empty() {
+        Some("agy")
     } else {
         None
     };
@@ -411,6 +424,13 @@ pub fn execute(
         if let Some(problem) = crate::pi::prompt_problem(name, prompt_of(name)?) {
             return Err(problem);
         }
+    }
+    for (name, options) in agy_roles {
+        if let Some(problem) = crate::agy::prompt_problem(name, prompt_of(name)?) {
+            return Err(problem);
+        }
+        let mut effective = options.clone();
+        effective.resolve_dirs(&c.root)?;
     }
     for (name, options) in codex_roles {
         codex::context_prompt(c, name, prompt_of(name)?)?;
@@ -461,6 +481,13 @@ pub fn execute(
                 .collect();
                 if c.roles.first().is_some_and(|role| role.kind == Kind::Codex) {
                     args.extend(codex::pane_environment()?);
+                }
+                if let Some(role) = c.roles.iter().find(|r| !r.worktree)
+                    && role.kind == Kind::Agy
+                {
+                    args.extend(crate::agy::pane_environment(&crate::prompt::prompt_path(
+                        c, &role.name,
+                    )));
                 }
                 let r = herdr
                     .call(&args)
@@ -541,6 +568,13 @@ pub fn execute(
                 {
                     args.extend(codex::pane_environment()?);
                 }
+                if c.session_role(label)
+                    .is_some_and(|role| role.kind == Kind::Agy)
+                {
+                    args.extend(crate::agy::pane_environment(&crate::prompt::prompt_path(
+                        c, label,
+                    )));
+                }
                 let r = herdr
                     .call(&args)
                     .map_err(|e| format!("could not create tab \"{label}\": {e}"))?;
@@ -586,6 +620,12 @@ pub fn execute(
                         ];
                         args.extend(pi.args());
                         args
+                    }
+                    // The crew's agy SessionStart hook reads CREW_AGY_PROMPT_FILE from the pane env.
+                    AgentOptions::Agy(options) => {
+                        let mut effective = options.clone();
+                        effective.resolve_dirs(&c.root)?;
+                        effective.args()
                     }
                 };
                 start_agent(
@@ -648,7 +688,14 @@ fn start_agent(
     .map(str::to_string)
     .collect();
     args.extend_from_slice(native);
-    args.extend(message.map(str::to_string));
+    if let Some(msg) = message {
+        if kind == Kind::Agy {
+            // `agy` rejects positional prompts; pass initial interactive messages via flag.
+            args.extend(["--prompt-interactive".into(), msg.to_string()]);
+        } else {
+            args.push(msg.to_string());
+        }
+    }
     let start = Instant::now();
     loop {
         match herdr.call(&args) {

@@ -3,6 +3,7 @@
 //! (adapter). Design: docs/design.md.
 
 mod agent;
+mod agy;
 mod board;
 mod codex;
 mod config;
@@ -36,12 +37,12 @@ use lock::{Busy, ProjectLock};
 use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, WorkspaceItem};
 
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
-  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi]
+  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi|agy]
        [--models inherit|economy|balanced|quality] [--base REMOTE/BRANCH]
        [--shared-checkout] [--no-ignore] [--no-tui] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
   config                         edit each role's agent, model and effort in a terminal UI
-  up [--agent claude|codex|pi] [--no-attach] [--dry-run]
+  up [--agent claude|codex|pi|agy] [--no-attach] [--dry-run]
      [--preset ...] [--models ...] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout]
      [--no-ignore] [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
@@ -59,6 +60,8 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   codex-resume <binding>          recover a saved Codex session in its role tab
   pi-install                     install the crew pi extension that keeps role prompts
   pi-uninstall                   remove only the crew pi extension
+  agy-install                    install the crew agy SessionStart hook that delivers role prompts
+  agy-uninstall                  remove only the crew agy hook
   check                          validate the configuration and the dependencies
   startup                        herdr's startup hook: bring up or repair the projects in herdr";
 
@@ -144,7 +147,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "--agent" => {
                 a.agent = Some(
                     agent::Kind::parse(&value("--agent")?)
-                        .ok_or_else(|| Fail::usage("--agent must be claude, codex or pi"))?,
+                        .ok_or_else(|| Fail::usage("--agent must be claude, codex, pi or agy"))?,
                 )
             }
             "--models" => {
@@ -195,7 +198,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ],
         "add" | "close" | "send" | "check" | "config" | "startup" | "codex-install"
         | "codex-uninstall" | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list"
-        | "codex-peers" | "pi-install" | "pi-uninstall" => &[],
+        | "codex-peers" | "pi-install" | "pi-uninstall" | "agy-install" | "agy-uninstall"
+        | "agy-hook" => &[],
         "board" => &["file", "once", "interval"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
@@ -485,6 +489,13 @@ fn up_hints(c: &Config, action: bool) -> Vec<String> {
     if c.roles.iter().any(|r| r.kind == agent::Kind::Pi) {
         hints.push(
             "  - pi roles need `herdr-crew pi-install` (again after updating herdr-crew)".into(),
+        );
+    }
+    if c.roles.iter().any(|r| r.kind == agent::Kind::Agy) {
+        hints.push(
+            "  - agy roles need `herdr-crew agy-install` (and `herdr integration install \
+             antigravity-cli` for restore)"
+                .into(),
         );
     }
     if c.worktrees.is_some() {
@@ -983,6 +994,7 @@ fn check(c: &Config) -> Result<(), Fail> {
     let native = c.roles.iter().find_map(|r| match r.kind {
         agent::Kind::Codex => Some("Codex"),
         agent::Kind::Pi => Some("pi"),
+        agent::Kind::Agy => Some("agy"),
         agent::Kind::Claude => None,
     });
     if native.is_some()
@@ -1030,6 +1042,36 @@ fn check(c: &Config) -> Result<(), Fail> {
             let names = std::iter::once(role.name.as_str()).chain(role.extra.then_some(&*longest));
             for name in names {
                 if let Some(problem) = pi::prompt_problem(name, &prompt::render(c, name, &binary()))
+                {
+                    missing.push(format!("herdr-crew: {problem}"));
+                }
+            }
+        }
+    }
+    if c.roles.iter().any(|r| r.kind == agent::Kind::Agy) {
+        match executable("agy", None) {
+            Err(why) => missing.push(format!(
+                "herdr-crew: agy is missing: {why} (install Antigravity CLI from https://antigravity.google)"
+            )),
+            Ok(path) => match agy::require_version(&path) {
+                Ok((a, b, v)) => println!("herdr-crew: agy {a}.{b}.{v} at {}", path.display()),
+                Err(e) => missing.push(format!("herdr-crew: {e}")),
+            },
+        }
+        match agy::preflight() {
+            Ok(()) => println!("herdr-crew: the crew agy hook is installed"),
+            Err(error) => missing.push(format!("herdr-crew: {error}")),
+        }
+        for role in c.roles.iter().filter(|r| r.kind == agent::Kind::Agy) {
+            let mut effective = role.agy.clone();
+            if let Err(error) = effective.resolve_dirs(&c.root) {
+                missing.push(format!("herdr-crew: {}: {error}", role.name));
+            }
+            let longest = format!("{}-99", role.name);
+            let names = std::iter::once(role.name.as_str()).chain(role.extra.then_some(&*longest));
+            for name in names {
+                if let Some(problem) =
+                    agy::prompt_problem(name, &prompt::render(c, name, &binary()))
                 {
                     missing.push(format!("herdr-crew: {problem}"));
                 }
@@ -1107,6 +1149,16 @@ fn run() -> Result<(), Fail> {
                 return Err(Fail::usage("pi extension setup does not take --root"));
             }
             return pi::install(a.command == "pi-uninstall").map_err(Fail::run);
+        }
+        "agy-install" | "agy-uninstall" => {
+            if a.root.is_some() {
+                return Err(Fail::usage("agy hook setup does not take --root"));
+            }
+            return agy::install(a.command == "agy-uninstall").map_err(Fail::run);
+        }
+        "agy-hook" => {
+            agy::hook();
+            return Ok(());
         }
         "codex-protocol" => {
             println!("1");

@@ -93,6 +93,17 @@ pub fn peers(c: &Config, session: &str, launcher: &Path) -> String {
                 .into(),
         );
     }
+    if me.kind == Kind::Agy {
+        lines.push(
+            "The crew send commands below require access to the Herdr socket. When agy's \
+             terminal sandbox (--sandbox, --mode auto, or enableTerminalSandbox) is active, it \
+             normally blocks access to local sockets outside the workspace. Use only currently \
+             authorized execution; do not broaden permissions or bypass sandbox restrictions. If \
+             delivery is blocked, report the actual failure and provide your result in a final \
+             report or commit; ask the user to relay only when no authorized channel is available."
+                .into(),
+        );
+    }
     for r in others {
         let kind = r.kind.as_str();
         lines.push(if me.kind == Kind::Claude && r.kind == Kind::Claude {

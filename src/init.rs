@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::agent::{AgentOptions, ClaudeOptions, CodexOptions, PiOptions};
+use crate::agent::{AgentOptions, AgyOptions, ClaudeOptions, CodexOptions, PiOptions};
 use crate::models::{Duty, Profile};
 use crate::{Fail, config, git};
 
@@ -167,6 +167,8 @@ struct Role {
     codex: Option<CodexOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pi: Option<PiOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agy: Option<AgyOptions>,
 }
 
 pub(crate) fn valid_name(name: &str) -> bool {
@@ -504,11 +506,12 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
         } else {
             "You share the main checkout. Preserve the user's changes and do not switch or reset branches while other sessions use it. Only the assigned implementer edits source files; review and research are read-only. Coordinate validation commands that generate files with the implementer."
         };
-        let (mut claude, mut codex, mut pi) = (None, None, None);
+        let (mut claude, mut codex, mut pi, mut agy) = (None, None, None, None);
         match selection.profile.options(selection.agent, *kind) {
             AgentOptions::Claude(o) if o != ClaudeOptions::default() => claude = Some(o),
             AgentOptions::Codex(o) if o != CodexOptions::default() => codex = Some(o),
             AgentOptions::Pi(o) if o != PiOptions::default() => pi = Some(o),
+            AgentOptions::Agy(o) if o != AgyOptions::default() => agy = Some(o),
             _ => {}
         }
         roles.push(Role {
@@ -519,6 +522,7 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
             claude,
             codex,
             pi,
+            agy,
         });
     }
     let workflow = match selection.preset {
@@ -866,6 +870,9 @@ pub(crate) fn create(
             if selection.agent == crate::agent::Kind::Pi {
                 writeln!(output, "pi setup: run herdr-crew pi-install once; its extension keeps each role's prompt across herdr restores.").map_err(io_fail)?;
             }
+            if selection.agent == crate::agent::Kind::Agy {
+                writeln!(output, "agy setup: run herdr-crew agy-install once (and herdr integration install antigravity-cli for session restore).").map_err(io_fail)?;
+            }
         }
         Purpose::Up => {
             writeln!(
@@ -991,7 +998,7 @@ mod tests {
         let (selection, output) = choose_with(&root, &Options::default(), "\n1\ngpt\nPi\n\n\n");
         assert_eq!(selection.agent, crate::agent::Kind::Pi);
         assert!(
-            output.contains("Enter one of: claude, codex, pi."),
+            output.contains("Enter one of: claude, codex, pi, agy."),
             "{output}"
         );
         let yes = Options {

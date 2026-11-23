@@ -44,6 +44,7 @@ Non-goals: a crew-owned queue, daemon, inbox, task graph or automatic assignment
 | --- | --- |
 | Claude → Claude | `SendMessage` (recommended); `send` also works |
 | Claude or pi → any other | `herdr-crew send` |
+| agy → independent crew peer | `herdr-crew send`, subject to terminal sandbox socket access (`--sandbox` / `--mode auto` normally block it; report actual failures and use final output/commits or relay when required). See [agy support](agy-support.md). |
 | Codex → independent crew peer | `herdr-crew send`, subject to effective socket/store access. Default workspace permissions normally block it; report actual failures and use final output/commits or relay when required. |
 | Codex tree coordinator ↔ native worker | Native collaboration and automatic worker final reports; see the separate [experiment](codex-tree-experiment.md). |
 

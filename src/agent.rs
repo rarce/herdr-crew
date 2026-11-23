@@ -1,4 +1,4 @@
-//! Agent selection and typed, additive Codex and pi launch options.
+//! Agent selection and typed, additive launch options for Claude, Codex, pi and agy.
 
 use std::path::{Path, PathBuf};
 
@@ -11,16 +11,18 @@ pub enum Kind {
     Claude,
     Codex,
     Pi,
+    Agy,
 }
 
 impl Kind {
-    pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Pi];
+    pub const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Pi, Self::Agy];
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "pi" => Some(Self::Pi),
+            "agy" => Some(Self::Agy),
             _ => None,
         }
     }
@@ -30,6 +32,7 @@ impl Kind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Pi => "pi",
+            Self::Agy => "agy",
         }
     }
 }
@@ -40,6 +43,7 @@ pub enum AgentOptions {
     Claude(ClaudeOptions),
     Codex(CodexOptions),
     Pi(PiOptions),
+    Agy(AgyOptions),
 }
 
 impl AgentOptions {
@@ -48,6 +52,7 @@ impl AgentOptions {
             Self::Claude(_) => Kind::Claude,
             Self::Codex(_) => Kind::Codex,
             Self::Pi(_) => Kind::Pi,
+            Self::Agy(_) => Kind::Agy,
         }
     }
 }
@@ -70,6 +75,10 @@ pub const CODEX_EFFORTS: &[&str] = &[
 ];
 /// `pi --thinking` levels; pi clamps them to what the model supports.
 pub const PI_THINKING: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/// `agy --effort` levels.
+pub const AGY_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+/// `agy --mode` values.
+pub const AGY_MODES: &[&str] = &["accept-edits", "auto", "plan"];
 
 /// A value passed as its own argument: nonempty, one line, and not readable as an option.
 fn plain_value_problem(key: &str, value: &str) -> Option<String> {
@@ -350,6 +359,135 @@ impl PiOptions {
     }
 }
 
+/// Antigravity CLI (`agy`) launch options: `--model`, `--effort`, `--mode`, `--sandbox`, `--add-dir`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgyOptions {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub mode: Option<String>,
+    pub sandbox: Option<bool>,
+    pub additional_dirs: Option<Vec<PathBuf>>,
+}
+
+pub const AGY_KEYS: &[&str] = &["model", "effort", "mode", "sandbox", "additional_dirs"];
+
+impl AgyOptions {
+    pub fn inherit(&self, defaults: &Self) -> Self {
+        Self {
+            model: self.model.clone().or_else(|| defaults.model.clone()),
+            effort: self.effort.clone().or_else(|| defaults.effort.clone()),
+            mode: self.mode.clone().or_else(|| defaults.mode.clone()),
+            sandbox: self.sandbox.or(defaults.sandbox),
+            additional_dirs: self
+                .additional_dirs
+                .clone()
+                .or_else(|| defaults.additional_dirs.clone()),
+        }
+    }
+
+    pub fn problems(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (key, value) in [
+            ("model", &self.model),
+            ("effort", &self.effort),
+            ("mode", &self.mode),
+        ] {
+            let Some(value) = value else { continue };
+            if let Some(problem) = plain_value_problem(key, value) {
+                errors.push(problem);
+            } else if key == "effort" && !AGY_EFFORTS.contains(&value.as_str()) {
+                errors.push(format!(
+                    "effort: expected one of {}",
+                    AGY_EFFORTS.join(", ")
+                ));
+            } else if key == "mode" && !AGY_MODES.contains(&value.as_str()) {
+                errors.push(format!("mode: expected one of {}", AGY_MODES.join(", ")));
+            }
+        }
+        if let Some(dirs) = &self.additional_dirs {
+            for dir in dirs {
+                if dir.as_os_str().is_empty()
+                    || dir.to_str().is_none_or(|s| s.chars().any(char::is_control))
+                {
+                    errors.push(
+                        "additional_dirs: paths must be nonempty UTF-8 without control characters"
+                            .into(),
+                    );
+                } else if !dir.is_absolute()
+                    && let Some(problem) =
+                        crate::files::relative_path_problem(dir.to_str().unwrap())
+                {
+                    errors.push(format!("additional_dirs: {problem}"));
+                }
+            }
+        }
+        errors
+    }
+
+    /// Check launch compatibility after defaults and role options have been merged.
+    pub fn launch_problem(&self) -> Option<&'static str> {
+        let (Some(model), Some(_)) = (&self.model, &self.effort) else {
+            return None;
+        };
+        if model.starts_with("gemini-pro-orchestrator-") {
+            return Some("effort: orchestrator models manage reasoning automatically; omit effort");
+        }
+        if AGY_EFFORTS
+            .iter()
+            .any(|level| model.ends_with(&format!("-{level}")))
+        {
+            return Some(
+                "effort: conflicts with a model slug that already ends in an effort level; use \
+                 the base model name or omit effort",
+            );
+        }
+        None
+    }
+
+    pub fn resolve_dirs(&mut self, root: &Path) -> Result<(), String> {
+        if let Some(dirs) = &mut self.additional_dirs {
+            for dir in dirs {
+                let path = if dir.is_absolute() {
+                    dir.clone()
+                } else {
+                    root.join(&*dir)
+                };
+                *dir = path
+                    .canonicalize()
+                    .map_err(|e| format!("additional directory {}: {e}", path.display()))?;
+                if !dir.is_dir() {
+                    return Err(format!("{} is not a directory", dir.display()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Separate arguments, never interpolated by a shell.
+    pub fn args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for (flag, value) in [
+            ("--model", &self.model),
+            ("--effort", &self.effort),
+            ("--mode", &self.mode),
+        ] {
+            if let Some(value) = value {
+                args.extend([flag.to_string(), value.clone()]);
+            }
+        }
+        if self.sandbox == Some(true) {
+            args.push("--sandbox".into());
+        }
+        if let Some(dirs) = &self.additional_dirs {
+            for dir in dirs {
+                args.extend(["--add-dir".into(), dir.display().to_string()]);
+            }
+        }
+        args
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +499,7 @@ mod tests {
             Kind::Claude => 0,
             Kind::Codex => 1,
             Kind::Pi => 2,
+            Kind::Agy => 3,
         };
         for (i, kind) in Kind::ALL.into_iter().enumerate() {
             assert_eq!(position(kind), i);
@@ -486,5 +625,56 @@ mod tests {
         assert!(options.launch_problem().is_some());
         options.model = Some("sonnet".into());
         assert!(options.launch_problem().is_none());
+    }
+
+    #[test]
+    fn agy_options_inherit_validate_and_detect_effort_conflicts() {
+        let defaults = AgyOptions {
+            model: Some("gemini-4-neon".into()),
+            effort: Some("high".into()),
+            sandbox: Some(true),
+            ..Default::default()
+        };
+        let role = AgyOptions {
+            mode: Some("auto".into()),
+            additional_dirs: Some(vec!["/board".into()]),
+            ..Default::default()
+        }
+        .inherit(&defaults);
+        assert!(role.problems().is_empty());
+        assert!(role.launch_problem().is_none());
+        assert_eq!(
+            role.args(),
+            [
+                "--model",
+                "gemini-4-neon",
+                "--effort",
+                "high",
+                "--mode",
+                "auto",
+                "--sandbox",
+                "--add-dir",
+                "/board",
+            ]
+        );
+        let suffixed = AgyOptions {
+            model: Some("gemini-4-neon-high".into()),
+            effort: Some("low".into()),
+            ..Default::default()
+        };
+        assert!(suffixed.launch_problem().is_some());
+        let orchestrator = AgyOptions {
+            model: Some("gemini-pro-orchestrator-neon".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        assert!(orchestrator.launch_problem().is_some());
+        let bad = AgyOptions {
+            model: Some("--print".into()),
+            effort: Some("ultra".into()),
+            mode: Some("turbo".into()),
+            ..Default::default()
+        };
+        assert_eq!(bad.problems().len(), 3);
     }
 }

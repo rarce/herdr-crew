@@ -377,6 +377,7 @@ impl fmt::Display for Step {
                     write!(f, "start {name} (codex, {:?}) in {pane}", o.args())
                 }
                 AgentOptions::Pi(o) => write!(f, "start {name} (pi, {:?}) in {pane}", o.args()),
+                AgentOptions::Agy(o) => write!(f, "start {name} (agy, {:?}) in {pane}", o.args()),
             },
             Step::RunInPane { pane, command, .. } => write!(f, "type in {pane}: {command}"),
             Step::WriteSchema { path, .. } => write!(f, "write {}", path.display()),
@@ -583,6 +584,22 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                     p.steps.push(Step::Warn(match session {
                         Some(v) => format!(
                             "tab {} has no agent; restart it there with `pi --session {}`",
+                            r.name,
+                            shell_word(&v, e.windows)
+                        ),
+                        None => format!(
+                            "tab {} has no agent and herdr knows no session; close the tab and \
+                             run `herdr-crew up` to start it again with its prompt",
+                            r.name
+                        ),
+                    }));
+                    continue;
+                }
+                if recorded_kind == Kind::Agy {
+                    // The crew's SessionStart hook persisted the role prompt in the conversation.
+                    p.steps.push(Step::Warn(match session {
+                        Some(v) => format!(
+                            "tab {} has no agent; restart it there with `agy --conversation {}`",
                             r.name,
                             shell_word(&v, e.windows)
                         ),
