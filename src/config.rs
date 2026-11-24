@@ -1242,5 +1242,10 @@ prompt = '''You are {{NAME}}.'''
                 .any(|error| error.contains("cannot both be enabled"))
         );
         assert!(!Config::parse(MIN, root).unwrap().experimental_agy_tree);
+        let fixture = include_str!("../tests/fixtures/crew-agy-tree.toml");
+        let parsed = Config::parse(fixture, root).unwrap();
+        assert!(parsed.experimental_agy_tree);
+        assert_eq!(parsed.kind, Kind::Agy);
+        assert_eq!(parsed.roles.len(), 1);
     }
 }

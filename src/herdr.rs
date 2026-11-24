@@ -132,7 +132,6 @@ impl Herdr {
             .env_remove("CLAUDE_CODE_ENTRYPOINT")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CREW_CODEX_BINDING")
-            .env_remove(crate::agy::PROMPT_ENV)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -482,13 +481,6 @@ pub fn execute(
                 if c.roles.first().is_some_and(|role| role.kind == Kind::Codex) {
                     args.extend(codex::pane_environment()?);
                 }
-                if let Some(role) = c.roles.iter().find(|r| !r.worktree)
-                    && role.kind == Kind::Agy
-                {
-                    args.extend(crate::agy::pane_environment(&crate::prompt::prompt_path(
-                        c, &role.name,
-                    )));
-                }
                 let r = herdr
                     .call(&args)
                     .map_err(|e| format!("could not create workspace \"{label}\": {e}"))?;
@@ -568,13 +560,6 @@ pub fn execute(
                 {
                     args.extend(codex::pane_environment()?);
                 }
-                if c.session_role(label)
-                    .is_some_and(|role| role.kind == Kind::Agy)
-                {
-                    args.extend(crate::agy::pane_environment(&crate::prompt::prompt_path(
-                        c, label,
-                    )));
-                }
                 let r = herdr
                     .call(&args)
                     .map_err(|e| format!("could not create tab \"{label}\": {e}"))?;
@@ -621,8 +606,9 @@ pub fn execute(
                         args.extend(pi.args());
                         args
                     }
-                    // The crew's agy SessionStart hook reads CREW_AGY_PROMPT_FILE from the pane env.
+                    // The crew's agy SessionStart hook consumes this one-shot pane binding.
                     AgentOptions::Agy(options) => {
+                        crate::agy::prepare(&c.root, &pane, prompt)?;
                         let mut effective = options.clone();
                         effective.resolve_dirs(&c.root)?;
                         effective.args()

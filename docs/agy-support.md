@@ -13,8 +13,7 @@ Herdr 0.9.5 natively supports `agy`:
 - `herdr agent start <name> --kind agy --pane <id> -- [args...]` starts `agy` and waits for
   interactive readiness.
 - `herdr integration install antigravity-cli` installs Herdr's session-tracking hook in
-  `~/.gemini/config/hooks/herdr-agent-state.sh` (registered in `~/.gemini/config/hooks.json`
-  or `$ANTIGRAVITY_CLI_CONFIG_DIR/hooks.json`).
+  `~/.gemini/config/hooks/herdr-agent-state.sh` (registered in `~/.gemini/config/hooks.json`).
 - On server restart, Herdr restores the tab with `agy --conversation <id>`.
 
 Two CLI differences from Claude Code, Codex and pi shape how crew starts `agy`:
@@ -29,9 +28,12 @@ Two CLI differences from Claude Code, Codex and pi shape how crew starts `agy`:
 
 ## Role prompt delivery and restoration
 
-`herdr-crew agy-install` registers a named `"herdr-crew"` entry in
-`~/.gemini/config/hooks.json` (respecting `ANTIGRAVITY_CLI_CONFIG_DIR`), coexisting with
-Herdr's own `antigravity-cli` hook and any user hooks:
+`herdr-crew agy-install` requires the public `herdr-crew` launcher on `PATH` and registers a
+named `"herdr-crew"` entry in `~/.gemini/config/hooks.json` (respecting
+`ANTIGRAVITY_CLI_CONFIG_DIR` for parity with `herdr integration` and offline tests; note that
+`agy 1.5.15` itself reads global hooks only from `~/.gemini/config/hooks.json` and workspace
+hooks from `.agents/hooks.json`), coexisting with Herdr's own `antigravity-cli` hook and any
+user hooks:
 
 ```json
 {
@@ -47,9 +49,11 @@ Herdr's own `antigravity-cli` hook and any user hooks:
 }
 ```
 
-When crew creates a tab for an `agy` role, it sets `CREW_AGY_PROMPT_FILE` on that pane's
-environment pointing to `.herdr/prompts/<role>.txt`. On `SessionStart`, `herdr-crew agy-hook`
-reads the prompt and returns:
+Right before launching an `agy` role (whether via `CreateWorkspace`, `AdoptWorkspace`,
+`CreateTab`, or `add`), crew writes a one-shot pending binding file for that pane in
+`.herdr/prompts/agy-pending-<hash>.json`. On `SessionStart`, `herdr-crew agy-hook` resolves
+the repository root from `cwd`, atomically consumes the pending binding for `HERDR_PANE_ID`,
+and returns:
 
 ```json
 {
@@ -65,9 +69,9 @@ reads the prompt and returns:
 
 Per Antigravity's `hooks.md` contract, an injected `systemMessage` persists in the
 conversation trajectory across turns, so a plain `agy --conversation <id>` restore retains
-the role prompt. The hook records injected `conversationId`s next to the prompt file
-(`<role>.txt.sessions`) so a resumed session is not injected twice if `SessionStart` fires
-again on restore. Non-crew `agy` sessions have no `CREW_AGY_PROMPT_FILE` and receive `{}`.
+the role prompt. Because the pending binding is atomically deleted on first consumption,
+subagents spawned by a coordinator (`experimental_agy_tree = true`), resumed conversations,
+and non-crew `agy` sessions never receive duplicate or leaked role prompts (they receive `{}`).
 
 Custom agents (`--agent <name>` via `.agents/agents/<name>.md` with `mainAgent: true`) were
 considered and not chosen for role prompts: their Markdown body replaces the base system

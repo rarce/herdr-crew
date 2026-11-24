@@ -1,32 +1,43 @@
 //! Antigravity CLI (`agy`) support: the crew's `SessionStart` hook and its installation.
 //!
 //! `agy` has no `--append-system-prompt-file` flag, and herdr resumes it with a plain
-//! `agy --conversation <id>`. The crew hook injects the rendered role prompt as a `systemMessage`
-//! on `SessionStart`, which `agy` persists in the conversation trajectory across turns and
-//! restores. Non-crew `agy` sessions have no `CREW_AGY_PROMPT_FILE` and receive `{}`.
+//! `agy --conversation <id>`. Before starting an `agy` role, crew writes a one-shot pending
+//! binding for that pane in `.herdr/prompts/`; on `SessionStart`, `herdr-crew agy-hook` resolves
+//! the project root from `cwd`, atomically consumes the pending binding for `HERDR_PANE_ID`, and
+//! injects the rendered role prompt as a persistent `systemMessage`. Because each binding is
+//! consumed once, subagents spawned by a coordinator (`experimental_agy_tree`) and resumed
+//! conversations never receive duplicate or leaked role prompts, and non-crew sessions get `{}`.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{files, process};
+use crate::codex::integration::LAUNCHER_MARKER;
+use crate::{files, git, process, prompt};
 
 /// Top-level hook key owned by herdr-crew inside `hooks.json`.
 pub const HOOK_NAME: &str = "herdr-crew";
 /// Command invoked by `agy` on `SessionStart`.
 pub const HOOK_COMMAND: &str = "herdr-crew agy-hook";
-/// Environment variable set on crew `agy` panes pointing to the rendered role prompt file.
-pub const PROMPT_ENV: &str = "CREW_AGY_PROMPT_FILE";
 /// Largest rendered role prompt handed to the hook.
 pub const MAX_PROMPT: usize = 64 * 1024;
 /// Minimum `agy` version: 1.5.0+ supports base `--model` names with `--effort` and `SessionStart`.
 pub const MIN_AGY: (u32, u32, u32) = (1, 5, 0);
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pending {
+    pane: String,
+    prompt: PathBuf,
+}
+
 /// `agy`'s global customization directory: `ANTIGRAVITY_CLI_CONFIG_DIR` (with `~` expansion) or
-/// `~/.gemini/config`.
+/// `~/.gemini/config`. Note: `agy 1.5.15` reads global hooks from `~/.gemini/config/hooks.json`;
+/// the env override is kept for parity with `herdr integration` and offline tests.
 pub fn config_dir() -> Result<PathBuf, String> {
     let home = || {
         std::env::var_os("HOME")
@@ -71,6 +82,24 @@ fn hook_entry() -> Value {
     })
 }
 
+/// Verify that the public `herdr-crew` launcher is on `PATH`, since `agy` invokes `HOOK_COMMAND`
+/// through `sh -c`.
+pub fn launcher() -> Result<(), String> {
+    let mut child = process::Inspector::spawn(Command::new("herdr-crew").arg("--launcher-id"))
+        .map_err(|_| {
+            "the public herdr-crew launcher must be on PATH; install it with \
+             scripts/build.sh --install-launcher"
+                .to_string()
+        })?;
+    if child.line()?.trim() != LAUNCHER_MARKER {
+        return Err(
+            "herdr-crew on PATH is not the public plugin launcher; rebuild/install the launcher"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// Merge or remove only the `"herdr-crew"` hook group, leaving every other hook (including
 /// herdr's `antigravity-cli` integration) untouched.
 pub fn merge(value: &mut Value, remove: bool) -> Result<(), String> {
@@ -103,6 +132,9 @@ fn has_hook(value: &Value) -> bool {
 
 /// `agy-install` and `agy-uninstall`: update only the `"herdr-crew"` key in `hooks.json`.
 pub fn install(remove: bool) -> Result<(), String> {
+    if !remove {
+        launcher()?;
+    }
     let dir = config_dir()?;
     if remove && !dir.exists() {
         return Ok(());
@@ -144,8 +176,10 @@ pub fn install(remove: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Before an `agy` role starts: `hooks.json` must contain our active `SessionStart` hook.
+/// Before an `agy` role starts: the launcher must be on `PATH` and `hooks.json` must contain
+/// our active `SessionStart` hook.
 pub fn preflight() -> Result<(), String> {
+    launcher()?;
     preflight_path(&hooks_path()?)
 }
 
@@ -186,22 +220,35 @@ pub fn require_version(program: impl AsRef<std::ffi::OsStr>) -> Result<(u32, u32
 }
 
 /// Why a rendered role prompt cannot be handed to the hook, if it cannot.
-pub fn prompt_problem(name: &str, prompt: &str) -> Option<String> {
-    (prompt.trim().is_empty() || prompt.len() > MAX_PROMPT).then(|| {
+pub fn prompt_problem(name: &str, prompt_text: &str) -> Option<String> {
+    (prompt_text.trim().is_empty() || prompt_text.len() > MAX_PROMPT).then(|| {
         format!(
             "the prompt of {name} must be nonempty and at most {MAX_PROMPT} bytes for agy \
              ({} bytes)",
-            prompt.len()
+            prompt_text.len()
         )
     })
 }
 
-/// Environment flags passed to `herdr workspace create` / `herdr tab create` for an `agy` role.
-pub fn pane_environment(prompt_path: &Path) -> Vec<String> {
-    vec![
-        "--env".into(),
-        format!("{PROMPT_ENV}={}", prompt_path.display()),
-    ]
+fn pending_path(root: &Path, pane: &str) -> PathBuf {
+    let key = files::fnv64(0xcbf29ce484222325, pane.as_bytes());
+    root.join(prompt::PROMPTS_DIR)
+        .join(format!("agy-pending-{key:016x}.json"))
+}
+
+/// Writes the one-shot pending binding for `pane` before `agent start` launches `agy`.
+/// Works identically for `CreateWorkspace`, `AdoptWorkspace`, `CreateTab`, and `add`.
+pub fn prepare(root: &Path, pane: &str, prompt_path: &Path) -> Result<(), String> {
+    let relative = prompt_path
+        .strip_prefix(root)
+        .map_err(|_| format!("{} is outside {}", prompt_path.display(), root.display()))?;
+    let path = pending_path(root, pane);
+    let record = Pending {
+        pane: pane.to_string(),
+        prompt: relative.to_path_buf(),
+    };
+    let text = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    files::write(root, &path, &text)
 }
 
 /// `agy-hook`: invoked by `agy` on `SessionStart`. Reads camelCase JSON on stdin and prints the
@@ -212,68 +259,73 @@ pub fn hook() {
     let _ = io::stdin()
         .take((MAX_PROMPT as u64) + 1)
         .read_to_string(&mut raw);
-    let prompt_path = std::env::var_os(PROMPT_ENV)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from);
-    let out = hook_response(&raw, prompt_path.as_deref());
+    let pane = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let out = hook_response(&raw, pane.as_deref());
     println!("{out}");
 }
 
-fn hook_response(stdin: &str, prompt_path: Option<&Path>) -> Value {
-    let Some(path) = prompt_path else {
+fn hook_response(stdin: &str, pane: Option<&str>) -> Value {
+    let Some(pane) = pane else {
         return json!({});
     };
-    if !path.is_absolute() {
+    let Ok(input) = serde_json::from_str::<Value>(stdin) else {
+        return json!({});
+    };
+    let Some(cwd) = input
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return json!({});
+    };
+    let Ok(root) = git::main_root(Path::new(cwd)) else {
+        return json!({});
+    };
+    let path = pending_path(&root, pane);
+    let Ok(validated_pending) = files::validate(&root, &path, files::Kind::File) else {
+        return json!({});
+    };
+    let Ok(text) = fs::read_to_string(&validated_pending) else {
+        return json!({});
+    };
+    // Consume the pending binding atomically so only this initial session gets the role prompt,
+    // never subagents spawned by a coordinator or resumed conversations.
+    if fs::remove_file(&validated_pending).is_err() {
         return json!({});
     }
-    let Ok(meta) = fs::symlink_metadata(path) else {
+    let Ok(pending) = serde_json::from_str::<Pending>(&text) else {
+        return json!({});
+    };
+    if pending.pane != pane {
+        return json!({});
+    }
+    let prompt_file = root.join(&pending.prompt);
+    let Ok(validated_prompt) = files::validate(&root, &prompt_file, files::Kind::File) else {
+        return json!({});
+    };
+    let Ok(meta) = fs::symlink_metadata(&validated_prompt) else {
         return json!({});
     };
     if !meta.is_file() || meta.len() > MAX_PROMPT as u64 {
         return json!({});
     }
-    let Ok(prompt) = fs::read_to_string(path) else {
+    let Ok(prompt_text) = fs::read_to_string(&validated_prompt) else {
         return json!({});
     };
-    if prompt.trim().is_empty() || prompt.len() > MAX_PROMPT {
-        return json!({});
-    }
-    // Avoid re-injecting the role prompt if SessionStart fires again on `--conversation` resume.
-    if let Ok(input) = serde_json::from_str::<Value>(stdin)
-        && let Some(conversation_id) = input
-            .get("conversationId")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-        && !claim_conversation(path, conversation_id)
-    {
+    if prompt_text.trim().is_empty() || prompt_text.len() > MAX_PROMPT {
         return json!({});
     }
     json!({
         "injectSteps": [
             {
                 "systemMessage": {
-                    "systemMessage": prompt
+                    "systemMessage": prompt_text
                 }
             }
         ]
     })
-}
-
-/// Records `conversation_id` next to `prompt_path` so a resumed conversation is injected at most
-/// once. Returns `false` if already recorded, `true` otherwise (best-effort on I/O errors).
-fn claim_conversation(prompt_path: &Path, conversation_id: &str) -> bool {
-    let state_path = PathBuf::from(format!("{}.sessions", prompt_path.display()));
-    let mut seen: BTreeSet<String> = fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    if !seen.insert(conversation_id.to_string()) {
-        return false;
-    }
-    if let Ok(text) = serde_json::to_string(&seen) {
-        let _ = fs::write(&state_path, text);
-    }
-    true
 }
 
 #[cfg(test)]
@@ -297,35 +349,31 @@ mod tests {
     }
 
     #[test]
-    fn hook_injects_once_per_conversation_and_ignores_non_crew() {
-        let dir = std::env::temp_dir().join(format!("crew-agy-hook-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let prompt = dir.join("dev.txt");
-        fs::write(&prompt, "You are dev.").unwrap();
+    fn hook_consumes_pending_binding_once_and_ignores_subagents_and_non_crew() {
+        let root = git::test_repo("agy-hook");
+        let prompt_file = root.join(prompt::PROMPTS_DIR).join("lead.txt");
+        files::write(&root, &prompt_file, "You are lead.").unwrap();
+        prepare(&root, "w1:p1", &prompt_file).unwrap();
 
-        // Non-crew session without env var gets empty object.
-        assert_eq!(hook_response(r#"{"conversationId":"c1"}"#, None), json!({}));
+        let stdin = json!({"conversationId": "c1", "cwd": root}).to_string();
 
-        // First SessionStart injects systemMessage.
-        let first = hook_response(r#"{"conversationId":"c1"}"#, Some(&prompt));
+        // Non-Herdr session without HERDR_PANE_ID gets empty object and does not consume binding.
+        assert_eq!(hook_response(&stdin, None), json!({}));
+        // Unrelated pane gets empty object and does not consume binding.
+        assert_eq!(hook_response(&stdin, Some("w1:p9")), json!({}));
+
+        // First SessionStart for w1:p1 consumes binding and injects systemMessage.
+        let first = hook_response(&stdin, Some("w1:p1"));
         assert_eq!(
             first["injectSteps"][0]["systemMessage"]["systemMessage"].as_str(),
-            Some("You are dev.")
+            Some("You are lead.")
         );
 
-        // Second SessionStart for the same conversationId (e.g. resume) does not duplicate.
-        let second = hook_response(r#"{"conversationId":"c1"}"#, Some(&prompt));
-        assert_eq!(second, json!({}));
+        // Second SessionStart (subagent or resume) gets empty object; no prompt leakage.
+        let subagent_stdin = json!({"conversationId": "sub-1", "cwd": root}).to_string();
+        assert_eq!(hook_response(&subagent_stdin, Some("w1:p1")), json!({}));
 
-        // A new conversationId gets the prompt.
-        let fresh = hook_response(r#"{"conversationId":"c2"}"#, Some(&prompt));
-        assert_eq!(
-            fresh["injectSteps"][0]["systemMessage"]["systemMessage"].as_str(),
-            Some("You are dev.")
-        );
-
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
