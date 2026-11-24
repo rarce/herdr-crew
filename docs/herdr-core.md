@@ -309,8 +309,8 @@ Still to test:
 5. **App mod: done**, for `up`. `herdr-crew app-install` writes
    `$HERDR_APP_HOME/mods/herdr-crew/`, containing `src/app/main.js` (with the installing
    binary's path) and a dialog `mod.json`.
-   - **Opening.** The dialog "Crew" opens from the command palette ("Crew: bring the crew
-     up", Herdr 0.1.18+), with `mod.open herdr-crew`, or a key bound to it.
+   - **Opening.** The dialog "Crew" opens from the command palette ("Crew: open the crew
+     dialog", Herdr 0.1.18+), with `mod.open herdr-crew`, or a key bound to it.
    - **What it does.** It shows `up --dry-run`'s verdicts for the focused terminal's folder,
      and "Bring the crew up" runs `CREW_HOST=herdr-core herdr-crew up --no-attach` there.
      That is how to recover after a core restart without a terminal.
@@ -324,17 +324,25 @@ Still to test:
      shows the verdicts for the focused tab's folder.
 6. **Codex and agy on core: done.**
    - **Pane keys.** Hooks find their pane by `Backend::pane_key`: `HERDR_PANE_ID`, or
-     `hc:<HC_SESSION or default>:<HC_TERMINAL_ID>`. A hook in a TUI pane inside an app
-     terminal tries both.
+     `hc:<id>`, where `<id>` is the terminal's `crew.core` label. Crew sets that random
+     label when it makes the terminal (and on an older crew terminal when it first needs
+     it); core keeps labels across restarts. `up` and the hook both read it from the
+     terminal, so they agree however each reached the core (`HC_SESSION`, `HC_SOCKET`). A
+     hook in a TUI pane inside an app terminal tries both keys.
    - **agy.** The one-shot launch slot is keyed by that pane key. On core the hook also
      labels its terminal `crew.session=<conversationId>`, and `up` resumes with
      `agy --conversation <id>` (the conversation keeps the role prompt it was given).
-   - **Codex.** `codex::Context` is the TUI pane or, on core, `hc:<session>`, the space, the
-     tab and the terminal address, read from the terminal's labels. The hook verifies the
+   - **Codex.** `codex::Context` is the TUI pane or, on core, `hc:<crew.core>`, the space,
+     the tab and the terminal address, read from the terminal's labels. The hook takes the
+     first inherited place (TUI pane, then core terminal) that has a binding; an incomplete
+     TUI environment only rules the TUI out. The hook verifies the
      space (`space_id` of the snapshot's root), the tab and `crew.tab`, then labels the
      terminal `crew.session=<binding token>` instead of `pane.report_agent_session`. `up`
      resumes by typing `herdr-crew codex-resume <token>`; `codex-resume` refuses when another
-     live terminal holds that token. `send` types into the terminal (no native queue).
+     live terminal holds that token.
+   - **A failed resume.** When `codex-resume` or `agy --conversation` exits at once, `up`
+     warns with the command to retry, clears `crew.session` and goes on, so later runs are
+     not stuck on it. `send` types into the terminal (no native queue).
    - **Bug found.** `hc` got `--json` last, so with `run … -- env K=V zsh -l` the shell
      received `--json` and exited. `--json` now goes first.
    - **Real test** (hc 0.1.22, isolated `HC_SESSION`, Codex 0.172.0, agy 1.5.16): both

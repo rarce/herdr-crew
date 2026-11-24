@@ -46,6 +46,9 @@ pub enum Started {
     NewConversation {
         waiting: bool,
     },
+    /// A resume exited at once and nothing started: the tab is a shell again, and the host
+    /// forgot the session so that the next `up` does not try it again.
+    NotResumed,
 }
 
 /// An agent's state, as `send` needs it.
@@ -155,9 +158,9 @@ pub trait Backend {
     fn focus_and_attach(&self, workspace: &str, root: &Path, attach: bool) -> Result<(), String>;
 
     /// The key an agent's hook finds its pane by, from inside that pane: the Herdr TUI's
-    /// `HERDR_PANE_ID`, or herdr-core's session and terminal (see [`core_pane_key`]).
-    fn pane_key(&self, pane: &str) -> String {
-        pane.to_string()
+    /// `HERDR_PANE_ID`, or a herdr-core terminal's `crew.core` label (see [`hook_pane_keys`]).
+    fn pane_key(&self, pane: &str) -> Result<String, String> {
+        Ok(pane.to_string())
     }
 
     /// Where a Codex role starting in `pane` runs, for its binding (see `codex::prepare`).
@@ -174,17 +177,11 @@ pub trait Backend {
     }
 }
 
-/// The herdr-core session that `hc` and its terminals use (`HC_SESSION`, else `default`).
-pub fn core_session() -> String {
-    std::env::var("HC_SESSION")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "default".into())
-}
-
-/// The key of a herdr-core terminal for hooks: addresses repeat across core sessions.
-pub fn core_pane_key(session: &str, address: &str) -> String {
-    format!("hc:{session}:{address}")
+/// The key of a herdr-core terminal for hooks, from its `crew.core` label. The label is read
+/// from the terminal itself, so `up` and a hook inside the terminal agree whatever session or
+/// socket each reached the core by.
+pub fn core_pane_key(id: &str) -> String {
+    format!("hc:{id}")
 }
 
 /// The keys a hook running in this process's terminal may find its pane by: the Herdr TUI
@@ -195,8 +192,10 @@ pub fn hook_pane_keys() -> Vec<String> {
     if let Some(pane) = var("HERDR_PANE_ID") {
         keys.push(pane);
     }
-    if let Some(address) = var("HC_TERMINAL_ID") {
-        keys.push(core_pane_key(&core_session(), &address));
+    if let Some(address) = var("HC_TERMINAL_ID")
+        && let Ok(Some(id)) = crate::hc::Hc::from_env().core_id(&address, false)
+    {
+        keys.push(core_pane_key(&id));
     }
     keys
 }

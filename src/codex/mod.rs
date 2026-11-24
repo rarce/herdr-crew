@@ -48,8 +48,8 @@ pub fn pane_environment() -> Result<Vec<(String, String)>, String> {
 }
 
 /// Where a Codex role runs. On the Herdr TUI `socket` is the server's socket; on herdr-core it
-/// is `hc:<session>`, the workspace is the crew's space, the tab its `herdr.tab` and the pane
-/// and terminal the terminal's address.
+/// is `hc:<id>`, the terminal's `crew.core` label (see `hc::Hc::core_id`), the workspace is the
+/// crew's space, the tab its `herdr.tab` and the pane and terminal the terminal's address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
     socket: String,
@@ -62,9 +62,9 @@ pub struct Context {
 const CORE: &str = "hc:";
 
 impl Context {
-    pub fn core(session: &str, space: &str, tab: &str, address: &str) -> Context {
+    pub fn core(id: &str, space: &str, tab: &str, address: &str) -> Context {
         Context {
-            socket: format!("{CORE}{session}"),
+            socket: format!("{CORE}{id}"),
             workspace: space.into(),
             tab: tab.into(),
             pane: address.into(),
@@ -377,25 +377,26 @@ fn inherited_environment() -> Result<Option<Context>, String> {
     }))
 }
 
-/// The herdr-core terminal this process runs in, from `HC_TERMINAL_ID`; its space and tab
+/// The herdr-core terminal this process runs in, from `HC_TERMINAL_ID`; its id, space and tab
 /// come from its labels (`live_context`).
 fn inherited_core() -> Option<Context> {
     let address = std::env::var("HC_TERMINAL_ID")
         .ok()
         .filter(|a| !a.is_empty())?;
-    Some(Context::core(
-        &crate::backend::core_session(),
-        "",
-        "",
-        &address,
-    ))
+    Some(Context::core("", "", "", &address))
 }
 
 /// The places this process may run in: the Herdr TUI pane, then the herdr-core terminal. A
-/// core started from a TUI pane passes the pane's variables on, so both may be set.
+/// core started from a TUI pane passes the pane's variables on, so both may be set; an
+/// incomplete TUI environment then only rules the TUI out.
 fn inherited_contexts() -> Result<Vec<Context>, String> {
-    let mut contexts: Vec<Context> = inherited_environment()?.into_iter().collect();
-    contexts.extend(inherited_core());
+    let core = inherited_core();
+    let mut contexts: Vec<Context> = match inherited_environment() {
+        Ok(tui) => tui.into_iter().collect(),
+        Err(_) if core.is_some() => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    contexts.extend(core);
     Ok(contexts)
 }
 
@@ -412,9 +413,8 @@ fn live_context(context: Context) -> Result<Context, String> {
                 .map(str::to_string)
                 .ok_or_else(|| format!("terminal {} has no {key} label", context.pane))
         };
-        let session = &context.socket[CORE.len()..];
         return Ok(Context::core(
-            session,
+            &label("crew.core")?,
             &label("herdr.space")?,
             &label("herdr.tab")?,
             &context.pane,
@@ -554,32 +554,38 @@ fn process_hook(input: HookInput) -> Result<Option<String>, String> {
     if explicit.is_none() && !root.join(RUNTIME).join("bindings").exists() {
         return Ok(None);
     }
+    // The first place with a binding wins. A TUI pane named by a binding, or an explicit
+    // binding, must resolve: then a failure is reported rather than taken as no crew session.
     let mut found = None;
+    let mut failure = None;
     for candidate in inherited_contexts()? {
-        // A core terminal's space and tab are in its labels, not its environment.
-        if candidate.on_core() {
-            let live = match live_context(candidate) {
-                Ok(live) => live,
-                Err(e) if explicit.is_some() => return Err(e),
-                // Not a crew terminal, or no core to ask: not a crew session.
-                Err(_) => continue,
-            };
-            if explicit.is_some() || path(&root, "bindings", &context_key(&live)).exists() {
+        let claimed = explicit.is_some()
+            || (!candidate.on_core() && has_inherited_binding(&root, &candidate)?);
+        // A core terminal's id, space and tab are in its labels, not its environment.
+        if !claimed && !candidate.on_core() {
+            continue;
+        }
+        match live_context(candidate) {
+            Ok(live) if path(&root, "bindings", &context_key(&live)).exists() => {
                 found = Some(live);
                 break;
             }
-        } else if explicit.is_some() || has_inherited_binding(&root, &candidate)? {
-            found = Some(live_context(candidate)?);
-            break;
+            Ok(_) => {}
+            Err(e) if claimed => {
+                failure.get_or_insert(e);
+            }
+            // Not a crew terminal, or no core to ask: not a crew session.
+            Err(_) => {}
         }
     }
     let Some(context) = found else {
-        return Ok(None);
+        return match (failure, &explicit) {
+            (Some(e), _) => Err(e),
+            (None, Some(_)) => Err("Codex pane binding does not match its saved context".into()),
+            (None, None) => Ok(None),
+        };
     };
     let binding_path = path(&root, "bindings", &context_key(&context));
-    if !binding_path.exists() && explicit.is_none() {
-        return Ok(None);
-    }
     let _lock = Lock::acquire(&root)?;
     let binding: Binding = read(&root, &binding_path)?;
     if binding.context != context

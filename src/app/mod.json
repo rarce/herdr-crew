@@ -4,7 +4,7 @@
   "overlay": { "kind": "dialog", "width": 620 },
   "palette": [
     {
-      "title": "Crew: bring the crew up",
+      "title": "Crew: open the crew dialog",
       "command": "mod.open",
       "args": { "name": "herdr-crew" },
       "words": "herdr-crew agents roles up resume"

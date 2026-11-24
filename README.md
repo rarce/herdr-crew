@@ -290,7 +290,7 @@ The "Crew" dialog in the app does the same without a terminal:
 herdr-crew app-install     # writes ~/.config/herdr-app/mods/herdr-crew/ ($HERDR_APP_HOME)
 ```
 
-Open the dialog from the command palette ("Crew: bring the crew up"), with the app command
+Open the dialog from the command palette ("Crew: open the crew dialog"), with the app command
 `mod.open herdr-crew`, or bind a key to it in
 `~/.config/herdr-app/keys.json`:
 

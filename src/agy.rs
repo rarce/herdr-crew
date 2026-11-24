@@ -367,13 +367,7 @@ fn record_conversation(stdin: &str) {
     else {
         return;
     };
-    let hc = std::env::var_os("CREW_HC_BIN").unwrap_or_else(|| "hc".into());
-    let _ = Command::new(hc)
-        .args(["label", &address, &format!("crew.session={id}")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let _ = crate::hc::Hc::from_env().set_label(&address, "crew.session", &id);
 }
 
 /// An id `up` may type after `agy --conversation`: letters, digits, `-` and `_`.

@@ -122,16 +122,10 @@ impl Hc {
 
     /// The open window's spaces and tabs (`herdr-app ls`), or `None` with no window.
     fn app_ls(&self) -> Option<Value> {
-        let out = self
-            .command(&self.app)
-            .arg("ls")
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        serde_json::from_slice(&out.stdout).ok()
+        let mut cmd = self.command(&self.app);
+        cmd.arg("ls");
+        let stdout = bounded(&mut cmd, APP_WAIT)?;
+        serde_json::from_slice(&stdout).ok()
     }
 
     /// Best effort `herdr-app do <command> --key value…`: the window may be closed.
@@ -141,7 +135,7 @@ impl Hc {
         for (k, v) in args {
             cmd.arg(format!("--{k}")).arg(v);
         }
-        let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let _ = bounded(&mut cmd, APP_WAIT);
     }
 
     fn terminal(&self, address: &str) -> Result<Value, HcError> {
@@ -152,6 +146,22 @@ impl Hc {
     pub fn get(&self, address: &str) -> Result<Value, String> {
         self.terminal(address)
             .map_err(|e| format!("could not read terminal {address}: {e}"))
+    }
+
+    /// The terminal's crew identity, its `crew.core` label: random, set when crew makes the
+    /// terminal, and kept by core across restarts. With `create`, a terminal made by an older
+    /// crew gets one.
+    pub fn core_id(&self, address: &str, create: bool) -> Result<Option<String>, String> {
+        let t = self.get(address)?;
+        if let Some(id) = label(&t, "crew.core").filter(|v| !v.is_empty()) {
+            return Ok(Some(id.to_string()));
+        }
+        if !create {
+            return Ok(None);
+        }
+        let id = files::random_hex(8).map_err(|e| e.to_string())?;
+        self.set_label(address, "crew.core", &id)?;
+        Ok(Some(id))
     }
 
     /// Sets one label on a terminal.
@@ -216,7 +226,12 @@ impl Hc {
             files::random_hex(4).map_err(|e| e.to_string())?
         );
         let cwd = cwd.to_string_lossy();
-        let mut labels = vec![format!("herdr.space={space}"), format!("herdr.tab={tab}")];
+        let id = files::random_hex(8).map_err(|e| e.to_string())?;
+        let mut labels = vec![
+            format!("herdr.space={space}"),
+            format!("herdr.tab={tab}"),
+            format!("crew.core={id}"),
+        ];
         if let Some(label) = label {
             labels.push(format!("crew.tab={label}"));
         }
@@ -240,6 +255,39 @@ impl Hc {
             .to_string();
         Ok((tab, address))
     }
+}
+
+/// How long a `herdr-app` call may take: `up` holds the project lock meanwhile.
+const APP_WAIT: Duration = Duration::from_secs(5);
+
+/// Runs `cmd` for at most `limit` and returns its stdout when it succeeds; kills it otherwise.
+fn bounded(cmd: &mut Command, limit: Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut pipe = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = pipe.read_to_end(&mut out);
+        out
+    });
+    let since = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if since.elapsed() < limit => sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let out = reader.join().ok()?;
+    status.success().then_some(out)
 }
 
 /// The creation time of a terminal, to keep the first one first.
@@ -683,6 +731,12 @@ impl Backend for Hc {
                     Launch::Exited => return Err(exited(s)),
                 }
             }
+            // agy's or Codex's resume failed (no saved conversation, or `codex-resume`
+            // refused). Forget the session: retrying it would stop every later `up` here.
+            Launch::Exited if s.resume.is_some() => {
+                let _ = self.set_label(s.pane, "crew.session", "");
+                Started::NotResumed
+            }
             Launch::Exited => return Err(exited(s)),
         })
     }
@@ -735,8 +789,11 @@ impl Backend for Hc {
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| format!("terminal {pane} has no {key} label"))
         };
+        let id = self
+            .core_id(pane, true)?
+            .ok_or_else(|| format!("terminal {pane} has no crew.core label"))?;
         Ok(crate::codex::Context::core(
-            &crate::backend::core_session(),
+            &id,
             label("herdr.space")?,
             label("herdr.tab")?,
             pane,
@@ -763,8 +820,11 @@ impl Backend for Hc {
         }
     }
 
-    fn pane_key(&self, pane: &str) -> String {
-        crate::backend::core_pane_key(&crate::backend::core_session(), pane)
+    fn pane_key(&self, pane: &str) -> Result<String, String> {
+        let id = self
+            .core_id(pane, true)?
+            .ok_or_else(|| format!("terminal {pane} has no crew.core label"))?;
+        Ok(crate::backend::core_pane_key(&id))
     }
 
     fn will_attach(&self, _attach: bool) -> bool {

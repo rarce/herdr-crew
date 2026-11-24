@@ -51,7 +51,7 @@ Right before launching an `agy` role (whether via `CreateWorkspace`, `AdoptWorks
 `CreateTab`, or `add`), crew saves the rendered prompt for that repository and pane in
 the private directory `~/.herdr-crew-agy/`. A failed launch clears its pending prompt.
 On `SessionStart`, `herdr-crew agy-hook` resolves
-the repository root from `cwd`, atomically consumes the pending binding for `HERDR_PANE_ID` (on herdr-core, for `HC_SESSION`/`HC_TERMINAL_ID`, where it also records the `conversationId` in the terminal's `crew.session` label so that `up` can resume it with `agy --conversation <id>`),
+the repository root from `cwd`, atomically consumes the pending binding for `HERDR_PANE_ID` (on herdr-core, for the terminal's `crew.core` label, where it also records the `conversationId` in the terminal's `crew.session` label so that `up` can resume it with `agy --conversation <id>`),
 and returns:
 
 ```json

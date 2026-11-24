@@ -364,6 +364,45 @@ fn codex_roles_bind_to_their_terminal_and_resume_through_the_crew() {
         .unwrap()
         .to_string();
     assert_eq!(token.len(), 32, "{token}");
+    assert!(
+        lead["labels"]["crew.core"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{lead:#?}"
+    );
+    // A core started from a TUI pane passes the pane's variables on, complete or not: the
+    // core terminal still finds its binding, with or without the explicit one.
+    let tui = [
+        ("CODEX_HOME", codex_home),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p9"),
+    ];
+    let partial = hook(
+        &f,
+        "codex-hook",
+        &address,
+        &event("compact", "lead-id"),
+        &tui,
+    );
+    assert_eq!(partial, first, "{partial}");
+    let socket = f.root.join("gone.sock");
+    let full = [
+        ("CODEX_HOME", codex_home),
+        ("HERDR_ENV", "1"),
+        ("HERDR_PANE_ID", "w9:p9"),
+        ("HERDR_TAB_ID", "w9:t9"),
+        ("HERDR_WORKSPACE_ID", "w9"),
+        ("HERDR_SOCKET_PATH", socket.to_str().unwrap()),
+        ("CREW_CODEX_BINDING", token.as_str()),
+    ];
+    let explicit = hook(
+        &f,
+        "codex-hook",
+        &address,
+        &event("compact", "lead-id"),
+        &full,
+    );
+    assert_eq!(explicit, first, "{explicit}");
     // dev's terminal does not hold lead's binding; an ordinary Codex there gets nothing.
     let dev = f.tab("dev")["address"].as_str().unwrap().to_string();
     let other = hook(
@@ -422,6 +461,21 @@ fn codex_roles_bind_to_their_terminal_and_resume_through_the_crew() {
         .output()
         .unwrap();
     assert!(!out.status.success(), "{out:?}");
+
+    // A resume that exits at once (no saved conversation) warns, forgets the session and
+    // lets `up` go on; the next `up` does not try it again.
+    lose_agent(&f, "lead");
+    let text = ok(&f
+        .crew(&["up"])
+        .env("CODEX_HOME", &home)
+        .env("CREW_TEST_HC_LOST", &token)
+        .output()
+        .unwrap());
+    assert!(text.contains("could not resume session"), "{text}");
+    assert!(text.contains("codex-resume"), "{text}");
+    assert!(f.tab("lead")["labels"].get("crew.session").is_none());
+    let text = ok(&run(&["up"]));
+    assert!(!text.contains("lead resumed"), "{text}");
 
     // Typed delivery: herdr-core has no Codex queue.
     use std::io::Write;
