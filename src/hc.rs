@@ -367,7 +367,14 @@ fn tidy_commands(
     let Some(shown) = spaces.into_iter().flatten().find(|s| s["id"] == space) else {
         return commands;
     };
-    if shown["named"] == false || shown["name"].as_str().is_some_and(|n| n.is_empty()) {
+    // `herdr-app ls` has no `named` (the mods' `spaces()` has): a space nobody named is called
+    // after its repo, the crew's folder.
+    let folder = c.root.file_name().map(|n| n.to_string_lossy().to_string());
+    let space_named = shown["named"].as_bool().unwrap_or_else(|| {
+        let name = shown["name"].as_str().unwrap_or_default();
+        !name.is_empty() && Some(name) != folder.as_deref()
+    });
+    if !space_named && shown["name"] != c.label.as_str() {
         commands.push((
             "space.rename",
             vec![("id", space.to_string()), ("name", c.label.clone())],
@@ -393,10 +400,14 @@ fn tidy_commands(
         .flatten()
         .filter_map(|t| Some((t["id"].as_str()?, crew_label(t["id"].as_str()?), t)))
         .collect();
-    // A tab someone renamed keeps its name.
-    for (id, name, t) in &tabs {
+    // A tab someone renamed keeps its name. Without `named`, a tab nobody named is called by
+    // its place ("1", "2"…).
+    for (i, (id, name, t)) in tabs.iter().enumerate() {
+        let named = t["named"]
+            .as_bool()
+            .unwrap_or_else(|| t["name"] != (i + 1).to_string().as_str());
         if let Some(name) = name
-            && t["named"] == false
+            && !named
             && t["name"] != *name
         {
             commands.push((
@@ -818,6 +829,38 @@ mod tests {
         assert!(tidy_commands(&c, "s", &ls, &terminals).is_empty());
         // Another space, or no window: nothing.
         assert!(tidy_commands(&c, "other", &ls, &terminals).is_empty());
+
+        // `herdr-app ls` has no `named`: an unnamed space has the repo's name, an unnamed tab
+        // its place. dev is third ("3"), so it is unnamed; "notes" was named by someone.
+        let ls = json!({"spaces": [{"id": "s", "name": "repo", "tabs": [
+            {"id": "a", "name": "lead"},
+            {"id": "b", "name": "status"},
+            {"id": "c", "name": "3"},
+            {"id": "x", "name": "notes"},
+        ]}]});
+        let commands: Vec<String> = tidy_commands(&c, "s", &ls, &terminals)
+            .into_iter()
+            .map(|(name, args)| {
+                let args: Vec<String> = args.into_iter().map(|(_, v)| v).collect();
+                format!("{name} {}", args.join(" "))
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "space.rename s crew",
+                "tab.rename c dev",
+                "tab.move a 1",
+                "tab.move c 2",
+                "tab.move b 3",
+                "tab.move x 4",
+            ]
+        );
+        // A space someone named "work" keeps it.
+        let ls = json!({"spaces": [{"id": "s", "name": "work", "tabs": [
+            {"id": "a", "name": "lead"}, {"id": "c", "name": "dev"}, {"id": "b", "name": "status"},
+        ]}]});
+        assert!(tidy_commands(&c, "s", &ls, &terminals).is_empty());
     }
 
     fn terminal(address: &str, tab: &str, labels: Value, fg_pid: u64, status: Value) -> Value {
