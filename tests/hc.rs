@@ -373,7 +373,7 @@ fn up_resumes_a_lost_agent_in_its_kept_shell() {
 }
 
 #[test]
-fn pi_roles_resume_with_their_session_id_only() {
+fn pi_roles_resume_with_their_session_id() {
     let f = Fixture::new(&CONFIG.replace("version = 1", "version = 1\nkind = \"pi\""));
     // pi's preflight needs a recent pi and the crew's extension.
     let tools = f.root.join("tools");
@@ -396,7 +396,66 @@ fn pi_roles_resume_with_their_session_id_only() {
         resume.starts_with(&format!("pi --session-id {session}")),
         "{resume}"
     );
-    assert!(!resume.contains("--herdr-crew-prompt"), "{resume}");
+    // The extension ignores the prompt flags in a session that holds the role, and gives the
+    // role to one pi never saved.
+    assert!(resume.contains("--herdr-crew-prompt"), "{resume}");
+    assert!(!resume.contains("Confirm your role"), "{resume}");
+}
+
+#[test]
+fn a_lost_conversation_that_was_never_saved_starts_again() {
+    let f = Fixture::new(CONFIG);
+    ok(&f.run(&["up"]));
+    let session = f.tab("lead")["labels"]["crew.session"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    lose_agent(&f, "lead");
+    // Claude died before saving its first message: `claude --resume` finds nothing and exits.
+    let text = ok(&f
+        .crew(&["up"])
+        .env("CREW_TEST_HC_LOST", &session)
+        .output()
+        .unwrap());
+    assert!(text.contains("held no conversation to resume"), "{text}");
+    let lead = f.tab("lead");
+    let typed = lead["typed"].as_array().unwrap();
+    assert_eq!(typed.len(), 3, "{typed:?}");
+    assert!(
+        typed[1]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("claude --resume {session} ")),
+        "{typed:?}"
+    );
+    assert!(
+        typed[2]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("claude --session-id {session} -n lead ")),
+        "{typed:?}"
+    );
+    assert_eq!(lead["labels"]["crew.session"], session.as_str());
+    assert!(ok(&f.run(&["up"])).contains("nothing to do"));
+}
+
+#[test]
+fn a_failed_read_stops_a_real_up() {
+    let f = Fixture::new(CONFIG);
+    ok(&f.run(&["up"]));
+    let before = f.terminals().len();
+    // `hc` fails while reading the crew: planning over an empty core would start every role
+    // a second time.
+    fs::write(f.state.join("hc-fail"), "get").unwrap();
+    let out = f.run(&["up"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        text.contains("could not read the crew from herdr-core"),
+        "{text}"
+    );
+    assert_eq!(f.terminals().len(), before, "nothing created");
+    assert!(ok(&f.run(&["up"])).contains("nothing to do"));
 }
 
 #[test]

@@ -30,9 +30,10 @@ use crate::plan::{Agent, Foreground, HerdrState, Pane, Tab, Workspace, shell_wor
 
 /// Whether a variable of this process stays out of `hc`, and so out of the core it may start:
 /// a Herdr TUI pane's, a Claude Code or Codex session's, or this process's own hc terminal's.
-/// `HC_SESSION` and `HC_SOCKET` stay: they choose the core.
+/// `HC_SESSION` and `HC_SOCKET` stay: they choose the core; so do the app's `HERDR_APP_*`
+/// (`HERDR_APP_HOME` chooses the window `herdr-app do` talks to).
 fn host_variable(name: &str) -> bool {
-    name.starts_with("HERDR_")
+    (name.starts_with("HERDR_") && !name.starts_with("HERDR_APP_"))
         || name.starts_with("CLAUDE_CODE_")
         || name == "CLAUDECODE"
         || name == "CODEX_THREAD_ID"
@@ -139,7 +140,13 @@ impl Hc {
         let mut terminals = Vec::new();
         for t in list["terminals"].as_array().into_iter().flatten() {
             if let Some(address) = t["address"].as_str() {
-                terminals.push(self.terminal(address)?);
+                match self.terminal(address) {
+                    Ok(t) if t["state"] == "live" => terminals.push(t),
+                    // It finished or was removed since `ls`.
+                    Ok(_) => {}
+                    Err(e) if e.kind == "not_found" => {}
+                    Err(e) => return Err(e),
+                }
             }
         }
         terminals.sort_by_key(created);
@@ -306,6 +313,104 @@ fn state_of(space: &str, terminals: &[Value]) -> HerdrState {
     }
 }
 
+/// What a launched agent did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Launch {
+    /// It reported a status: whether it waits for an answer (blocked at a dialog).
+    Reported(bool),
+    /// It runs but reported nothing yet (Codex shows its trust dialog without a status).
+    Silent,
+    /// The shell is back in front: the agent exited.
+    Exited,
+}
+
+/// How long a typed command may leave the shell in front before crew decides it exited.
+const EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// The shell line that starts `s`: with `session` and `resume`, `claude --resume <id>`;
+/// otherwise the agent with `--session-id <id>` (pi resumes that way too) and the message.
+fn launch_line(s: &AgentStart, session: Option<&str>, resume: bool) -> String {
+    let mut words = vec![s.kind.as_str().to_string()];
+    match session {
+        Some(id) if resume => words.extend(["--resume".into(), id.to_string()]),
+        Some(id) => words.extend(["--session-id".into(), id.to_string()]),
+        None => {}
+    }
+    words.extend(s.args.iter().cloned());
+    if let Some(msg) = s.message {
+        if s.kind == Kind::Agy {
+            // `agy` rejects positional prompts.
+            words.push("--prompt-interactive".into());
+        }
+        words.push(msg.to_string());
+    }
+    words
+        .iter()
+        .map(|w| shell_word(w, false))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn exited(s: &AgentStart) -> String {
+    format!(
+        "{} exited as soon as it started in {}; see that tab",
+        s.kind.as_str(),
+        s.pane
+    )
+}
+
+/// Whether `t` carries a status reported after the one in `before` (`status_ms` differs).
+fn fresh_status<'a>(t: &'a Value, before: &Value) -> Option<&'a str> {
+    let state = t["status"]["state"].as_str()?;
+    (t["status_ms"] != before["status_ms"] || before["status"].is_null()).then_some(state)
+}
+
+impl Hc {
+    /// Waits for the pane's shell, types `line` and waits for the agent's first status report
+    /// after it: a status left by an earlier program does not count.
+    fn launch(&self, s: &AgentStart, line: &str) -> Result<Launch, String> {
+        let fail = |e: HcError| format!("could not start {} in {}: {e}", s.name, s.pane);
+        // A new terminal's shell may still be reading its startup files.
+        let since = Instant::now();
+        let before = loop {
+            let t = self.terminal(s.pane).map_err(fail)?;
+            if shell_in_front(&t) {
+                break t;
+            }
+            if since.elapsed() >= SHELL_WAIT {
+                return Err(format!(
+                    "could not start {} in {}: its shell is not in the foreground",
+                    s.name, s.pane
+                ));
+            }
+            sleep(Duration::from_millis(250));
+        };
+        self.call(&["send", s.pane, line]).map_err(fail)?;
+        let sent = Instant::now();
+        let mut seen = false;
+        loop {
+            let t = self.terminal(s.pane).map_err(fail)?;
+            if let Some(state) = fresh_status(&t, &before) {
+                return Ok(Launch::Reported(!matches!(
+                    state,
+                    "idle" | "done" | "working"
+                )));
+            }
+            if shell_in_front(&t) {
+                if seen || sent.elapsed() >= EXIT_GRACE {
+                    return Ok(Launch::Exited);
+                }
+            } else {
+                seen = true;
+            }
+            if sent.elapsed() >= READY_WAIT {
+                return Ok(Launch::Silent);
+            }
+            sleep(Duration::from_millis(250));
+        }
+    }
+}
+
 impl Backend for Hc {
     fn action(&self) -> bool {
         false
@@ -313,16 +418,23 @@ impl Backend for Hc {
 
     fn notify(&self, _message: &str) {}
 
-    fn load(&self, c: &Config, _mode: Load) -> Result<HerdrState, LoadError> {
+    /// `hc` starts the core when none runs, so a failure is no empty state: only a dry run
+    /// (`Load::Read`) may plan as if the core were empty.
+    fn load(&self, c: &Config, mode: Load) -> Result<HerdrState, LoadError> {
         let space = self.space.get_or_init(|| space_id(&c.root)).clone();
-        let terminals =
-            self.labeled("herdr.space", &space)
-                .map_err(|e| LoadError::Unreachable {
+        let terminals = self
+            .labeled("herdr.space", &space)
+            .map_err(|e| match mode {
+                Load::Start(..) => {
+                    LoadError::Failed(format!("could not read the crew from herdr-core: {e}"))
+                }
+                Load::Read => LoadError::Unreachable {
                     denied: e.kind == "output"
                         && (e.message.contains("Operation not permitted")
                             || e.message.contains("PermissionDenied")),
                     message: e.to_string(),
-                })?;
+                },
+            })?;
         Ok(state_of(&space, &terminals))
     }
 
@@ -405,29 +517,10 @@ impl Backend for Hc {
 
     fn start_agent(&self, s: &AgentStart) -> Result<Started, String> {
         let fail = |e: HcError| format!("could not start {} in {}: {e}", s.name, s.pane);
-        // A new terminal's shell may still be reading its startup files.
-        let since = Instant::now();
-        while !shell_in_front(&self.terminal(s.pane).map_err(fail)?) {
-            if since.elapsed() >= SHELL_WAIT {
-                return Err(format!(
-                    "could not start {} in {}: its shell is not in the foreground",
-                    s.name, s.pane
-                ));
-            }
-            sleep(Duration::from_millis(250));
-        }
         // Claude and pi take a session id chosen up front, which `crew.session` records so a
         // later `up` can resume the conversation in the kept shell.
-        let mut words = vec![s.kind.as_str().to_string()];
         let session = match (s.kind, s.resume) {
-            (Kind::Claude, Some(id)) => {
-                words.extend(["--resume".into(), id.to_string()]);
-                Some(id.to_string())
-            }
-            (Kind::Pi, Some(id)) => {
-                words.extend(["--session-id".into(), id.to_string()]);
-                Some(id.to_string())
-            }
+            (Kind::Claude | Kind::Pi, Some(id)) => Some(id.to_string()),
             (_, Some(_)) => {
                 return Err(format!(
                     "{}: herdr-crew cannot resume {} sessions",
@@ -436,39 +529,31 @@ impl Backend for Hc {
                 ));
             }
             (Kind::Claude | Kind::Pi, None) => {
-                let id = new_uuid().map_err(|e| format!("could not start {}: {e}", s.name))?;
-                words.extend(["--session-id".into(), id.clone()]);
-                Some(id)
+                Some(new_uuid().map_err(|e| format!("could not start {}: {e}", s.name))?)
             }
             (_, None) => None,
         };
-        words.extend(s.args.iter().cloned());
-        if let Some(msg) = s.message {
-            if s.kind == Kind::Agy {
-                // `agy` rejects positional prompts.
-                words.push("--prompt-interactive".into());
-            }
-            words.push(msg.to_string());
-        }
-        let line = words
-            .iter()
-            .map(|w| shell_word(w, false))
-            .collect::<Vec<_>>()
-            .join(" ");
         let agent = format!("crew.agent={}", s.name);
         let kind = format!("crew.kind={}", s.kind.as_str());
-        let session = format!("crew.session={}", session.unwrap_or_default());
-        self.call(&["label", s.pane, &agent, &kind, &session])
+        let recorded = format!("crew.session={}", session.clone().unwrap_or_default());
+        self.call(&["label", s.pane, &agent, &kind, &recorded])
             .map_err(fail)?;
-        self.call(&["send", s.pane, &line]).map_err(fail)?;
-        let timeout = READY_WAIT.as_secs().to_string();
-        let waited = self
-            .call(&["wait", s.pane, "--timeout", &timeout])
-            .map_err(fail)?;
-        Ok(match waited["status"].as_str() {
-            Some("idle" | "done" | "working") => Started::Ready,
-            // Blocked at a dialog, or silent (Codex shows its trust dialog without a status).
-            _ => Started::Waiting,
+        // `pi --session-id` opens the session, or starts it when pi never saved one.
+        let resume = s.kind == Kind::Claude && s.resume.is_some();
+        let line = launch_line(s, session.as_deref(), resume);
+        Ok(match self.launch(s, &line)? {
+            Launch::Reported(false) => Started::Ready,
+            Launch::Reported(true) | Launch::Silent => Started::Waiting,
+            // `claude --resume` exits when it has no such conversation: the agent died before
+            // its first message was saved. Start that conversation instead.
+            Launch::Exited if resume => {
+                match self.launch(s, &launch_line(s, session.as_deref(), false))? {
+                    Launch::Reported(waiting) => Started::NewConversation { waiting },
+                    Launch::Silent => Started::NewConversation { waiting: true },
+                    Launch::Exited => return Err(exited(s)),
+                }
+            }
+            Launch::Exited => return Err(exited(s)),
         })
     }
 
@@ -627,7 +712,14 @@ mod tests {
         ] {
             assert!(host_variable(name), "{name}");
         }
-        for name in ["HC_SESSION", "HC_SOCKET", "HOME", "PATH", "CODEX_HOME"] {
+        for name in [
+            "HC_SESSION",
+            "HC_SOCKET",
+            "HERDR_APP_HOME",
+            "HOME",
+            "PATH",
+            "CODEX_HOME",
+        ] {
             assert!(!host_variable(name), "{name}");
         }
     }

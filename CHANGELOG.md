@@ -15,6 +15,7 @@ change between minor versions.
 - Experimental herdr-core host. Crews can run on herdr-core (`hc`) and show in the Herdr app.
   This happens when crew is run inside a herdr-core terminal (`HC_TERMINAL_ID`, as in every
   Herdr app terminal) or with `CREW_HOST=herdr-core`; `CREW_HOST=herdr` forces the TUI.
+  A Herdr TUI pane opened inside an app terminal still uses the TUI.
   - `up`, `add`, `close` and `send` work for Claude Code and pi roles.
   - Codex and agy roles still need the Herdr TUI, and `up` refuses them before creating
     anything.
@@ -25,6 +26,9 @@ change between minor versions.
     in `crew.session`. When the agent is lost (a crash, or a core restart that brings kept
     terminals back as shells), `up` resumes that conversation in the same terminal
     (`claude --resume <id>`, `pi --session-id <id>`). It also restarts the board viewer.
+    A role that died before saving its first message starts a new conversation instead.
+  - `up` stops when it cannot read the crew from herdr-core, rather than planning over an
+    empty core and starting live roles again; only `--dry-run` plans that way.
   - `herdr-crew app-install` / `app-uninstall` install or remove a Herdr app mod, "Crew".
     The mod is a dialog that shows `up --dry-run`'s verdicts for the focused terminal's
     folder and brings the crew up on herdr-core, for example after a core restart. It

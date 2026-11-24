@@ -41,6 +41,11 @@ pub enum Started {
     Ready,
     /// It runs but waits for an answer at startup (e.g. trusting the folder).
     Waiting,
+    /// A resume found no conversation to resume (the agent died before it saved one), so a
+    /// new conversation started under the same session id.
+    NewConversation {
+        waiting: bool,
+    },
 }
 
 /// An agent's state, as `send` needs it.
@@ -169,7 +174,14 @@ impl Host {
     /// `CREW_HOST` (`herdr` or `herdr-core`) wins. Otherwise a Herdr plugin action or hook uses
     /// the TUI, a command run inside a herdr-core terminal (`HC_TERMINAL_ID`, which every Herdr
     /// app terminal has) uses core, and anything else the TUI.
-    pub fn detect(var: impl Fn(&str) -> Option<String>) -> Result<Host, String> {
+    /// `CREW_HOST`, else the host whose terminal runs this process. With both a TUI pane's
+    /// and a herdr-core terminal's variables (one host runs inside the other, or a core
+    /// started from a TUI pane passed `HERDR_PANE_ID` to its terminals), `inner` names the
+    /// nearer one; without an answer the TUI wins.
+    pub fn detect(
+        var: impl Fn(&str) -> Option<String>,
+        inner: impl FnOnce() -> Option<Host>,
+    ) -> Result<Host, String> {
         match var("CREW_HOST").as_deref() {
             Some("herdr") => return Ok(Host::Herdr),
             Some("herdr-core" | "hc") => return Ok(Host::Core),
@@ -183,14 +195,53 @@ impl Host {
         Ok(if var("HERDR_PLUGIN_ID").is_some() {
             Host::Herdr
         } else if var("HC_TERMINAL_ID").is_some() {
-            Host::Core
+            if var("HERDR_PANE_ID").is_some() {
+                inner().unwrap_or(Host::Herdr)
+            } else {
+                Host::Core
+            }
         } else {
             Host::Herdr
         })
     }
 
     pub fn from_env() -> Result<Host, String> {
-        Host::detect(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        Host::detect(
+            |k| std::env::var(k).ok().filter(|v| !v.is_empty()),
+            nearest_host,
+        )
+    }
+}
+
+/// The host server nearest this process among its ancestors: `herdr` (the TUI) or
+/// `herdr-core`/`hc` (the core), from `ps`.
+fn nearest_host() -> Option<Host> {
+    let mut pid = std::os::unix::process::parent_id();
+    for _ in 0..32 {
+        if pid <= 1 {
+            return None;
+        }
+        let out = std::process::Command::new("ps")
+            .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let line = String::from_utf8_lossy(&out.stdout);
+        let (ppid, comm) = line.trim().split_once(char::is_whitespace)?;
+        match host_process(comm.trim()) {
+            Some(host) => return Some(host),
+            None => pid = ppid.trim().parse().ok()?,
+        }
+    }
+    None
+}
+
+/// The host a server process's command name belongs to.
+fn host_process(comm: &str) -> Option<Host> {
+    match comm.rsplit('/').next()? {
+        "herdr" => Some(Host::Herdr),
+        "herdr-core" | "hc" => Some(Host::Core),
+        _ => None,
     }
 }
 
@@ -207,11 +258,18 @@ mod tests {
     use super::*;
 
     fn detect(vars: &[(&str, &str)]) -> Result<Host, String> {
-        Host::detect(|k| {
-            vars.iter()
-                .find(|(n, _)| *n == k)
-                .map(|(_, v)| v.to_string())
-        })
+        detect_within(vars, None)
+    }
+
+    fn detect_within(vars: &[(&str, &str)], inner: Option<Host>) -> Result<Host, String> {
+        Host::detect(
+            |k| {
+                vars.iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            },
+            || inner,
+        )
     }
 
     #[test]
@@ -229,5 +287,25 @@ mod tests {
         );
         assert_eq!(detect(&[("CREW_HOST", "herdr-core")]), Ok(Host::Core));
         assert!(detect(&[("CREW_HOST", "tmux")]).is_err());
+        // Both hosts' variables: the nearer server decides, else the TUI.
+        let both = [("HC_TERMINAL_ID", "t3"), ("HERDR_PANE_ID", "w1:p1")];
+        assert_eq!(detect_within(&both, Some(Host::Core)), Ok(Host::Core));
+        assert_eq!(detect_within(&both, Some(Host::Herdr)), Ok(Host::Herdr));
+        assert_eq!(detect_within(&both, None), Ok(Host::Herdr));
+    }
+
+    #[test]
+    fn host_processes() {
+        assert_eq!(
+            host_process("/Users/me/.local/bin/herdr"),
+            Some(Host::Herdr)
+        );
+        assert_eq!(
+            host_process("/x/Herdr Core.app/Contents/MacOS/herdr-core"),
+            Some(Host::Core)
+        );
+        assert_eq!(host_process("hc"), Some(Host::Core));
+        assert_eq!(host_process("-zsh"), None);
+        assert_eq!(host_process("herdr-crew"), None);
     }
 }

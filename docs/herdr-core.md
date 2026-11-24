@@ -13,7 +13,8 @@ Investigation: 2026-11-24. Checked against these installed versions: **herdr-cor
   <https://github.com/herdrdev/herdr-app> (README, `docs/labels.md`, `mods.md`,
   `commands.md`).
 
-This is research. Nothing in herdr-crew uses herdr-core yet.
+This started as research. herdr-crew now has an experimental herdr-core backend
+(`src/hc.rs`) and a Herdr app mod (`src/app/`); the plan below records each step.
 
 ## Context: the TUI is being replaced
 
@@ -262,14 +263,24 @@ Still to test:
    `&Herdr`). The behaviour is unchanged: the full suite and the real herdr test pass.
 3. **`HcBackend`: done** (`src/hc.rs`).
    - **Selection.** `Host::detect` takes `CREW_HOST=herdr|herdr-core`, then a TUI plugin
-     context (TUI), then `HC_TERMINAL_ID` (core), and the TUI otherwise.
+     context (TUI), then `HC_TERMINAL_ID` (core), and the TUI otherwise. With both
+     `HC_TERMINAL_ID` and `HERDR_PANE_ID` (a TUI run inside an app terminal, or a core started
+     from a TUI pane), the nearest `herdr` or `herdr-core` among the process's ancestors
+     decides, and the TUI wins when `ps` cannot tell.
    - **What works.** `up`, `add`, `close`, `send` and `check` work for Claude and pi roles.
      Codex and agy roles are refused before the first mutation.
-   - **Environment.** Every `hc` call drops `HERDR_*`, `CLAUDE_CODE_*`, `CLAUDECODE`,
-     `CODEX_THREAD_ID`, `CREW_CODEX_BINDING` and `HC_*` (except `HC_SESSION` / `HC_SOCKET`).
+   - **Environment.** Every `hc` call drops `HERDR_*` (except the app's `HERDR_APP_*`),
+     `CLAUDE_CODE_*`, `CLAUDECODE`, `CODEX_THREAD_ID`, `CREW_CODEX_BINDING` and `HC_*`
+     (except `HC_SESSION` / `HC_SOCKET`).
+   - **Reading.** In a real `up`, a failed `hc` call while reading the crew stops `up`: `hc`
+     starts the core itself, so a failure is not an empty core, and planning as if it were
+     would start every live role again. Only `--dry-run` plans over an empty core. A
+     terminal that finishes between `hc ls` and `hc get` is skipped.
    - **Agent start.** `start_agent` waits up to 30 s for the new shell to reach the
-     foreground, labels the terminal and types the agent's command line. It then waits up to
-     60 s for the first status report.
+     foreground, labels the terminal and types the agent's command line. It then polls
+     `hc get` for up to 60 s until a status reported after the send (`status_ms` changed),
+     so a stale status cannot pass for readiness. `hc send --wait` would wait for the whole
+     first turn. If the shell comes back to the front, the agent exited.
    - **Tests.** `tests/support/hc.py` simulates `hc`, and `tests/hc.rs` covers up,
      idempotence, dry run, send, refusals, add/close and the Codex refusal.
    - **Real smoke test** (isolated `HC_SESSION`, two Claude roles and the board): `up` in
@@ -282,7 +293,12 @@ Still to test:
    - **Plan.** With `Env::resume`, a role tab with no agent and a recorded session of the
      same kind gets `Verdict::Resume` and `Step::ResumeAgent`. Claude resumes with
      `claude --resume <id> -n <role> --append-system-prompt-file …`, and pi with
-     `pi --session-id <id>` and its model options; the extension restores the prompt.
+     `pi --session-id <id>`, its model options and the prompt flags; the extension keeps the
+     prompt a saved session already holds.
+   - **A session that was never saved.** An agent that dies before saving its first message
+     leaves a `crew.session` with no conversation. `claude --resume` then exits at once, so
+     crew starts that conversation with `--session-id <id>` and warns. `pi --session-id`
+     starts it by itself, and the prompt flags give it the role.
    - **Recovering terminals.** A terminal still recovering right after a core restart has
      no foreground. It counts as no agent, and `foreground` waits up to 10 s for it, so the
      board is repaired too.

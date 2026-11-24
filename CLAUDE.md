@@ -55,7 +55,7 @@ Deliberately avoided dependencies: `clap`, `anyhow`, `tokio`, `jsonschema`. Just
 - Board and generated files live in the main checkout even when invoked from a worktree.
 - Only type into a pane whose shell is in the foreground (`foreground_process_group_id == shell_pid`).
 - Never remove a worktree or close a base role; `close` only closes an extra instance's tab.
-- Write nothing outside the project except declared worktrees (and the explicit `codex-install`/`pi-install` targets).
+- Write nothing outside the project except declared worktrees (and the explicit `codex-install`/`pi-install`/`app-install` targets).
 - `startup` (herdr's `[[startup]]` hook) never waits on the lock and on restore repairs only the board.
 
 ## Tests

@@ -270,12 +270,14 @@ CREW_HOST=herdr-core herdr-crew up
   `up` is idempotent, `add`/`close` manage extra instances, and `send` types the framed
   message into the receiver's terminal.
 - **Detection.** Crew uses herdr-core when it runs inside a herdr-core terminal, unless
-  `CREW_HOST=herdr` is set. Herdr TUI plugin actions always use the TUI.
+  `CREW_HOST=herdr` is set. Herdr TUI plugin actions always use the TUI, and so does a
+  Herdr TUI pane opened inside an app terminal.
 - **Limits for now:**
   - Codex and agy roles need the Herdr TUI.
   - Tab names are set only while the app window is open; otherwise the app numbers them.
   - After a core restart, the roles come back as shells until you run `herdr-crew up`. It
-    resumes each Claude or pi conversation in its terminal and restarts the board.
+    resumes each Claude or pi conversation in its terminal and restarts the board. A role
+    that died before saving its first message starts a new conversation instead.
 
 The "Crew" dialog in the app does the same without a terminal:
 

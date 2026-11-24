@@ -3,7 +3,9 @@
 
 State lives in $CREW_TEST_STATE/hc.json; every call is appended to hc-calls.jsonl. Typing an
 agent command line into a terminal whose shell is in front starts a simulated agent: its
-program comes to the foreground and it reports `idle` with the app the real agent reports.
+program comes to the foreground and it reports `idle` with the app the real agent reports
+(`status_ms` counts reports). `claude --resume <id>` of an id in $CREW_TEST_HC_LOST (comma
+separated) exits at once: the next `get` shows it in front, the one after the shell again.
 """
 
 import json
@@ -127,7 +129,11 @@ def main():
         ]
         print(json.dumps({"terminals": [{"address": t["address"], "state": t["state"]} for t in live]}))
     elif cmd == "get":
-        print(json.dumps(find(state, rest[0])))
+        t = find(state, rest[0])
+        print(json.dumps(t))
+        if t["foreground"].pop("exits", False):
+            t["foreground"] = {"pid": t["pid"], "argv": t["argv"], "name": os.path.basename(t["argv"][0])}
+            save(state)
     elif cmd == "label":
         t = find(state, rest[0])
         for kv in rest[1:]:
@@ -149,9 +155,15 @@ def main():
         program = os.path.basename(text.split(" ", 1)[0].strip("'"))
         # A command typed at the shell's prompt runs in the foreground; an agent also reports.
         if t["foreground"]["pid"] == t["pid"]:
-            t["foreground"] = {"pid": t["pid"] + 1, "argv": text.split(" "), "name": program}
-            if program in APPS:
+            words = text.split(" ")
+            lost = os.environ.get("CREW_TEST_HC_LOST", "").split(",")
+            t["foreground"] = {"pid": t["pid"] + 1, "argv": words, "name": program}
+            if program == "claude" and "--resume" in words and words[words.index("--resume") + 1] in lost:
+                t["foreground"]["exits"] = True
+            elif program in APPS:
+                state["clock"] = state.get("clock", 0) + 1
                 t["status"] = {"app": APPS[program], "state": os.environ.get("CREW_TEST_HC_READY", "idle")}
+                t["status_ms"] = state["clock"]
         save(state)
         print(json.dumps({"started": True}))
     elif cmd == "wait":

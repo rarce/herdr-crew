@@ -597,6 +597,11 @@ pub fn execute(
                 name,
                 agent: AgentOptions::Pi(_),
                 ..
+            }
+            | Step::ResumeAgent {
+                name,
+                agent: AgentOptions::Pi(_),
+                ..
             } => pi_roles.push(name.as_str()),
             Step::StartAgent {
                 name,
@@ -779,7 +784,7 @@ pub fn execute(
                 if let AgentOptions::Codex(options) = agent {
                     codex::prepare(tui()?, c, name, &pane, prompt_of(name)?, options)?;
                 }
-                let native = agent_args(c, name, prompt, agent, false)?;
+                let native = agent_args(c, name, prompt, agent)?;
                 let request = AgentStart {
                     name,
                     pane: &pane,
@@ -791,7 +796,7 @@ pub fn execute(
                 let mut start = || {
                     match herdr.start_agent(&request)? {
                         Started::Ready => out.step(&format!("{name} in {pane}")),
-                        Started::Waiting => out.warn(
+                        Started::Waiting | Started::NewConversation { .. } => out.warn(
                             herdr,
                             &format!(
                                 "{name} in {pane} is waiting for an answer at startup; check that tab"
@@ -814,7 +819,7 @@ pub fn execute(
                 prompt,
                 session,
             } => {
-                let native = agent_args(c, name, prompt, agent, true)?;
+                let native = agent_args(c, name, prompt, agent)?;
                 let request = AgentStart {
                     name,
                     pane,
@@ -829,6 +834,18 @@ pub fn execute(
                         herdr,
                         &format!(
                             "{name} resumed in {pane} but waits for an answer; check that tab"
+                        ),
+                    ),
+                    Started::NewConversation { waiting } => out.warn(
+                        herdr,
+                        &format!(
+                            "{name}: session {session} held no conversation to resume (the agent \
+                             stopped before saving one); started it anew in {pane}{}",
+                            if waiting {
+                                ", where it waits for an answer"
+                            } else {
+                                ""
+                            }
                         ),
                     ),
                 }
@@ -863,7 +880,6 @@ fn agent_args(
     name: &str,
     prompt: &Path,
     agent: &AgentOptions,
-    resume: bool,
 ) -> Result<Vec<String>, String> {
     Ok(match agent {
         AgentOptions::Claude(options) => {
@@ -883,8 +899,8 @@ fn agent_args(
             args.extend(["-c".into(), "features.hooks=true".into()]);
             args
         }
-        AgentOptions::Pi(pi) if resume => pi.args(),
-        // The crew's pi extension reads these flags and keeps the prompt in the session.
+        // The crew's pi extension reads these flags and keeps the prompt in the session. A
+        // resumed session that already holds it ignores them; one pi never saved gets it.
         AgentOptions::Pi(pi) => {
             let mut args = vec![
                 "--herdr-crew-role".into(),

@@ -63,7 +63,8 @@ export default class Crew extends View {
   }
 
   up(cx) {
-    if (this.busy || !this.folder) return;
+    // Only a crew whose dry run succeeded can be brought up.
+    if (this.busy || !this.folder || !this.plan?.ok) return;
     this.busy = true;
     this.output = null;
     cx.notify();
@@ -102,9 +103,9 @@ export default class Crew extends View {
       .filter((l) => l.trim() && !l.startsWith("("));
   }
 
-  block(t, text, color) {
+  block(id, t, text, color) {
     return div()
-      .id(`crew-out-${color}`)
+      .id(id)
       .max_h(240)
       .min_h(0)
       .overflow_y_scroll()
@@ -133,7 +134,7 @@ export default class Crew extends View {
       .text_size(12.5)
       .font_medium()
       .when(this.busy || !configured, (el) => el.opacity(0.4))
-      .cursor_pointer()
+      .when(!this.busy && Boolean(configured), (el) => el.cursor_pointer())
       .on_click((_e, cx) => this.up(cx))
       .child(this.busy ? "Bringing the crew up…" : "Bring the crew up");
     return v_flex()
@@ -173,7 +174,7 @@ export default class Crew extends View {
       .when(this.folder && this.plan === null, (el) =>
         el.child(div().text_size(12.5).text_color(t.dim).child("Reading the crew…")),
       )
-      .when(this.plan !== null && !configured, (el) => el.child(this.block(t, this.plan.text, t.muted)))
+      .when(this.plan !== null && !configured, (el) => el.child(this.block("crew-plan", t, this.plan.text, t.muted)))
       .when(Boolean(configured), (el) =>
         el.child(
           v_flex()
@@ -181,7 +182,7 @@ export default class Crew extends View {
             .children(this.verdicts().map((l, i) => div().id(`crew-v-${i}`).text_size(12.5).child(l.trim()))),
         ),
       )
-      .when(this.output !== null, (el) => el.child(this.block(t, this.output, this.failed ? t.danger ?? t.foreground : t.foreground)))
+      .when(this.output !== null, (el) => el.child(this.block("crew-output", t, this.output, this.failed ? t.danger ?? t.foreground : t.foreground)))
       .child(h_flex().justify_end().child(button));
   }
 }

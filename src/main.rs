@@ -583,11 +583,11 @@ fn up_inner(
     };
     let state = match herdr.load(c, mode) {
         Ok(state) => state,
-        Err(e @ LoadError::Failed(_)) => return Err(fail_notify(herdr, e.to_string())),
-        Err(LoadError::Unreachable { .. }) => {
+        Err(LoadError::Unreachable { .. }) if a.dry_run => {
             println!("(no herdr server: the plan assumes an empty one)");
             HerdrState::default()
         }
+        Err(e) => return Err(fail_notify(herdr, e.to_string())),
     };
     let e = env(c, &state, Some(herdr), worktrees);
     let mut p = plan::plan(c, &state, &e);
