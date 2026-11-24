@@ -9,7 +9,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, focused, spaces, theme, props, closeOverlay, checking } from "herdr";
+import { exec, focused, panes, spaces, theme, props, closeOverlay, checking } from "herdr";
 
 // The herdr-crew that installed this mod (`app-install` writes its path here).
 const CREW = "herdr-crew";
@@ -37,12 +37,16 @@ export default class Crew extends View {
     this.preview(cx);
   }
 
-  /** The focused terminal's folder, else its space's. */
+  /** The focused terminal's folder; with a mod pane in focus (an editor, the files panel), a
+   *  terminal's in the focused tab, else in the focused space; else the space's folder. */
   where() {
     const f = focused();
     if (f?.cwd) return f.cwd;
     const space = spaces().find((s) => s.id === f?.space);
-    return space?.folder || null;
+    const tabs = (space?.tabs ?? []).map((t) => t.id);
+    const terminal = (inTab) =>
+      panes().find((p) => p.terminal && p.cwd && inTab(p.tab))?.cwd;
+    return terminal((tab) => tab === f?.tab) ?? terminal((tab) => tabs.includes(tab)) ?? (space?.folder || null);
   }
 
   preview(cx) {
