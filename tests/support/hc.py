@@ -74,7 +74,11 @@ def labels_match(t, wanted):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a != "--json"]
+    # `--json` is a global option before the subcommand: anywhere else it is an argument (after
+    # `run`'s `--`, the program's).
+    args = sys.argv[1:]
+    if args[:1] == ["--json"]:
+        args = args[1:]
     with open(os.path.join(STATE, "hc-calls.jsonl"), "a") as f:
         f.write(json.dumps(args) + "\n")
     injected = os.path.join(STATE, "hc-fail")
@@ -117,9 +121,12 @@ def main():
             "created_ms": state["next"],
             "typed": [],
         }
+        # A shell given an option it does not know (`zsh -l --json`) exits at once.
+        if argv[:1] == ["env"] and argv[-1] != "-l":
+            t["state"] = "finished"
         state["terminals"].append(t)
         save(state)
-        print(json.dumps({"address": address, "state": "live", "cwd": t["cwd"]}))
+        print(json.dumps({"address": address, "state": t["state"], "cwd": t["cwd"]}))
     elif cmd == "ls":
         opts, _ = options(rest, {"--all"}, {"--label"})
         live = [
@@ -160,9 +167,13 @@ def main():
             t["foreground"] = {"pid": t["pid"] + 1, "argv": words, "name": program}
             if program == "claude" and "--resume" in words and words[words.index("--resume") + 1] in lost:
                 t["foreground"]["exits"] = True
-            elif program in APPS:
+            elif words[:2] == ["herdr-crew", "codex-resume"] and words[2] in lost:
+                t["foreground"]["exits"] = True
+            elif program in APPS or words[:2] == ["herdr-crew", "codex-resume"]:
+                # `herdr-crew codex-resume` execs Codex.
+                app = APPS.get(program, "codex")
                 state["clock"] = state.get("clock", 0) + 1
-                t["status"] = {"app": APPS[program], "state": os.environ.get("CREW_TEST_HC_READY", "idle")}
+                t["status"] = {"app": app, "state": os.environ.get("CREW_TEST_HC_READY", "idle")}
                 t["status_ms"] = state["clock"]
         save(state)
         print(json.dumps({"started": True}))

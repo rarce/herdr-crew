@@ -46,6 +46,9 @@ pub enum Started {
     NewConversation {
         waiting: bool,
     },
+    /// A resume exited at once and nothing started: the tab is a shell again, and the host
+    /// forgot the session so that the next `up` does not try it again.
+    NotResumed,
 }
 
 /// An agent's state, as `send` needs it.
@@ -154,11 +157,47 @@ pub trait Backend {
     /// Shows the workspace and, from a plain terminal, opens the host's UI on it.
     fn focus_and_attach(&self, workspace: &str, root: &Path, attach: bool) -> Result<(), String>;
 
+    /// The key an agent's hook finds its pane by, from inside that pane: the Herdr TUI's
+    /// `HERDR_PANE_ID`, or a herdr-core terminal's `crew.core` label (see [`hook_pane_keys`]).
+    fn pane_key(&self, pane: &str) -> Result<String, String> {
+        Ok(pane.to_string())
+    }
+
+    /// Where a Codex role starting in `pane` runs, for its binding (see `codex::prepare`).
+    fn codex_context(&self, pane: &str) -> Result<crate::codex::Context, String>;
+
+    /// Best effort, once the plan ran: names and orders the crew's space and tabs where the
+    /// host only can while its window is open (the Herdr app).
+    fn tidy(&self, _c: &Config) {}
+
     /// The Herdr TUI, for the features only it has: Codex pane bindings and native queue,
-    /// agy's pane-keyed launch slot, and plugin startup.
+    /// plugin startup.
     fn tui(&self) -> Option<&Herdr> {
         None
     }
+}
+
+/// The key of a herdr-core terminal for hooks, from its `crew.core` label. The label is read
+/// from the terminal itself, so `up` and a hook inside the terminal agree whatever session or
+/// socket each reached the core by.
+pub fn core_pane_key(id: &str) -> String {
+    format!("hc:{id}")
+}
+
+/// The keys a hook running in this process's terminal may find its pane by: the Herdr TUI
+/// pane's, then the herdr-core terminal's. A TUI pane inside an app terminal has both.
+pub fn hook_pane_keys() -> Vec<String> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let mut keys = Vec::new();
+    if let Some(pane) = var("HERDR_PANE_ID") {
+        keys.push(pane);
+    }
+    if let Some(address) = var("HC_TERMINAL_ID")
+        && let Ok(Some(id)) = crate::hc::Hc::from_env().core_id(&address, false)
+    {
+        keys.push(core_pane_key(&id));
+    }
+    keys
 }
 
 /// Which host a command drives.

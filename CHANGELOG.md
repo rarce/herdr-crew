@@ -10,6 +10,34 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Added
+
+- herdr-core: Codex and agy roles run on herdr-core too.
+  - Every crew terminal carries a random `crew.core` label. Hooks find their role by it,
+    so `up` and a hook agree whichever session or socket reached the core.
+  - agy's SessionStart hook finds its launch by that terminal and records the conversation
+    in `crew.session`; `up` resumes it with `agy --conversation <id>`.
+  - A Codex role's binding is keyed by its herdr-core session, space, tab and terminal. Its
+    SessionStart hook records the binding token in `crew.session`, `up` resumes it by typing
+    `herdr-crew codex-resume <token>` into the kept shell, and `codex-resume` checks the
+    terminal's labels instead of Herdr TUI panes. `send` types into a Codex receiver's
+    terminal (the native queue stays TUI-only).
+  - A Codex or agy resume that exits at once is a warning with the command to retry, not an
+    error: `up` clears `crew.session` and handles the other roles.
+- herdr-core: with the Herdr app window open, `up` and `add` name the crew's space and its
+  unnamed tabs and restore the crew's tab order (sessions in `roles` order, then the board).
+  Tabs someone renamed keep their names.
+- The "Crew" app mod adds "Crew: open the crew dialog" to the command palette.
+
+### Fixed
+
+- herdr-core: a tab whose terminal starts with variables (every Codex role) no longer exits at
+  once: `hc` got `--json` after `run`'s `--`, which passed it to the shell.
+- A new workspace's first tab gets the variables of the role that runs in it (a Codex role's
+  `CODEX_HOME`), not those of the first role in `crew.toml`.
+- `up` waits at most 5 seconds for each `herdr-app` call, so a stuck window cannot hold the
+  project lock.
+
 ## [0.8.0] - 2026-11-24
 
 ### Added

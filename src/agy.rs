@@ -3,7 +3,8 @@
 //! `agy` has no `--append-system-prompt-file` flag, and herdr resumes it with a plain
 //! `agy --conversation <id>`. Before starting an `agy` role, crew writes a one-shot pending
 //! binding with the rendered prompt in private per-user state; on `SessionStart`, `herdr-crew agy-hook` resolves
-//! the project root from `cwd`, atomically consumes the pending binding for `HERDR_PANE_ID`, and
+//! the project root from `cwd`, atomically consumes the pending binding for its pane (the TUI's
+//! `HERDR_PANE_ID`, or herdr-core's terminal, where it also records the conversation), and
 //! injects the rendered role prompt as a persistent `systemMessage`. Because each binding is
 //! consumed once, subagents spawned by a coordinator (`experimental_agy_tree`) and resumed
 //! conversations never receive duplicate or leaked role prompts, and non-crew sessions get `{}`.
@@ -335,11 +336,47 @@ pub fn hook() {
     let _ = io::stdin()
         .take((MAX_PROMPT as u64) + 1)
         .read_to_string(&mut raw);
-    let pane = std::env::var("HERDR_PANE_ID")
-        .ok()
-        .filter(|v| !v.is_empty());
-    let out = hook_response(&raw, pane.as_deref());
+    let mut out = json!({});
+    for key in crate::backend::hook_pane_keys() {
+        out = hook_response(&raw, Some(&key));
+        if out.get("injectSteps").is_some() {
+            // Under herdr-core nothing records the conversation for a restore: the hook does,
+            // so that `up` can resume it in the kept shell (`agy --conversation <id>`).
+            if key.starts_with("hc:") {
+                record_conversation(&raw);
+            }
+            break;
+        }
+    }
     println!("{out}");
+}
+
+/// Labels this herdr-core terminal with the conversation agy started (`crew.session`). Best
+/// effort: a failure only costs the resume.
+fn record_conversation(stdin: &str) {
+    let Some(id) = serde_json::from_str::<Value>(stdin)
+        .ok()
+        .and_then(|v| v.get("conversationId")?.as_str().map(str::to_string))
+        .filter(|id| conversation_id(id))
+    else {
+        return;
+    };
+    let Some(address) = std::env::var("HC_TERMINAL_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
+    else {
+        return;
+    };
+    let _ = crate::hc::Hc::from_env().set_label(&address, "crew.session", &id);
+}
+
+/// An id `up` may type after `agy --conversation`: letters, digits, `-` and `_`.
+fn conversation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn hook_response(stdin: &str, pane: Option<&str>) -> Value {

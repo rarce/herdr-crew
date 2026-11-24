@@ -83,7 +83,7 @@ pub fn peers(c: &Config, session: &str, launcher: &Path) -> String {
             shell_word(&c.root.to_string_lossy(), windows)
         ));
         lines.push(
-            "The crew send commands below require access to the Herdr socket and, for native queues, the \
+            "The crew send commands below require access to the host's socket (Herdr or herdr-core) and, for native queues, the \
              recipient's Codex store. Effective permissions are not verified by this prompt: \
              profiles, managed policy and runtime permission changes can differ from crew.toml. \
              The default workspace sandbox normally blocks access. Use only currently authorized \
@@ -95,7 +95,7 @@ pub fn peers(c: &Config, session: &str, launcher: &Path) -> String {
     }
     if me.kind == Kind::Agy {
         lines.push(
-            "The crew send commands below require access to the Herdr socket. When agy's \
+            "The crew send commands below require access to the host's socket (Herdr or herdr-core). When agy's \
              terminal sandbox (--sandbox, --mode auto, or enableTerminalSandbox) is active, it \
              normally blocks access to local sockets outside the workspace. Use only currently \
              authorized execution; do not broaden permissions or bypass sandbox restrictions. If \
@@ -115,13 +115,13 @@ pub fn peers(c: &Config, session: &str, launcher: &Path) -> String {
             )
         } else if me.kind == Kind::Codex && r.kind == Kind::Codex {
             format!(
-                "- {} ({kind}): codex_tui.send_message_to_thread with a verified threadId when available; otherwise {} (native Codex queue for compatible bound sessions; otherwise terminal input)",
+                "- {} ({kind}): codex_tui.send_message_to_thread with a verified threadId when available; otherwise {} (native Codex queue for compatible bound sessions on the Herdr TUI; otherwise terminal input)",
                 r.name,
                 command(&r.name)
             )
         } else if r.kind == Kind::Codex {
             format!(
-                "- {} ({kind}): {} (native Codex queue for bound sessions with Codex 0.163.0+; otherwise terminal input)",
+                "- {} ({kind}): {} (native Codex queue on the Herdr TUI for bound sessions with Codex 0.163.0+; otherwise terminal input)",
                 r.name,
                 command(&r.name)
             )

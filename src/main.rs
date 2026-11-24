@@ -609,6 +609,7 @@ fn up_inner(
     if p.actions().next().is_none() {
         out.step("everything is already up; nothing to do");
     }
+    herdr.tidy(c);
     let attaching = ws.is_some() && herdr.will_attach(!a.no_attach);
     let open = (!attaching).then(|| herdr.open_hint(&c.label, &c.root));
     print!("{}", summary(c, &p, open.as_deref()));
@@ -827,6 +828,7 @@ fn add(c: &Config, role: &str) -> Result<(), Fail> {
         plan::plan_add(c, &state, &env(c, &state, None, worktrees), role).map_err(Fail::run)?;
     let mut out = Output;
     herdr::execute(herdr, c, &state, &p, &mut out).map_err(|e| fail_notify(herdr, e))?;
+    herdr.tidy(c);
     out.step(&format!("new instance {name}"));
     Ok(())
 }
@@ -957,7 +959,7 @@ fn check(c: &Config) -> Result<(), Fail> {
         lines: vec![format!("herdr-crew: {e}")],
     })?;
     if host == backend::Host::Core {
-        check_core(c, &mut missing);
+        check_core(&mut missing);
     }
     let herdr_bin = std::env::var_os("HERDR_BIN_PATH");
     for (program, install) in installers {
@@ -1134,8 +1136,8 @@ fn check(c: &Config) -> Result<(), Fail> {
     }
 }
 
-/// `check`'s herdr-core half: `hc` runs, and every role's agent works without the TUI.
-fn check_core(c: &Config, missing: &mut Vec<String>) {
+/// `check`'s herdr-core half: `hc` runs.
+fn check_core(missing: &mut Vec<String>) {
     let hc = std::env::var_os("CREW_HC_BIN").unwrap_or_else(|| "hc".into());
     match executable(&hc.to_string_lossy(), None) {
         Ok(path) => println!(
@@ -1146,15 +1148,6 @@ fn check_core(c: &Config, missing: &mut Vec<String>) {
             "herdr-crew: herdr-core is missing: {why} (install it with: curl -fsSL \
              https://releases.herdr.dev/core/install.sh | sh)"
         )),
-    }
-    for role in &c.roles {
-        if matches!(role.kind, agent::Kind::Codex | agent::Kind::Agy) {
-            missing.push(format!(
-                "herdr-crew: role {} uses {}, which needs the Herdr TUI for now (set CREW_HOST=herdr)",
-                role.name,
-                role.kind.as_str()
-            ));
-        }
     }
 }
 

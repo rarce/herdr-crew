@@ -258,8 +258,8 @@ Still to test:
    `start_agent` (`Started::Ready | Waiting`), `run_in_pane`, `close_tab`, `agent_state`,
    `prompt`, `will_attach` / `focus_and_attach` and `notify`. `Herdr` implements it with the
    same CLI calls as before. `execute`, `up`, `add`, `close` and `send` take
-   `&dyn Backend`. TUI-only features go through `Backend::tui()`: the Codex pane bindings
-   and native queue, agy's pane-keyed launch slot, and `startup` (which still takes
+   `&dyn Backend`. TUI-only features go through `Backend::tui()`: the Codex native queue
+   and `startup` (which still takes
    `&Herdr`). The behaviour is unchanged: the full suite and the real herdr test pass.
 3. **`HcBackend`: done** (`src/hc.rs`).
    - **Selection.** `Host::detect` takes `CREW_HOST=herdr|herdr-core`, then a TUI plugin
@@ -268,7 +268,7 @@ Still to test:
      from a TUI pane), the nearest `herdr` or `herdr-core` among the process's ancestors
      decides, and the TUI wins when `ps` cannot tell.
    - **What works.** `up`, `add`, `close`, `send` and `check` work for Claude and pi roles.
-     Codex and agy roles are refused before the first mutation.
+     Codex and agy roles were refused at first; step 6 added them.
    - **Environment.** Every `hc` call drops `HERDR_*` (except the app's `HERDR_APP_*`),
      `CLAUDE_CODE_*`, `CLAUDECODE`, `CODEX_THREAD_ID`, `CREW_CODEX_BINDING` and `HC_*`
      (except `HC_SESSION` / `HC_SOCKET`).
@@ -309,7 +309,8 @@ Still to test:
 5. **App mod: done**, for `up`. `herdr-crew app-install` writes
    `$HERDR_APP_HOME/mods/herdr-crew/`, containing `src/app/main.js` (with the installing
    binary's path) and a dialog `mod.json`.
-   - **Opening.** The dialog "Crew" opens with `mod.open herdr-crew`, or a key bound to it.
+   - **Opening.** The dialog "Crew" opens from the command palette ("Crew: open the crew
+     dialog", Herdr 0.1.18+), with `mod.open herdr-crew`, or a key bound to it.
    - **What it does.** It shows `up --dry-run`'s verdicts for the focused terminal's folder,
      and "Bring the crew up" runs `CREW_HOST=herdr-core herdr-crew up --no-attach` there.
      That is how to recover after a core restart without a terminal.
@@ -319,9 +320,53 @@ Still to test:
        `board/view.rs`;
      - running `up` automatically when the app starts, because it could surprise users;
        the dialog keeps it explicit.
-   - **Not tried yet** against the live window: installing it into the real app and using
-     the dialog.
-6. **Retire the TUI backend** once core + app cover everything. Remove
+   - **Checked** in the live window: installed with `app-install`, the dialog opens and
+     shows the verdicts for the focused tab's folder.
+6. **Codex and agy on core: done.**
+   - **Pane keys.** Hooks find their pane by `Backend::pane_key`: `HERDR_PANE_ID`, or
+     `hc:<id>`, where `<id>` is the terminal's `crew.core` label. Crew sets that random
+     label when it makes the terminal (and on an older crew terminal when it first needs
+     it); core keeps labels across restarts. `up` and the hook both read it from the
+     terminal, so they agree however each reached the core (`HC_SESSION`, `HC_SOCKET`). A
+     hook in a TUI pane inside an app terminal tries both keys.
+   - **agy.** The one-shot launch slot is keyed by that pane key. On core the hook also
+     labels its terminal `crew.session=<conversationId>`, and `up` resumes with
+     `agy --conversation <id>` (the conversation keeps the role prompt it was given).
+   - **Codex.** `codex::Context` is the TUI pane or, on core, `hc:<crew.core>`, the space,
+     the tab and the terminal address, read from the terminal's labels. The hook takes the
+     first inherited place (TUI pane, then core terminal) that has a binding; an incomplete
+     TUI environment only rules the TUI out. The hook verifies the
+     space (`space_id` of the snapshot's root), the tab and `crew.tab`, then labels the
+     terminal `crew.session=<binding token>` instead of `pane.report_agent_session`. `up`
+     resumes by typing `herdr-crew codex-resume <token>`; `codex-resume` refuses when another
+     live terminal holds that token.
+   - **A failed resume.** When `codex-resume` or `agy --conversation` exits at once, `up`
+     warns with the command to retry, clears `crew.session` and goes on, so later runs are
+     not stuck on it. `send` types into the terminal (no native queue).
+   - **Bug found.** `hc` got `--json` last, so with `run … -- env K=V zsh -l` the shell
+     received `--json` and exited. `--json` now goes first.
+   - **Real test** (hc 0.1.22, isolated `HC_SESSION`, Codex 0.172.0, agy 1.5.16): both
+     roles started and waited at the folder trust dialog. After it, the hooks delivered the
+     role prompt and recorded `crew.session`. After each agent exited, `up` resumed agy's
+     and Codex's conversations in their kept shells, and `send` reached both ways. A
+     terminal's login shell can put another `herdr-crew` first on `PATH` (the hook runs
+     whatever `herdr-crew` resolves to), which matters only when testing an unregistered
+     build.
+7. **Names: done.** `Backend::tidy` runs after `up` and `add`. With a window open
+   (`herdr-app ls`), it renames an unnamed space to the crew label, renames unnamed crew
+   tabs to their `crew.tab`, and moves tabs into the crew's order (sessions in `roles`
+   order, then the board, then other tabs). Tabs someone named keep their names. With no
+   window it does nothing; the dialog's "Bring the crew up" runs `up`, so opening it fixes
+   the names.
+   - `herdr-app ls` has no `named` field (the mods' `spaces()` does): a tab nobody named is
+     listed by its place ("1", "2"…) and a space by its repo's folder, so `tidy` reads them
+     that way. The tab bar itself shows an unnamed tab by its agent ("Claude Code").
+   - **Checked in the live window** (Herdr 0.1.18, core 0.1.22): after unnaming the space
+     and a tab and moving the board first, a no-change `up` restored the names and the
+     order; a space and a tab renamed by hand kept their names. The palette entry loads
+     without errors (`herdr-app status`), but typing into the palette could not be
+     automated.
+8. **Retire the TUI backend** once core + app cover everything. Remove
    `herdr-plugin.toml`, `startup` and the TUI-specific code (Codex native queue, `agent
    prompt`). Update README, `design.md` and the CHANGELOG.
 
@@ -332,4 +377,5 @@ Still to test:
   callers?
 - Is the `herdr.space` / `herdr.tab` label contract stable? The app guide documents it,
   but the public `docs/labels.md` only lists `herdr.seen` and `herdr.pinned`.
-- Codex, pi and agy status under core: native OSC 7501, or does each one need a hook?
+- Codex, pi and agy status under core: answered by the spike, all four report OSC 7501
+  natively (Codex only after its trust dialog).

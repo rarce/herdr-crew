@@ -1,1 +1,13 @@
-{ "place": "none", "title": "Crew", "overlay": { "kind": "dialog", "width": 620 } }
+{
+  "place": "none",
+  "title": "Crew",
+  "overlay": { "kind": "dialog", "width": 620 },
+  "palette": [
+    {
+      "title": "Crew: open the crew dialog",
+      "command": "mod.open",
+      "args": { "name": "herdr-crew" },
+      "words": "herdr-crew agents roles up resume"
+    }
+  ]
+}

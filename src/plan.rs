@@ -587,7 +587,6 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                 if e.resume
                     && let Some(pane) = session_pane
                     && let Some(session) = &pane.agent_session
-                    && matches!(r.kind, Kind::Claude | Kind::Pi)
                     && pane.session_agent.as_deref().and_then(Kind::parse) == Some(r.kind)
                 {
                     p.verdicts
@@ -1479,12 +1478,17 @@ mod tests {
         s.workspace.as_mut().unwrap().panes[0].agent_session = None;
         assert_eq!(plan(&c, &s, &e).verdicts[0].1, Verdict::NoAgent);
 
-        // Codex sessions are not resumed this way.
-        c.roles[0].kind = Kind::Codex;
-        let pane = &mut s.workspace.as_mut().unwrap().panes[0];
-        pane.agent_session = Some("0f3c".into());
-        pane.session_agent = Some("codex".into());
-        assert_eq!(plan(&c, &s, &e).verdicts[0].1, Verdict::NoAgent);
+        // Codex and agy roles resume their recorded binding token or conversation too.
+        for (kind, name) in [(Kind::Codex, "codex"), (Kind::Agy, "agy")] {
+            c.roles[0].kind = kind;
+            let pane = &mut s.workspace.as_mut().unwrap().panes[0];
+            pane.agent_session = Some("0f3c".into());
+            pane.session_agent = Some(name.into());
+            assert_eq!(
+                plan(&c, &s, &e).verdicts[0].1,
+                Verdict::Resume("0f3c".into())
+            );
+        }
     }
 
     #[test]

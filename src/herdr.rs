@@ -438,6 +438,10 @@ impl Backend for Herdr {
         Herdr::focus_and_attach(self, workspace, root, attach)
     }
 
+    fn codex_context(&self, pane: &str) -> Result<crate::codex::Context, String> {
+        codex::tui_context(self, pane)
+    }
+
     fn tui(&self) -> Option<&Herdr> {
         Some(self)
     }
@@ -612,6 +616,11 @@ pub fn execute(
                 name,
                 agent: AgentOptions::Agy(options),
                 ..
+            }
+            | Step::ResumeAgent {
+                name,
+                agent: AgentOptions::Agy(options),
+                ..
             } => agy_roles.push((name.as_str(), options)),
             _ => {}
         }
@@ -639,17 +648,6 @@ pub fn execute(
     };
     if let Some(kind) = native {
         herdr.require_native(kind)?;
-    }
-    // Codex and agy roles bind to the Herdr TUI's panes (hooks keyed by HERDR_PANE_ID).
-    if herdr.tui().is_none()
-        && let Some((name, kind)) = codex_roles
-            .first()
-            .map(|(n, _)| (*n, "Codex"))
-            .or_else(|| agy_roles.first().map(|(n, _)| (*n, "agy")))
-    {
-        return Err(format!(
-            "{name}: {kind} roles need the Herdr TUI for now; run with CREW_HOST=herdr"
-        ));
     }
     for name in pi_roles {
         if let Some(problem) = crate::pi::prompt_problem(name, prompt_of(name)?) {
@@ -707,10 +705,14 @@ pub fn execute(
                 ));
             }
             Step::CreateWorkspace { label, cwd } => {
-                // The workspace's first pane hosts the first role.
-                let env = match c.roles.first() {
-                    Some(role) if role.kind == Kind::Codex => codex::pane_environment()?,
-                    _ => Vec::new(),
+                // The workspace's first pane hosts the tab the plan renames next.
+                let first = plan.steps.iter().find_map(|step| match step {
+                    Step::RenameTab { label } => Some(label.as_str()),
+                    _ => None,
+                });
+                let env = match first {
+                    Some(first) => pane_env(first)?,
+                    None => Vec::new(),
                 };
                 let created = herdr.create_workspace(label, cwd, &env)?;
                 out.step(&format!(
@@ -776,13 +778,9 @@ pub fn execute(
                 agent,
             } => {
                 let pane = pane_of(pane, &panes)?;
-                let tui = || {
-                    herdr.tui().ok_or_else(|| {
-                        format!("{name}: {} roles need the Herdr TUI", agent.kind().as_str())
-                    })
-                };
                 if let AgentOptions::Codex(options) = agent {
-                    codex::prepare(tui()?, c, name, &pane, prompt_of(name)?, options)?;
+                    let context = herdr.codex_context(&pane)?;
+                    codex::prepare(context, c, name, prompt_of(name)?, options)?;
                 }
                 let native = agent_args(c, name, prompt, agent)?;
                 let request = AgentStart {
@@ -796,7 +794,9 @@ pub fn execute(
                 let mut start = || {
                     match herdr.start_agent(&request)? {
                         Started::Ready => out.step(&format!("{name} in {pane}")),
-                        Started::Waiting | Started::NewConversation { .. } => out.warn(
+                        Started::Waiting
+                        | Started::NewConversation { .. }
+                        | Started::NotResumed => out.warn(
                             herdr,
                             &format!(
                                 "{name} in {pane} is waiting for an answer at startup; check that tab"
@@ -806,8 +806,8 @@ pub fn execute(
                     Ok(())
                 };
                 if matches!(agent, AgentOptions::Agy(_)) {
-                    tui()?;
-                    crate::agy::launch(&c.root, &pane, prompt_of(name)?, start)?;
+                    let key = herdr.pane_key(&pane)?;
+                    crate::agy::launch(&c.root, &key, prompt_of(name)?, start)?;
                 } else {
                     start()?;
                 }
@@ -834,6 +834,25 @@ pub fn execute(
                         herdr,
                         &format!(
                             "{name} resumed in {pane} but waits for an answer; check that tab"
+                        ),
+                    ),
+                    Started::NotResumed => out.warn(
+                        herdr,
+                        &format!(
+                            "{name}: could not resume session {session} in {pane} (see that tab); \
+                             {}",
+                            match agent.kind() {
+                                Kind::Codex => format!(
+                                    "retry there with `herdr-crew codex-resume {session}`, or close \
+                                     the tab and run `herdr-crew up` to start it anew"
+                                ),
+                                Kind::Agy => format!(
+                                    "retry there with `agy --conversation {session}`, or close the \
+                                     tab and run `herdr-crew up` to start it anew"
+                                ),
+                                _ => "close the tab and run `herdr-crew up` to start it anew"
+                                    .to_string(),
+                            }
                         ),
                     ),
                     Started::NewConversation { waiting } => out.warn(
