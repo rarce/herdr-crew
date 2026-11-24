@@ -260,11 +260,22 @@ Still to test:
    `&dyn Backend`. TUI-only features go through `Backend::tui()`: the Codex pane bindings
    and native queue, agy's pane-keyed launch slot, and `startup` (which still takes
    `&Herdr`). The behaviour is unchanged: the full suite and the real herdr test pass.
-3. **`HcBackend`** for `up`, `status`, `send` and `close`, with labels as state. Add
-   `tests/support/hc.sh` (a stateful simulator, like `herdr.sh`) and an opt-in
-   `CREW_REAL_HC=1` test in an isolated `HC_SESSION`. Select the backend by detection
-   (`HC_TERMINAL_ID` set, or a core socket reachable) with an override in `crew.toml` or
-   by flag.
+3. **`HcBackend`: done** (`src/hc.rs`).
+   - **Selection.** `Host::detect` takes `CREW_HOST=herdr|herdr-core`, then a TUI plugin
+     context (TUI), then `HC_TERMINAL_ID` (core), and the TUI otherwise.
+   - **What works.** `up`, `add`, `close`, `send` and `check` work for Claude and pi roles.
+     Codex and agy roles are refused before the first mutation.
+   - **Environment.** Every `hc` call drops `HERDR_*`, `CLAUDE_CODE_*`, `CLAUDECODE`,
+     `CODEX_THREAD_ID`, `CREW_CODEX_BINDING` and `HC_*` (except `HC_SESSION` / `HC_SOCKET`).
+   - **Agent start.** `start_agent` waits up to 30 s for the new shell to reach the
+     foreground, labels the terminal and types the agent's command line. It then waits up to
+     60 s for the first status report.
+   - **Tests.** `tests/support/hc.py` simulates `hc`, and `tests/hc.rs` covers up,
+     idempotence, dry run, send, refusals, add/close and the Codex refusal.
+   - **Real smoke test** (isolated `HC_SESSION`, two Claude roles and the board): `up` in
+     7 s; no `HERDR_*` or `CLAUDE_CODE_*` variables in the terminals, although crew started
+     the core from inside a TUI pane and a Claude session. A second `up` changed nothing.
+     `send` from lead was delivered framed, and dev answered with its role name.
 4. **Restore**: `up` repairs roles that came back as shells, using stored session ids.
 5. **App mod** (`herdr-crew app-install`): a palette "Crew: up" entry, and a board pane
    that replaces the board terminal.

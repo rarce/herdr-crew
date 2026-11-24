@@ -237,6 +237,21 @@ impl Herdr {
 }
 
 impl Backend for Herdr {
+    fn action(&self) -> bool {
+        self.action
+    }
+
+    fn open_hint(&self, label: &str, root: &Path) -> String {
+        if inside_herdr() {
+            format!("switch to the workspace \"{label}\"")
+        } else {
+            format!(
+                "run `herdr` from {} to open the workspace \"{label}\"",
+                root.display()
+            )
+        }
+    }
+
     fn notify(&self, message: &str) {
         Herdr::notify(self, message);
     }
@@ -613,6 +628,17 @@ pub fn execute(
     };
     if let Some(kind) = native {
         herdr.require_native(kind)?;
+    }
+    // Codex and agy roles bind to the Herdr TUI's panes (hooks keyed by HERDR_PANE_ID).
+    if herdr.tui().is_none()
+        && let Some((name, kind)) = codex_roles
+            .first()
+            .map(|(n, _)| (*n, "Codex"))
+            .or_else(|| agy_roles.first().map(|(n, _)| (*n, "agy")))
+    {
+        return Err(format!(
+            "{name}: {kind} roles need the Herdr TUI for now; run with CREW_HOST=herdr"
+        ));
     }
     for name in pi_roles {
         if let Some(problem) = crate::pi::prompt_problem(name, prompt_of(name)?) {

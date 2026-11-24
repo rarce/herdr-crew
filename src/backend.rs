@@ -90,6 +90,12 @@ impl std::fmt::Display for LoadError {
 pub type PaneEnv = [(String, String)];
 
 pub trait Backend {
+    /// Runs as a host action, with no visible terminal: warnings also become notifications.
+    fn action(&self) -> bool;
+
+    /// How the user sees the crew's workspace, for `up`'s closing summary.
+    fn open_hint(&self, label: &str, root: &Path) -> String;
+
     /// Shows `message` as a host notification when this is an action (see `Herdr::notifies`).
     fn notify(&self, message: &str);
 
@@ -139,5 +145,81 @@ pub trait Backend {
     /// agy's pane-keyed launch slot, and plugin startup.
     fn tui(&self) -> Option<&Herdr> {
         None
+    }
+}
+
+/// Which host a command drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Host {
+    /// The Herdr TUI (`herdr`), the plugin host.
+    Herdr,
+    /// herdr-core (`hc`), shown by the Herdr app.
+    Core,
+}
+
+impl Host {
+    /// `CREW_HOST` (`herdr` or `herdr-core`) wins. Otherwise a Herdr plugin action or hook uses
+    /// the TUI, a command run inside a herdr-core terminal (`HC_TERMINAL_ID`, which every Herdr
+    /// app terminal has) uses core, and anything else the TUI.
+    pub fn detect(var: impl Fn(&str) -> Option<String>) -> Result<Host, String> {
+        match var("CREW_HOST").as_deref() {
+            Some("herdr") => return Ok(Host::Herdr),
+            Some("herdr-core" | "hc") => return Ok(Host::Core),
+            Some(other) => {
+                return Err(format!(
+                    "CREW_HOST must be \"herdr\" or \"herdr-core\", not {other:?}"
+                ));
+            }
+            None => {}
+        }
+        Ok(if var("HERDR_PLUGIN_ID").is_some() {
+            Host::Herdr
+        } else if var("HC_TERMINAL_ID").is_some() {
+            Host::Core
+        } else {
+            Host::Herdr
+        })
+    }
+
+    pub fn from_env() -> Result<Host, String> {
+        Host::detect(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+    }
+}
+
+/// The backend of the detected host.
+pub fn from_env() -> Result<Box<dyn Backend>, String> {
+    Ok(match Host::from_env()? {
+        Host::Herdr => Box::new(Herdr::from_env()),
+        Host::Core => Box::new(crate::hc::Hc::from_env()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detect(vars: &[(&str, &str)]) -> Result<Host, String> {
+        Host::detect(|k| {
+            vars.iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        })
+    }
+
+    #[test]
+    fn host_detection() {
+        assert_eq!(detect(&[]), Ok(Host::Herdr));
+        assert_eq!(detect(&[("HC_TERMINAL_ID", "t3")]), Ok(Host::Core));
+        assert_eq!(
+            detect(&[("HC_TERMINAL_ID", "t3"), ("HERDR_PLUGIN_ID", "herdr-crew")]),
+            Ok(Host::Herdr),
+            "a TUI plugin action stays on the TUI"
+        );
+        assert_eq!(
+            detect(&[("HC_TERMINAL_ID", "t3"), ("CREW_HOST", "herdr")]),
+            Ok(Host::Herdr)
+        );
+        assert_eq!(detect(&[("CREW_HOST", "herdr-core")]), Ok(Host::Core));
+        assert!(detect(&[("CREW_HOST", "tmux")]).is_err());
     }
 }

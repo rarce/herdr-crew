@@ -496,6 +496,8 @@ The core runs no processes and reads neither the clock nor the disk except throu
 
 The adapter asks `pane process-info` about the board pane before calling `plan`. It then runs each `Step` in order, resolves the references with the real answers, and applies the retry policy of §4.2 step 8.
 
+The adapter talks to its host through the `Backend` trait (`src/backend.rs`). `herdr.rs` implements it over the Herdr TUI CLI. `hc.rs` implements it over herdr-core (`hc`): the workspace is a space id derived from the main checkout, each tab is a kept terminal labelled `herdr.space`/`herdr.tab` (which the Herdr app adopts) and `crew.tab`, and an agent is the program the crew typed into that terminal's shell (`crew.agent`/`crew.kind`), present while it is in the foreground. `Host::detect` chooses the backend: `CREW_HOST`, then a TUI plugin context, then `HC_TERMINAL_ID`, and the TUI otherwise. Codex and agy roles, plugin `startup`, and the Codex native queue remain TUI-only (`Backend::tui`). See docs/herdr-core.md.
+
 `--dry-run` prints:
 
 - one line per role and one for the board, with its verdict (`create`, `occupied`, `no agent`, `repair`, `leave alone`);
