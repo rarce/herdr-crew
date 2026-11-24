@@ -90,12 +90,13 @@ impl Hc {
         cmd
     }
 
-    /// Runs `hc <args> --json` and returns its JSON answer.
+    /// Runs `hc --json <args>` and returns its JSON answer. `--json` goes first: after `run`'s
+    /// `--` everything is the program's command line.
     fn call(&self, args: &[&str]) -> Result<Value, HcError> {
         let out = self
             .command(&self.bin)
-            .args(args)
             .arg("--json")
+            .args(args)
             .output()
             .map_err(|e| HcError {
                 kind: "no_hc".into(),
@@ -119,6 +120,20 @@ impl Hc {
         }
     }
 
+    /// The open window's spaces and tabs (`herdr-app ls`), or `None` with no window.
+    fn app_ls(&self) -> Option<Value> {
+        let out = self
+            .command(&self.app)
+            .arg("ls")
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&out.stdout).ok()
+    }
+
     /// Best effort `herdr-app do <command> --key value…`: the window may be closed.
     fn app_do(&self, command: &str, args: &[(&str, &str)]) {
         let mut cmd = self.command(&self.app);
@@ -131,6 +146,29 @@ impl Hc {
 
     fn terminal(&self, address: &str) -> Result<Value, HcError> {
         self.call(&["get", address])
+    }
+
+    /// A terminal's facts (`hc get`), for the agents' hooks.
+    pub fn get(&self, address: &str) -> Result<Value, String> {
+        self.terminal(address)
+            .map_err(|e| format!("could not read terminal {address}: {e}"))
+    }
+
+    /// Sets one label on a terminal.
+    pub fn set_label(&self, address: &str, key: &str, value: &str) -> Result<(), String> {
+        self.call(&["label", address, &format!("{key}={value}")])
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The addresses of the live terminals carrying `key=value`.
+    pub fn live_with(&self, key: &str, value: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .labeled(key, value)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .filter_map(|t| t["address"].as_str().map(str::to_string))
+            .collect())
     }
 
     /// The live terminals carrying `key=value`, with their full facts.
@@ -276,7 +314,9 @@ fn state_of(space: &str, terminals: &[Value]) -> HerdrState {
         panes.push(Pane {
             id: address.into(),
             tab_id: tab.into(),
-            agent_session: label(t, "crew.session").map(str::to_string),
+            agent_session: label(t, "crew.session")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             session_agent: label(t, "crew.kind").map(str::to_string),
             session_kind: None,
             session_source: None,
@@ -313,6 +353,77 @@ fn state_of(space: &str, terminals: &[Value]) -> HerdrState {
     }
 }
 
+/// The window commands that give the crew's space its label and its tabs their names and
+/// order, from `herdr-app ls` and the space's terminals. Tabs that are not the crew's keep
+/// their place after the crew's.
+fn tidy_commands(
+    c: &Config,
+    space: &str,
+    ls: &Value,
+    terminals: &[Value],
+) -> Vec<(&'static str, Vec<(&'static str, String)>)> {
+    let mut commands = Vec::new();
+    let spaces = ls["spaces"].as_array().or_else(|| ls.as_array());
+    let Some(shown) = spaces.into_iter().flatten().find(|s| s["id"] == space) else {
+        return commands;
+    };
+    if shown["named"] == false || shown["name"].as_str().is_some_and(|n| n.is_empty()) {
+        commands.push((
+            "space.rename",
+            vec![("id", space.to_string()), ("name", c.label.clone())],
+        ));
+    }
+    // The crew's label of each tab, from its terminals.
+    let crew_label = |tab: &str| {
+        terminals
+            .iter()
+            .filter(|t| label(t, "herdr.tab") == Some(tab))
+            .find_map(|t| label(t, "crew.tab"))
+    };
+    let order = |name: &str| {
+        c.session_order(name).unwrap_or(if name == c.board.tab {
+            (usize::MAX - 1, 0)
+        } else {
+            (usize::MAX, 0)
+        })
+    };
+    let tabs: Vec<(&str, Option<&str>, &Value)> = shown["tabs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| Some((t["id"].as_str()?, crew_label(t["id"].as_str()?), t)))
+        .collect();
+    // A tab someone renamed keeps its name.
+    for (id, name, t) in &tabs {
+        if let Some(name) = name
+            && t["named"] == false
+            && t["name"] != *name
+        {
+            commands.push((
+                "tab.rename",
+                vec![("id", id.to_string()), ("name", name.to_string())],
+            ));
+        }
+    }
+    // The crew's tabs first, in its order; a stable sort keeps the others as they are.
+    let mut wanted: Vec<&(&str, Option<&str>, &Value)> = tabs.iter().collect();
+    wanted.sort_by_key(|(_, name, _)| match name {
+        Some(name) => (0, order(name)),
+        None => (1, (0, 0)),
+    });
+    let current: Vec<&str> = tabs.iter().map(|(id, _, _)| *id).collect();
+    let target: Vec<&str> = wanted.iter().map(|(id, _, _)| *id).collect();
+    if current != target {
+        for (i, id) in target.iter().enumerate() {
+            commands.push((
+                "tab.move",
+                vec![("id", id.to_string()), ("index", (i + 1).to_string())],
+            ));
+        }
+    }
+    commands
+}
+
 /// What a launched agent did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Launch {
@@ -327,11 +438,24 @@ enum Launch {
 /// How long a typed command may leave the shell in front before crew decides it exited.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 
-/// The shell line that starts `s`: with `session` and `resume`, `claude --resume <id>`;
-/// otherwise the agent with `--session-id <id>` (pi resumes that way too) and the message.
+/// The shell line that starts `s`: with `session` and `resume`, `claude --resume <id>` or
+/// `agy --conversation <id>`; otherwise the agent with `--session-id <id>` (pi resumes that way
+/// too) and the message.
 fn launch_line(s: &AgentStart, session: Option<&str>, resume: bool) -> String {
+    if resume && s.kind == Kind::Codex {
+        // The crew's resume checks the role's binding and execs `codex resume` with the
+        // recorded conversation, the role's options and its Codex home.
+        return ["herdr-crew", "codex-resume", session.unwrap_or_default()]
+            .iter()
+            .map(|w| shell_word(w, false))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
     let mut words = vec![s.kind.as_str().to_string()];
     match session {
+        Some(id) if resume && s.kind == Kind::Agy => {
+            words.extend(["--conversation".into(), id.to_string()])
+        }
         Some(id) if resume => words.extend(["--resume".into(), id.to_string()]),
         Some(id) => words.extend(["--session-id".into(), id.to_string()]),
         None => {}
@@ -519,15 +643,10 @@ impl Backend for Hc {
         let fail = |e: HcError| format!("could not start {} in {}: {e}", s.name, s.pane);
         // Claude and pi take a session id chosen up front, which `crew.session` records so a
         // later `up` can resume the conversation in the kept shell.
+        // agy picks its own conversation id: the crew's SessionStart hook records it.
         let session = match (s.kind, s.resume) {
-            (Kind::Claude | Kind::Pi, Some(id)) => Some(id.to_string()),
-            (_, Some(_)) => {
-                return Err(format!(
-                    "{}: herdr-crew cannot resume {} sessions",
-                    s.name,
-                    s.kind.as_str()
-                ));
-            }
+            // A Codex role's binding token, which its SessionStart hook records.
+            (_, Some(id)) => Some(id.to_string()),
             (Kind::Claude | Kind::Pi, None) => {
                 Some(new_uuid().map_err(|e| format!("could not start {}: {e}", s.name))?)
             }
@@ -539,14 +658,14 @@ impl Backend for Hc {
         self.call(&["label", s.pane, &agent, &kind, &recorded])
             .map_err(fail)?;
         // `pi --session-id` opens the session, or starts it when pi never saved one.
-        let resume = s.kind == Kind::Claude && s.resume.is_some();
+        let resume = s.kind != Kind::Pi && s.resume.is_some();
         let line = launch_line(s, session.as_deref(), resume);
         Ok(match self.launch(s, &line)? {
             Launch::Reported(false) => Started::Ready,
             Launch::Reported(true) | Launch::Silent => Started::Waiting,
             // `claude --resume` exits when it has no such conversation: the agent died before
             // its first message was saved. Start that conversation instead.
-            Launch::Exited if resume => {
+            Launch::Exited if resume && s.kind == Kind::Claude => {
                 match self.launch(s, &launch_line(s, session.as_deref(), false))? {
                     Launch::Reported(waiting) => Started::NewConversation { waiting },
                     Launch::Silent => Started::NewConversation { waiting: true },
@@ -598,6 +717,45 @@ impl Backend for Hc {
         true
     }
 
+    fn codex_context(&self, pane: &str) -> Result<crate::codex::Context, String> {
+        let t = self.get(pane)?;
+        let label = |key: &str| {
+            label(&t, key)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| format!("terminal {pane} has no {key} label"))
+        };
+        Ok(crate::codex::Context::core(
+            &crate::backend::core_session(),
+            label("herdr.space")?,
+            label("herdr.tab")?,
+            pane,
+        ))
+    }
+
+    /// Names the crew's space and tabs and puts the tabs in the crew's order (the sessions in
+    /// `roles` order, then the board), where the window shows them otherwise: tabs made while
+    /// the window was closed, or made again after their terminal ended, have Herdr's names and
+    /// come last.
+    fn tidy(&self, c: &Config) {
+        let Some(space) = self.space.get() else {
+            return;
+        };
+        let Some(ls) = self.app_ls() else {
+            return;
+        };
+        let Ok(terminals) = self.labeled("herdr.space", space) else {
+            return;
+        };
+        for (command, args) in tidy_commands(c, space, &ls, &terminals) {
+            let args: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            self.app_do(command, &args);
+        }
+    }
+
+    fn pane_key(&self, pane: &str) -> String {
+        crate::backend::core_pane_key(&crate::backend::core_session(), pane)
+    }
+
     fn will_attach(&self, _attach: bool) -> bool {
         false
     }
@@ -616,6 +774,51 @@ impl Backend for Hc {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tidy_names_the_space_and_tabs_and_restores_the_crew_order() {
+        let c = Config::parse(
+            "version = 1\n[workspace]\nlabel = \"crew\"\n[board]\ntab = \"status\"\n\
+             writer = \"lead\"\n[[roles]]\nname = \"lead\"\nprompt = \"L\"\n\
+             [[roles]]\nname = \"dev\"\nprompt = \"D\"\n",
+            Path::new("/repo"),
+        )
+        .unwrap();
+        let t = |tab: &str, crew: &str| json!({"address": tab, "labels": {"herdr.space": "s", "herdr.tab": tab, "crew.tab": crew}});
+        let terminals = [t("a", "lead"), t("b", "status"), t("c", "dev")];
+        // dev's terminal was made again: Herdr calls it "3" and shows it after the board.
+        let ls = json!({"spaces": [{"id": "s", "name": "repo", "named": false, "tabs": [
+            {"id": "a", "name": "lead", "named": true},
+            {"id": "x", "name": "notes", "named": true},
+            {"id": "b", "name": "status", "named": true},
+            {"id": "c", "name": "4", "named": false},
+        ]}]});
+        let commands: Vec<String> = tidy_commands(&c, "s", &ls, &terminals)
+            .into_iter()
+            .map(|(name, args)| {
+                let args: Vec<String> = args.into_iter().map(|(_, v)| v).collect();
+                format!("{name} {}", args.join(" "))
+            })
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "space.rename s crew",
+                "tab.rename c dev",
+                "tab.move a 1",
+                "tab.move c 2",
+                "tab.move b 3",
+                "tab.move x 4",
+            ]
+        );
+        // Named and in order: nothing to do.
+        let ls = json!({"spaces": [{"id": "s", "name": "crew", "named": true, "tabs": [
+            {"id": "a", "name": "lead"}, {"id": "c", "name": "dev"}, {"id": "b", "name": "status"},
+        ]}]});
+        assert!(tidy_commands(&c, "s", &ls, &terminals).is_empty());
+        // Another space, or no window: nothing.
+        assert!(tidy_commands(&c, "other", &ls, &terminals).is_empty());
+    }
 
     fn terminal(address: &str, tab: &str, labels: Value, fg_pid: u64, status: Value) -> Value {
         let mut l = json!({"herdr.space": "s", "herdr.tab": tab});

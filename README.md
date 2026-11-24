@@ -272,12 +272,17 @@ CREW_HOST=herdr-core herdr-crew up
 - **Detection.** Crew uses herdr-core when it runs inside a herdr-core terminal, unless
   `CREW_HOST=herdr` is set. Herdr TUI plugin actions always use the TUI, and so does a
   Herdr TUI pane opened inside an app terminal.
-- **Limits for now:**
-  - Codex and agy roles need the Herdr TUI.
-  - Tab names are set only while the app window is open; otherwise the app numbers them.
-  - After a core restart, the roles come back as shells until you run `herdr-crew up`. It
-    resumes each Claude or pi conversation in its terminal and restarts the board. A role
-    that died before saving its first message starts a new conversation instead.
+- **Every agent.** Claude Code, Codex, pi and agy roles all run on herdr-core, with the same
+  one-time setup as on the TUI (`codex-install`, `pi-install`, `agy-install`). `send` types
+  into the receiver's terminal; the native Codex queue is TUI-only.
+- **Names.** The app names tabs only while its window is open. `up` and `add` (and so the
+  "Crew" dialog) name the space and any unnamed crew tab, and put the tabs back in the
+  crew's order, whenever the window is open. A tab you renamed keeps your name.
+- **After a core restart** the roles come back as shells until you run `herdr-crew up` (or
+  "Bring the crew up" in the dialog). It resumes each conversation in its terminal
+  (`claude --resume`, `pi --session-id`, `agy --conversation`, `herdr-crew codex-resume`)
+  and restarts the board. A Claude role that died before saving its first message starts a
+  new conversation instead.
 
 The "Crew" dialog in the app does the same without a terminal:
 
@@ -285,7 +290,8 @@ The "Crew" dialog in the app does the same without a terminal:
 herdr-crew app-install     # writes ~/.config/herdr-app/mods/herdr-crew/ ($HERDR_APP_HOME)
 ```
 
-Open the dialog with the app command `mod.open herdr-crew`, or bind a key to it in
+Open the dialog from the command palette ("Crew: bring the crew up"), with the app command
+`mod.open herdr-crew`, or bind a key to it in
 `~/.config/herdr-app/keys.json`:
 
 ```json

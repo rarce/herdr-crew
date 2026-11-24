@@ -47,13 +47,34 @@ pub fn pane_environment() -> Result<Vec<(String, String)>, String> {
     ])
 }
 
+/// Where a Codex role runs. On the Herdr TUI `socket` is the server's socket; on herdr-core it
+/// is `hc:<session>`, the workspace is the crew's space, the tab its `herdr.tab` and the pane
+/// and terminal the terminal's address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Context {
+pub struct Context {
     socket: String,
     workspace: String,
     tab: String,
     pane: String,
     terminal: String,
+}
+
+const CORE: &str = "hc:";
+
+impl Context {
+    pub fn core(session: &str, space: &str, tab: &str, address: &str) -> Context {
+        Context {
+            socket: format!("{CORE}{session}"),
+            workspace: space.into(),
+            tab: tab.into(),
+            pane: address.into(),
+            terminal: address.into(),
+        }
+    }
+
+    fn on_core(&self) -> bool {
+        self.socket.starts_with(CORE)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -211,14 +232,8 @@ pub fn context_prompt(c: &Config, name: &str, rendered: &str) -> Result<String, 
     Ok(context)
 }
 
-pub fn prepare(
-    herdr: &Herdr,
-    c: &Config,
-    name: &str,
-    pane: &str,
-    rendered: &str,
-    options: &CodexOptions,
-) -> Result<(), String> {
+/// The Herdr TUI pane a Codex role starts in.
+pub fn tui_context(herdr: &Herdr, pane: &str) -> Result<Context, String> {
     let status = herdr
         .call(&["status", "server", "--json"])
         .map_err(|e| e.to_string())?;
@@ -231,7 +246,17 @@ pub fn prepare(
     let result = herdr
         .call(&["pane", "get", pane])
         .map_err(|e| e.to_string())?;
-    let context = pane_context(&result, text(&status, "socket")?)?;
+    pane_context(&result, text(&status, "socket")?)
+}
+
+/// Writes the role's snapshot and binds it to `context`, where Codex starts next.
+pub fn prepare(
+    context: Context,
+    c: &Config,
+    name: &str,
+    rendered: &str,
+    options: &CodexOptions,
+) -> Result<(), String> {
     let role = c.session_role(name).ok_or("unknown role")?;
     let cwd = if role.worktree {
         c.worktree_path(name).ok_or("missing worktree")?
@@ -352,13 +377,74 @@ fn inherited_environment() -> Result<Option<Context>, String> {
     }))
 }
 
+/// The herdr-core terminal this process runs in, from `HC_TERMINAL_ID`; its space and tab
+/// come from its labels (`live_context`).
+fn inherited_core() -> Option<Context> {
+    let address = std::env::var("HC_TERMINAL_ID")
+        .ok()
+        .filter(|a| !a.is_empty())?;
+    Some(Context::core(
+        &crate::backend::core_session(),
+        "",
+        "",
+        &address,
+    ))
+}
+
+/// The places this process may run in: the Herdr TUI pane, then the herdr-core terminal. A
+/// core started from a TUI pane passes the pane's variables on, so both may be set.
+fn inherited_contexts() -> Result<Vec<Context>, String> {
+    let mut contexts: Vec<Context> = inherited_environment()?.into_iter().collect();
+    contexts.extend(inherited_core());
+    Ok(contexts)
+}
+
 fn live_context(context: Context) -> Result<Context, String> {
+    if context.on_core() {
+        let t = crate::hc::Hc::from_env().get(&context.pane)?;
+        if t["state"] != "live" {
+            return Err(format!("terminal {} is not live", context.pane));
+        }
+        let label = |key: &str| {
+            t["labels"][key]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| format!("terminal {} has no {key} label", context.pane))
+        };
+        let session = &context.socket[CORE.len()..];
+        return Ok(Context::core(
+            session,
+            &label("herdr.space")?,
+            &label("herdr.tab")?,
+            &context.pane,
+        ));
+    }
     let pane = rpc(&context, "pane.get", json!({"pane_id":context.pane}))?;
     pane_context(&pane, context.socket)
 }
 
-fn inherited_context() -> Result<Option<Context>, String> {
-    inherited_environment()?.map(live_context).transpose()
+/// The live place of a crew Codex role: the first inherited one that has a binding in `root`.
+fn inherited_context(root: &Path) -> Result<Option<Context>, String> {
+    let mut first = None;
+    let mut error = None;
+    for candidate in inherited_contexts()? {
+        let live = match live_context(candidate) {
+            Ok(live) => live,
+            Err(e) => {
+                error.get_or_insert(e);
+                continue;
+            }
+        };
+        if path(root, "bindings", &context_key(&live)).exists() {
+            return Ok(Some(live));
+        }
+        first.get_or_insert(live);
+    }
+    match (first, error) {
+        (None, Some(e)) => Err(e),
+        (first, _) => Ok(first),
+    }
 }
 
 /// The global hook must establish local ownership before consulting a possibly stale
@@ -390,6 +476,21 @@ fn validate_live(snapshot: &Snapshot, context: &Context, cwd: &Path) -> Result<(
         return Err("Codex hook working directory does not match its role snapshot".into());
     }
     git::verify_checkout(&snapshot.root, cwd)?;
+    if context.on_core() {
+        let t = crate::hc::Hc::from_env().get(&context.pane)?;
+        if context.workspace != crate::hc::space_id(&snapshot.root)
+            || t["labels"]["herdr.space"] != context.workspace.as_str()
+        {
+            return Err("crew space belongs to another project".into());
+        }
+        if t["labels"]["herdr.tab"] != context.tab.as_str() {
+            return Err("crew tab moved to another terminal".into());
+        }
+        if t["labels"]["crew.tab"] != snapshot.name.as_str() {
+            return Err("crew tab was renamed or belongs to another role".into());
+        }
+        return Ok(());
+    }
     let workspaces = rpc(context, "workspace.list", json!({}))?;
     let workspace = workspaces["workspaces"]
         .as_array()
@@ -453,13 +554,28 @@ fn process_hook(input: HookInput) -> Result<Option<String>, String> {
     if explicit.is_none() && !root.join(RUNTIME).join("bindings").exists() {
         return Ok(None);
     }
-    let Some(context) = inherited_environment()? else {
+    let mut found = None;
+    for candidate in inherited_contexts()? {
+        // A core terminal's space and tab are in its labels, not its environment.
+        if candidate.on_core() {
+            let live = match live_context(candidate) {
+                Ok(live) => live,
+                Err(e) if explicit.is_some() => return Err(e),
+                // Not a crew terminal, or no core to ask: not a crew session.
+                Err(_) => continue,
+            };
+            if explicit.is_some() || path(&root, "bindings", &context_key(&live)).exists() {
+                found = Some(live);
+                break;
+            }
+        } else if explicit.is_some() || has_inherited_binding(&root, &candidate)? {
+            found = Some(live_context(candidate)?);
+            break;
+        }
+    }
+    let Some(context) = found else {
         return Ok(None);
     };
-    if explicit.is_none() && !has_inherited_binding(&root, &context)? {
-        return Ok(None);
-    }
-    let context = live_context(context)?;
     let binding_path = path(&root, "bindings", &context_key(&context));
     if !binding_path.exists() && explicit.is_none() {
         return Ok(None);
@@ -513,6 +629,13 @@ fn process_hook(input: HookInput) -> Result<Option<String>, String> {
             context: context.clone(),
         },
     )?;
+    if context.on_core() {
+        // herdr-core restores nothing: the label tells `up` to type `codex-resume <token>`.
+        crate::hc::Hc::from_env()
+            .set_label(&context.pane, "crew.session", &snapshot.token)
+            .map_err(|e| format!("cannot record the Codex session for recovery: {e}"))?;
+        return Ok(Some(snapshot.prompt));
+    }
     // Keep native identity and crew recovery in separate report sequences. The native hook
     // runs concurrently; neither report acquires lifecycle authority over screen detection.
     let start = Instant::now();
@@ -601,7 +724,8 @@ pub fn resume(token: &str, root_flag: Option<&Path>) -> Result<(), String> {
         &root,
         &snapshot.codex_home,
     )?;
-    let context = inherited_context()?.ok_or("run codex-resume inside the role's Herdr tab")?;
+    let context =
+        inherited_context(&root)?.ok_or("run codex-resume inside the role's Herdr tab")?;
     validate_live(&snapshot, &context, &cwd)?;
     let id;
     {
@@ -610,7 +734,19 @@ pub fn resume(token: &str, root_flag: Option<&Path>) -> Result<(), String> {
         if !session_valid(&session.id) {
             return Err("saved Codex session ID is invalid".into());
         }
-        let workspaces = rpc(&context, "workspace.list", json!({}))?;
+        if context.on_core() {
+            let others = crate::hc::Hc::from_env().live_with("crew.session", token)?;
+            if others.iter().any(|address| *address != context.pane) {
+                return Err(
+                    "the saved Codex session is already present in another terminal".into(),
+                );
+            }
+        }
+        let workspaces = if context.on_core() {
+            json!({"workspaces": []})
+        } else {
+            rpc(&context, "workspace.list", json!({}))?
+        };
         for ws in workspaces["workspaces"]
             .as_array()
             .ok_or("missing workspaces")?

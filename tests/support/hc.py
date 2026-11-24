@@ -160,9 +160,11 @@ def main():
             t["foreground"] = {"pid": t["pid"] + 1, "argv": words, "name": program}
             if program == "claude" and "--resume" in words and words[words.index("--resume") + 1] in lost:
                 t["foreground"]["exits"] = True
-            elif program in APPS:
+            elif program in APPS or words[:2] == ["herdr-crew", "codex-resume"]:
+                # `herdr-crew codex-resume` execs Codex.
+                app = APPS.get(program, "codex")
                 state["clock"] = state.get("clock", 0) + 1
-                t["status"] = {"app": APPS[program], "state": os.environ.get("CREW_TEST_HC_READY", "idle")}
+                t["status"] = {"app": app, "state": os.environ.get("CREW_TEST_HC_READY", "idle")}
                 t["status_ms"] = state["clock"]
         save(state)
         print(json.dumps({"started": True}))

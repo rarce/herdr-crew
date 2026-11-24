@@ -276,22 +276,166 @@ fn an_unreachable_core_is_a_sandbox_refusal_for_send() {
     assert_eq!(out.status.code(), Some(77), "{out:?}");
 }
 
+/// Runs `herdr-crew <hook>` in terminal `address` with `input` on stdin; returns its JSON.
+fn hook(f: &Fixture, hook: &str, address: &str, input: &str, env: &[(&str, &str)]) -> Value {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut command = f.crew(&[hook]);
+    command
+        .env("HC_TERMINAL_ID", address)
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// The public launcher on PATH, which the Codex and agy hooks run as `herdr-crew`.
+fn launcher(f: &Fixture) {
+    let tools = f.root.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(
+        tools.join("herdr-crew"),
+        format!(
+            "#!/bin/sh\nif [ \"${{1-}}\" = --launcher-id ]; then echo 'herdr-crew public launcher format 1 (rarce/herdr-crew)'; else exec {CREW} \"$@\"; fi\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(tools.join("herdr-crew"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[test]
-fn codex_roles_are_refused_before_anything_is_created() {
-    let f = Fixture::new(&CONFIG.replace("version = 1", "version = 1\nkind = \"codex\""));
-    let out = f.run(&["up"]);
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!out.status.success(), "{text}");
-    assert!(text.contains("need the Herdr TUI"), "{text}");
+fn codex_roles_bind_to_their_terminal_and_resume_through_the_crew() {
+    let f = Fixture::new(&CONFIG.replace(
+        "[workspace]",
+        "kind = \"codex\"\n[codex]\nmodel = \"original-model\"\n[workspace]",
+    ));
+    launcher(&f);
+    let tools = f.root.join("tools");
+    fs::write(tools.join("codex"), include_str!("support/codex.py")).unwrap();
+    fs::set_permissions(tools.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
+    let home = f.root.join(".codex");
+    let codex_home = home.to_str().unwrap();
+    let run = |args: &[&str]| f.crew(args).env("CODEX_HOME", &home).output().unwrap();
+    ok(&run(&["codex-install"]));
+    ok(&run(&["check"]));
+    ok(&run(&["up"]));
+    let lead = f.tab("lead");
+    let start = lead["typed"][0].as_str().unwrap();
+    assert!(start.starts_with("codex "), "{start}");
+    assert!(start.contains("features.hooks=true"), "{start}");
     assert!(
-        !f.calls().iter().any(|c| c[0] == "run"),
-        "no terminal was created: {:?}",
-        f.calls()
+        lead["env"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from(format!("CODEX_HOME={codex_home}"))),
+        "{lead:#?}"
     );
+
+    // Codex's SessionStart hook in lead's terminal gets lead's context and records its binding.
+    let address = lead["address"].as_str().unwrap().to_string();
+    let event = |source: &str, id: &str| {
+        serde_json::json!({"hook_event_name": "SessionStart", "session_id": id,
+            "source": source, "cwd": f.repo})
+        .to_string()
+    };
+    let home_env = [("CODEX_HOME", codex_home)];
+    let first = hook(
+        &f,
+        "codex-hook",
+        &address,
+        &event("startup", "lead-id"),
+        &home_env,
+    );
+    let context = first["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(context.contains("Lead lead"), "{first}");
+    let token = f.tab("lead")["labels"]["crew.session"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(token.len(), 32, "{token}");
+    // dev's terminal does not hold lead's binding; an ordinary Codex there gets nothing.
+    let dev = f.tab("dev")["address"].as_str().unwrap().to_string();
+    let other = hook(
+        &f,
+        "codex-hook",
+        &dev,
+        &event("startup", "lead-id"),
+        &home_env,
+    );
+    assert!(
+        other["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .is_none_or(|c| !c.contains("Lead lead")),
+        "{other}"
+    );
+
+    lose_agent(&f, "lead");
+    let dry = ok(&run(&["up", "--dry-run"]));
+    assert!(dry.contains(&format!("resume (session {token})")), "{dry}");
+    let text = ok(&run(&["up"]));
+    assert!(text.contains("lead resumed in"), "{text}");
+    let typed = f.tab("lead")["typed"].as_array().unwrap().clone();
+    assert_eq!(
+        typed[1],
+        format!("herdr-crew codex-resume {token}").as_str()
+    );
+
+    // `codex-resume` in lead's terminal resumes the saved conversation with lead's options.
+    let out = f
+        .crew(&["codex-resume", &token])
+        .env("CODEX_HOME", &home)
+        .env("HC_TERMINAL_ID", &address)
+        .output()
+        .unwrap();
+    ok(&out);
+    let resumed: Value =
+        serde_json::from_slice(&fs::read(f.state.join("codex-resume.json")).unwrap()).unwrap();
+    assert_eq!(resumed["args"][0], "resume");
+    assert_eq!(
+        resumed["args"].as_array().unwrap().last().unwrap(),
+        "lead-id"
+    );
+    assert!(
+        resumed["args"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from("model=\"original-model\"")),
+        "{resumed}"
+    );
+    assert_eq!(resumed["binding"], token.as_str());
+    // In another role's terminal it refuses.
+    let out = f
+        .crew(&["codex-resume", &token])
+        .env("CODEX_HOME", &home)
+        .env("HC_TERMINAL_ID", &dev)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+
+    // Typed delivery: herdr-core has no Codex queue.
+    use std::io::Write;
+    let mut send = f
+        .crew(&["send", "dev"])
+        .env("CODEX_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    send.stdin.take().unwrap().write_all(b"hello dev").unwrap();
+    let text = ok(&send.wait_with_output().unwrap());
+    assert!(text.contains("sent to dev"), "{text}");
 }
 
 #[test]
@@ -492,4 +636,60 @@ fn app_install_writes_only_its_own_mod() {
         fs::read_to_string(dir.join("main.js")).unwrap(),
         "export default 1;"
     );
+}
+
+#[test]
+fn agy_roles_get_their_prompt_and_resume_their_conversation() {
+    let f = Fixture::new(&CONFIG.replace("version = 1", "version = 1\nkind = \"agy\""));
+    // agy's preflight needs agy 1.5+, the public launcher on PATH and the crew hook.
+    let tools = f.root.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("agy"), "#!/bin/sh\necho 1.5.15\n").unwrap();
+    fs::set_permissions(tools.join("agy"), fs::Permissions::from_mode(0o755)).unwrap();
+    launcher(&f);
+    ok(&f.run(&["agy-install"]));
+    ok(&f.run(&["check"]));
+    ok(&f.run(&["up"]));
+    let lead = f.tab("lead");
+    let start = lead["typed"][0].as_str().unwrap().to_string();
+    assert!(start.starts_with("agy "), "{start}");
+    assert!(
+        start.contains("--prompt-interactive 'Confirm your role'"),
+        "{start}"
+    );
+    assert!(lead["labels"].get("crew.session").is_none(), "{lead:#?}");
+
+    // agy's SessionStart hook, run in lead's terminal, takes the role prompt once and records
+    // the conversation agy started.
+    let hook = |address: &str, conversation: &str| -> Value {
+        let input = format!(
+            r#"{{"conversationId":"{conversation}","cwd":"{}"}}"#,
+            f.repo.display()
+        );
+        hook(&f, "agy-hook", address, &input, &[])
+    };
+    let address = lead["address"].as_str().unwrap().to_string();
+    let first = hook(&address, "conv-1");
+    let injected = first["injectSteps"][0]["systemMessage"]["systemMessage"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(
+        injected,
+        fs::read_to_string(f.repo.join(".herdr/prompts/lead.txt")).unwrap()
+    );
+    assert_eq!(f.tab("lead")["labels"]["crew.session"], "conv-1");
+    // A second session in that terminal (a subagent) gets nothing and keeps the record.
+    assert_eq!(hook(&address, "sub-1"), serde_json::json!({}));
+    assert_eq!(f.tab("lead")["labels"]["crew.session"], "conv-1");
+
+    lose_agent(&f, "lead");
+    let dry = ok(&f.run(&["up", "--dry-run"]));
+    assert!(dry.contains("resume (session conv-1)"), "{dry}");
+    let text = ok(&f.run(&["up"]));
+    assert!(text.contains("lead resumed in"), "{text}");
+    let typed = f.tab("lead")["typed"].as_array().unwrap().clone();
+    let resume = typed[1].as_str().unwrap();
+    assert!(resume.starts_with("agy --conversation conv-1"), "{resume}");
+    assert!(!resume.contains("--prompt-interactive"), "{resume}");
+    assert!(ok(&f.run(&["up"])).contains("nothing to do"));
 }

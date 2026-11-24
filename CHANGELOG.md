@@ -10,6 +10,27 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Added
+
+- herdr-core: Codex and agy roles run on herdr-core too.
+  - agy's SessionStart hook finds its launch by the herdr-core terminal
+    (`HC_SESSION`/`HC_TERMINAL_ID`) and records the conversation in `crew.session`;
+    `up` resumes it with `agy --conversation <id>`.
+  - A Codex role's binding is keyed by its herdr-core session, space, tab and terminal. Its
+    SessionStart hook records the binding token in `crew.session`, `up` resumes it by typing
+    `herdr-crew codex-resume <token>` into the kept shell, and `codex-resume` checks the
+    terminal's labels instead of Herdr TUI panes. `send` types into a Codex receiver's
+    terminal (the native queue stays TUI-only).
+- herdr-core: with the Herdr app window open, `up` and `add` name the crew's space and its
+  unnamed tabs and restore the crew's tab order (sessions in `roles` order, then the board).
+  Tabs someone renamed keep their names.
+- The "Crew" app mod adds "Crew: bring the crew up" to the command palette.
+
+### Fixed
+
+- herdr-core: a tab whose terminal starts with variables (every Codex role) no longer exits at
+  once: `hc` got `--json` after `run`'s `--`, which passed it to the shell.
+
 ## [0.8.0] - 2026-11-24
 
 ### Added
