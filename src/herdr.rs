@@ -374,6 +374,7 @@ pub fn execute(
     };
     let mut pi_roles = Vec::new();
     let mut codex_roles = Vec::new();
+    let mut agy_roles = Vec::new();
     for step in &plan.steps {
         match step {
             Step::StartAgent {
@@ -386,6 +387,11 @@ pub fn execute(
                 agent: AgentOptions::Codex(options),
                 ..
             } => codex_roles.push((name.as_str(), options)),
+            Step::StartAgent {
+                name,
+                agent: AgentOptions::Agy(options),
+                ..
+            } => agy_roles.push((name.as_str(), options)),
             _ => {}
         }
     }
@@ -393,14 +399,20 @@ pub fn execute(
         crate::pi::preflight()?;
         crate::pi::require_version("pi")?;
     }
+    if !agy_roles.is_empty() {
+        crate::agy::preflight()?;
+        crate::agy::require_version("agy")?;
+    }
     if !codex_roles.is_empty() {
         codex::validate_runtime(&c.root)?;
     }
-    // Every Codex and pi role needs the same herdr.
+    // Every Codex, pi and agy role needs herdr's native integrations.
     let native = if !codex_roles.is_empty() {
         Some("Codex")
     } else if !pi_roles.is_empty() {
         Some("pi")
+    } else if !agy_roles.is_empty() {
+        Some("agy")
     } else {
         None
     };
@@ -411,6 +423,13 @@ pub fn execute(
         if let Some(problem) = crate::pi::prompt_problem(name, prompt_of(name)?) {
             return Err(problem);
         }
+    }
+    for (name, options) in agy_roles {
+        if let Some(problem) = crate::agy::prompt_problem(name, prompt_of(name)?) {
+            return Err(problem);
+        }
+        let mut effective = options.clone();
+        effective.resolve_dirs(&c.root)?;
     }
     for (name, options) in codex_roles {
         codex::context_prompt(c, name, prompt_of(name)?)?;
@@ -587,6 +606,13 @@ pub fn execute(
                         args.extend(pi.args());
                         args
                     }
+                    // The crew's agy SessionStart hook consumes this one-shot pane binding.
+                    AgentOptions::Agy(options) => {
+                        crate::agy::prepare(&c.root, &pane, prompt)?;
+                        let mut effective = options.clone();
+                        effective.resolve_dirs(&c.root)?;
+                        effective.args()
+                    }
                 };
                 start_agent(
                     herdr,
@@ -648,7 +674,14 @@ fn start_agent(
     .map(str::to_string)
     .collect();
     args.extend_from_slice(native);
-    args.extend(message.map(str::to_string));
+    if let Some(msg) = message {
+        if kind == Kind::Agy {
+            // `agy` rejects positional prompts; pass initial interactive messages via flag.
+            args.extend(["--prompt-interactive".into(), msg.to_string()]);
+        } else {
+            args.push(msg.to_string());
+        }
+    }
     let start = Instant::now();
     loop {
         match herdr.call(&args) {

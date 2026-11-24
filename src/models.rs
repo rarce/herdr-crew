@@ -1,7 +1,7 @@
 //! Model profiles: which model and effort each kind of role gets, per agent (docs/models.md).
 //! Pure data; `init` writes the result into `crew.toml` and `config` applies it to a crew.
 
-use crate::agent::{AgentOptions, ClaudeOptions, CodexOptions, Kind, PiOptions};
+use crate::agent::{AgentOptions, AgyOptions, ClaudeOptions, CodexOptions, Kind, PiOptions};
 
 /// What a role does, which decides how much capability it needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +146,11 @@ impl Profile {
                 thinking: effort,
                 ..Default::default()
             }),
+            Kind::Agy => AgentOptions::Agy(AgyOptions {
+                model,
+                effort,
+                ..Default::default()
+            }),
         }
     }
 }
@@ -160,9 +165,9 @@ pub enum Tier {
 }
 
 impl Tier {
-    /// Claude Code aliases follow the latest model of each family; Codex has no aliases, so
-    /// its IDs are the current catalog (`codex debug models`, 2026-11). pi's model depends on
-    /// the user's provider, so it keeps its own and only the thinking level is set.
+    /// Claude Code aliases follow the latest model of each family; Codex and agy use their current
+    /// catalogs (`codex debug models`, `agy models`, 2026-11). pi's model depends on the user's
+    /// provider, so it keeps its own and only the thinking level is set.
     pub fn model(self, agent: Kind) -> Option<&'static str> {
         match agent {
             Kind::Claude => Some(match self {
@@ -177,6 +182,12 @@ impl Tier {
                 Self::Light => "gpt-6-luna",
             }),
             Kind::Pi => None,
+            Kind::Agy => Some(match self {
+                Self::Frontier => "gemini-4-argon",
+                Self::Strong => "gemini-4-neon",
+                Self::Standard => "gemini-4-hydrogen",
+                Self::Light => "gemini-3.8-flash",
+            }),
         }
     }
 }
@@ -197,6 +208,23 @@ pub fn catalog(agent: Kind) -> &'static [(&'static str, &'static str)] {
             ("gpt-6-luna", "fast and affordable for easier tasks"),
         ],
         Kind::Pi => &[],
+        Kind::Agy => &[
+            (
+                "gemini-4-argon",
+                "frontier reasoning; architecture and deep review",
+            ),
+            ("gemini-4-neon", "strong coding and multi-step judgment"),
+            (
+                "gemini-4-hydrogen",
+                "fast everyday coding; efficient tool loops",
+            ),
+            (
+                "gemini-3.8-flash",
+                "fastest and lightest; reading and simple tasks",
+            ),
+            ("claude-opus-5-5", "Claude Opus 5.5 via agy"),
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5 via agy"),
+        ],
     }
 }
 
@@ -206,6 +234,7 @@ pub fn efforts(agent: Kind) -> &'static [&'static str] {
         Kind::Claude => crate::agent::CLAUDE_EFFORTS,
         Kind::Codex => crate::agent::CODEX_EFFORTS,
         Kind::Pi => crate::agent::PI_THINKING,
+        Kind::Agy => crate::agent::AGY_EFFORTS,
     }
 }
 
@@ -215,6 +244,7 @@ pub fn effort_key(agent: Kind) -> &'static str {
         Kind::Claude => "effort",
         Kind::Codex => "reasoning_effort",
         Kind::Pi => "thinking",
+        Kind::Agy => "effort",
     }
 }
 
@@ -232,6 +262,13 @@ mod tests {
                         AgentOptions::Claude(o) => o.problems(),
                         AgentOptions::Codex(o) => o.problems(),
                         AgentOptions::Pi(o) => o.problems(),
+                        AgentOptions::Agy(o) => {
+                            let mut p = o.problems();
+                            if let Some(lp) = o.launch_problem() {
+                                p.push(lp.into());
+                            }
+                            p
+                        }
                     };
                     assert!(
                         problems.is_empty(),
@@ -252,6 +289,7 @@ mod tests {
                 AgentOptions::Claude(o) => o == ClaudeOptions::default(),
                 AgentOptions::Codex(o) => o == CodexOptions::default(),
                 AgentOptions::Pi(o) => o == PiOptions::default(),
+                AgentOptions::Agy(o) => o == AgyOptions::default(),
             };
             assert!(empty);
         }

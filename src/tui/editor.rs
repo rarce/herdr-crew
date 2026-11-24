@@ -149,6 +149,7 @@ impl Editor {
                 Kind::Claude => AgentOptions::Claude(self.config.claude.clone()),
                 Kind::Codex => AgentOptions::Codex(self.config.codex.clone()),
                 Kind::Pi => AgentOptions::Pi(self.config.pi.clone()),
+                Kind::Agy => AgentOptions::Agy(self.config.agy.clone()),
             },
             Target::Role(i) => self.config.roles[i].agent(),
         };
@@ -160,6 +161,7 @@ impl Editor {
                 (o.model.clone(), o.reasoning_effort.clone(), args)
             }
             AgentOptions::Pi(o) => (o.model.clone(), o.thinking.clone(), o.args()),
+            AgentOptions::Agy(o) => (o.model.clone(), o.effort.clone(), o.args()),
         }
     }
 
@@ -328,6 +330,7 @@ impl Editor {
                     AgentOptions::Claude(o) => (o.model, o.effort),
                     AgentOptions::Codex(o) => (o.model, o.reasoning_effort),
                     AgentOptions::Pi(o) => (o.model, o.thinking),
+                    AgentOptions::Agy(o) => (o.model, o.effort),
                 };
                 (i, kind, model, effort)
             })

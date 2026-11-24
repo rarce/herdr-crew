@@ -2750,3 +2750,132 @@ fn concurrent_identical_sends_pass_the_repeat_check_once() {
     // The record lives in the repository's Git directory, not in a shared temporary directory.
     assert!(f.repo.join(".git/herdr-crew-send.json").is_file());
 }
+
+#[test]
+fn agy_install_launch_hook_and_recovery() {
+    let f = Fixture::new();
+    let tools = f.root.join("tools");
+    fs::create_dir(&tools).unwrap();
+    fs::write(tools.join("agy"), "#!/bin/sh\necho 1.5.15\n").unwrap();
+    fs::write(
+        tools.join("herdr-crew"),
+        "#!/bin/sh\nif [ \"${1-}\" = --launcher-id ]; then echo 'herdr-crew public launcher format 1 (rarce/herdr-crew)'; else exec \"$CREW_TEST_BIN\" \"$@\"; fi\n",
+    )
+    .unwrap();
+    for name in ["agy", "herdr-crew"] {
+        fs::set_permissions(tools.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let config = f
+        .read(".herdr/crew.toml")
+        .replace("version = 1", "version = 1\nkind = \"agy\"")
+        .replace(
+            "[workspace]",
+            "[agy]\nmodel = \"gemini-4-neon\"\neffort = \"high\"\n\n[workspace]",
+        );
+    fs::write(f.repo.join(".herdr/crew.toml"), &config).unwrap();
+
+    // Without agy-install, up and check fail before mutating anything.
+    failure(f.crew(&["up", "--no-attach"]), "herdr-crew agy-install");
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    f.no_generated_files();
+    failure(f.crew(&["check"]), "herdr-crew agy-install");
+
+    // Pre-existing herdr hook in ~/.gemini/config/hooks.json is preserved across install/uninstall.
+    let hooks = f.root.join(".gemini/config/hooks.json");
+    fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+    fs::write(
+        &hooks,
+        r#"{"herdr":{"PreInvocation":[{"type":"command","command":"herdr-agent-state.sh"}]}}"#,
+    )
+    .unwrap();
+    success(f.crew(&["agy-install"]));
+    let installed: Value = serde_json::from_str(&fs::read_to_string(&hooks).unwrap()).unwrap();
+    assert!(installed.get("herdr").is_some());
+    assert!(installed.get("herdr-crew").is_some());
+
+    let checked = success(f.crew(&["check"]));
+    assert!(checked.contains("herdr-crew: agy 1.5.15 at "), "{checked}");
+    assert!(
+        checked.contains("the crew agy hook is installed"),
+        "{checked}"
+    );
+
+    f.up();
+    let starts: Vec<_> = f
+        .calls()
+        .into_iter()
+        .filter(|c| starts_with(c, &["agent", "start"]))
+        .collect();
+    assert_eq!(starts.len(), 2);
+    for call in &starts {
+        assert!(call.windows(2).any(|w| w == ["--kind", "agy"]), "{call:?}");
+        assert!(
+            call.windows(2).any(|w| w == ["--model", "gemini-4-neon"]),
+            "{call:?}"
+        );
+        assert!(
+            call.windows(2).any(|w| w == ["--effort", "high"]),
+            "{call:?}"
+        );
+        assert!(
+            call.windows(2)
+                .any(|w| w[0] == "--prompt-interactive" && !w[1].is_empty()),
+            "{call:?}"
+        );
+    }
+
+    // One-shot SessionStart hook injects the role prompt once and ignores subsequent calls (e.g. subagents).
+    let lead_pane = fs::read_to_string(f.tab("lead").join("pane")).unwrap();
+    let hook_input = format!(
+        r#"{{"conversationId":"conv-1","cwd":"{}"}}"#,
+        f.repo.display()
+    );
+    let run_hook = |pane: &str, body: &str| -> Value {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = f
+            .command(CREW)
+            .env("HERDR_PANE_ID", pane)
+            .arg("agy-hook")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let first = run_hook(&lead_pane, &hook_input);
+    let injected = first["injectSteps"][0]["systemMessage"]["systemMessage"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(injected.contains("lead"), "{first}");
+    let second = run_hook(
+        &lead_pane,
+        &format!(
+            r#"{{"conversationId":"subagent-1","cwd":"{}"}}"#,
+            f.repo.display()
+        ),
+    );
+    assert_eq!(second, serde_json::json!({}));
+
+    // Empty-tab recovery advises `agy --conversation <id>`.
+    fs::remove_file(f.tab("lead").join("agent")).unwrap();
+    fs::write(f.tab("lead").join("session"), "conv-1").unwrap();
+    let dry = success(f.crew(&["up", "--dry-run"]));
+    assert!(dry.contains("agy --conversation conv-1"), "{dry}");
+
+    // Uninstall removes only herdr-crew, preserving herdr's hook.
+    success(f.crew(&["agy-uninstall"]));
+    let after: Value = serde_json::from_str(&fs::read_to_string(&hooks).unwrap()).unwrap();
+    assert!(after.get("herdr").is_some());
+    assert!(after.get("herdr-crew").is_none());
+}

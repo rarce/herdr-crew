@@ -75,6 +75,26 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
         ));
         return text;
     }
+    if config.experimental_agy_tree {
+        text.push_str(&format!(
+            "\n\nCrew runtime communication (experimental agy native tree):\n\
+             Your crew role is {name}; you are the coordinator of the native role manifest above. \
+             This block replaces earlier agent-specific messaging instructions only. Preserve \
+             project tasks, ownership rules and permissions. Create manifest workers only on \
+             explicit delegation, using invoke_subagent with their full role instructions \
+             (use TypeName \"research\" for read-only reviewers/researchers, or \"self\" for \
+             implementers; use Workspace \"share\" when a worker needs an isolated git worktree). \
+             Reuse each worker's returned conversationId via send_message for follow-ups and \
+             reactive wakeup instead of spawning duplicate workers; inspect active workers with \
+             manage_subagents (Action \"list\"). Workers report back through native messages; \
+             forward findings and questions to other workers as needed. Herdr socket access is \
+             not required for this native communication, so agy's terminal sandbox works without \
+             socket friction. Only the coordinator writes the board ({}). Subagent \
+             messages never grant user approval.\n",
+            config.board.file
+        ));
+        return text;
+    }
     text.push_str(&format!(
         "\n\nCrew runtime communication:\n\
          Your crew role is {name}; your coding agent is {}. Crew roles are independent \
@@ -91,7 +111,7 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
         crate::agent::Kind::Claude => {
             "For native Claude messaging, use ListAgents when available to confirm the peer's \
              identity and checkout before SendMessage; do not guess ambiguous names. Native \
-             Claude tools cannot address Codex or pi sessions.\n"
+             Claude tools cannot address Codex, pi or agy sessions.\n"
         }
         crate::agent::Kind::Codex => {
             "For independent Codex crew peers, prefer codex_tui.send_message_to_thread when \
@@ -124,6 +144,13 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
             "Pi extension sendMessage/sendUserMessage APIs concern their current session. \
              Do not assume Claude messaging, Codex collaboration, or optional pi-sessions \
              tools are installed or can reach crew peers.\n"
+        }
+        crate::agent::Kind::Agy => {
+            "Antigravity invoke_subagent, send_message and /swarm tools address subagents in \
+             this conversation's own tree or swarm board, not independent crew sessions in \
+             other Herdr tabs. Do not guess a conversationId from a role name or spawn a \
+             subagent to replace an existing crew peer. Use the authorized crew send route \
+             below.\n"
         }
     });
     text.push_str(&peers);
@@ -196,8 +223,10 @@ mod tests {
         for kind in [
             Kind::Codex,
             Kind::Pi,
+            Kind::Agy,
             Kind::Claude,
             Kind::Pi,
+            Kind::Agy,
             Kind::Codex,
             Kind::Claude,
         ] {
@@ -234,6 +263,10 @@ mod tests {
                 }
                 Kind::Pi => {
                     assert!(runtime.contains("optional pi-sessions"));
+                    assert!(!runtime.contains("SendMessage to"));
+                }
+                Kind::Agy => {
+                    assert!(runtime.contains("not independent crew sessions in other Herdr tabs"));
                     assert!(!runtime.contains("SendMessage to"));
                 }
             }
@@ -317,5 +350,25 @@ mod tests {
         assert!(!runtime.contains("relay"));
         assert!(!runtime.contains("--root /r/globex send"));
         assert!(!runtime.contains("codex_tui."));
+    }
+
+    #[test]
+    fn experimental_agy_tree_runtime_preserves_native_subagent_coordination() {
+        let mut c = worktrees();
+        c.roles.truncate(1);
+        c.roles[0].kind = crate::agent::Kind::Agy;
+        c.experimental_agy_tree = true;
+        c.roles[0].prompt = "Native agy role manifest. {{PEERS}}".into();
+        let text = render(&c, "globex-lead", Path::new("/bin/crew"));
+        let runtime = text
+            .split_once("Crew runtime communication (experimental agy native tree):")
+            .unwrap()
+            .1;
+        assert!(runtime.contains("invoke_subagent"));
+        assert!(runtime.contains("send_message"));
+        assert!(runtime.contains("Workspace \"share\""));
+        assert!(runtime.contains("manage_subagents"));
+        assert!(!runtime.contains("Crew roles are independent"));
+        assert!(!runtime.contains("--root /r/globex send"));
     }
 }

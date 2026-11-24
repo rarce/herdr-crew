@@ -8,7 +8,8 @@ use serde::Deserialize;
 use toml::de::{DeTable, DeValue};
 
 use crate::agent::{
-    AgentOptions, CLAUDE_KEYS, CODEX_KEYS, ClaudeOptions, CodexOptions, Kind, PI_KEYS, PiOptions,
+    AGY_KEYS, AgentOptions, AgyOptions, CLAUDE_KEYS, CODEX_KEYS, ClaudeOptions, CodexOptions, Kind,
+    PI_KEYS, PiOptions,
 };
 use crate::{files, prompt};
 
@@ -39,12 +40,15 @@ impl fmt::Display for Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub root: PathBuf,
-    /// Prompt topology for the separate single-coordinator experiment; no worker lifecycle.
+    /// Prompt topology for the separate single-coordinator Codex experiment; no worker lifecycle.
     pub experimental_codex_tree: bool,
+    /// Prompt topology for the single-coordinator Antigravity native-subagent mode.
+    pub experimental_agy_tree: bool,
     pub kind: Kind,
     pub claude: ClaudeOptions,
     pub codex: CodexOptions,
     pub pi: PiOptions,
+    pub agy: AgyOptions,
     pub label: String,
     pub board: Board,
     pub worktrees: Option<Worktrees>,
@@ -77,6 +81,7 @@ pub struct Role {
     pub claude: ClaudeOptions,
     pub codex: CodexOptions,
     pub pi: PiOptions,
+    pub agy: AgyOptions,
     pub name: String,
     pub prompt: String,
     pub worktree: bool,
@@ -92,6 +97,7 @@ impl Role {
             Kind::Claude => AgentOptions::Claude(self.claude.clone()),
             Kind::Codex => AgentOptions::Codex(self.codex.clone()),
             Kind::Pi => AgentOptions::Pi(self.pi.clone()),
+            Kind::Agy => AgentOptions::Agy(self.agy.clone()),
         }
     }
 }
@@ -102,6 +108,8 @@ struct RawConfig {
     #[serde(default)]
     experimental_codex_tree: bool,
     #[serde(default)]
+    experimental_agy_tree: bool,
+    #[serde(default)]
     kind: Kind,
     #[serde(default)]
     claude: ClaudeOptions,
@@ -109,6 +117,8 @@ struct RawConfig {
     codex: CodexOptions,
     #[serde(default)]
     pi: PiOptions,
+    #[serde(default)]
+    agy: AgyOptions,
     version: i64,
     workspace: RawWorkspace,
     board: RawBoard,
@@ -147,6 +157,7 @@ struct RawRole {
     claude: Option<ClaudeOptions>,
     codex: Option<CodexOptions>,
     pi: Option<PiOptions>,
+    agy: Option<AgyOptions>,
     name: String,
     prompt: String,
     #[serde(default)]
@@ -159,11 +170,13 @@ struct RawRole {
 /// Known keys per table; checked before `serde` so that all of them are reported at once.
 const ROOT_KEYS: &[&str] = &[
     "experimental_codex_tree",
+    "experimental_agy_tree",
     "version",
     "kind",
     "claude",
     "codex",
     "pi",
+    "agy",
     "workspace",
     "board",
     "worktrees",
@@ -175,6 +188,7 @@ const TABLE_KEYS: &[(&str, &[&str])] = &[
     ("claude", CLAUDE_KEYS),
     ("codex", CODEX_KEYS),
     ("pi", PI_KEYS),
+    ("agy", AGY_KEYS),
     ("workspace", &["label"]),
     ("board", &["tab", "file", "writer"]),
     ("worktrees", &["dir", "base"]),
@@ -189,6 +203,7 @@ const ROLE_KEYS: &[&str] = &[
     "claude",
     "codex",
     "pi",
+    "agy",
 ];
 
 impl Config {
@@ -261,6 +276,9 @@ impl Config {
         if raw.roles.is_empty() {
             err("roles[] is empty: at least one role is needed".to_string());
         }
+        if raw.experimental_codex_tree && raw.experimental_agy_tree {
+            err("experimental_codex_tree and experimental_agy_tree cannot both be enabled".into());
+        }
         if raw.experimental_codex_tree
             && (raw.roles.len() != 1
                 || raw
@@ -270,6 +288,15 @@ impl Config {
         {
             err("experimental_codex_tree requires exactly one Codex coordinator without worktree or extra".into());
         }
+        if raw.experimental_agy_tree
+            && (raw.roles.len() != 1
+                || raw
+                    .roles
+                    .iter()
+                    .any(|r| r.kind.unwrap_or(raw.kind) != Kind::Agy || r.worktree || r.extra))
+        {
+            err("experimental_agy_tree requires exactly one agy coordinator without worktree or extra".into());
+        }
         for problem in raw.claude.problems() {
             err(format!("claude.{problem}"));
         }
@@ -278,6 +305,9 @@ impl Config {
         }
         for problem in raw.pi.problems() {
             err(format!("pi.{problem}"));
+        }
+        for problem in raw.agy.problems() {
+            err(format!("agy.{problem}"));
         }
         for (i, r) in raw.roles.iter().enumerate() {
             if let Some(options) = &r.claude {
@@ -295,6 +325,11 @@ impl Config {
                     err(format!("roles[{i}].pi.{problem}"));
                 }
             }
+            if let Some(options) = &r.agy {
+                for problem in options.problems() {
+                    err(format!("roles[{i}].agy.{problem}"));
+                }
+            }
             if r.kind.unwrap_or(raw.kind) == Kind::Pi
                 && let Some(problem) =
                     r.pi.clone()
@@ -303,6 +338,16 @@ impl Config {
                         .launch_problem()
             {
                 err(format!("roles[{i}].pi.{problem}"));
+            }
+            if r.kind.unwrap_or(raw.kind) == Kind::Agy
+                && let Some(problem) = r
+                    .agy
+                    .clone()
+                    .unwrap_or_default()
+                    .inherit(&raw.agy)
+                    .launch_problem()
+            {
+                err(format!("roles[{i}].agy.{problem}"));
             }
             // pi reads a positional argument that starts with "@" as a file to attach.
             if r.kind.unwrap_or(raw.kind) == Kind::Pi
@@ -404,10 +449,12 @@ impl Config {
         Ok(Config {
             root: root.to_path_buf(),
             experimental_codex_tree: raw.experimental_codex_tree,
+            experimental_agy_tree: raw.experimental_agy_tree,
             kind: raw.kind,
             claude: raw.claude.clone(),
             codex: raw.codex.clone(),
             pi: raw.pi.clone(),
+            agy: raw.agy.clone(),
             label: raw.workspace.label,
             board: Board {
                 tab: raw.board.tab,
@@ -428,6 +475,7 @@ impl Config {
                     claude: r.claude.unwrap_or_default().inherit(&raw.claude),
                     codex: r.codex.unwrap_or_default().inherit(&raw.codex),
                     pi: r.pi.unwrap_or_default().inherit(&raw.pi),
+                    agy: r.agy.unwrap_or_default().inherit(&raw.agy),
                     name: r.name,
                     prompt: r.prompt,
                     worktree: r.worktree,
@@ -538,6 +586,7 @@ fn unknown_keys(root: &DeTable<'_>) -> Vec<(Range<usize>, String)> {
                         ("claude", CLAUDE_KEYS),
                         ("codex", CODEX_KEYS),
                         ("pi", PI_KEYS),
+                        ("agy", AGY_KEYS),
                     ] {
                         if let Some(value) = t.get(agent)
                             && let DeValue::Table(options) = value.get_ref()
@@ -1167,5 +1216,36 @@ prompt = '''You are {{NAME}}.'''
             );
         }
         assert!(!Config::parse(MIN, root).unwrap().experimental_codex_tree);
+    }
+
+    #[test]
+    fn experimental_agy_tree_requires_one_shared_agy_coordinator() {
+        let text = format!("experimental_agy_tree = true\nkind = \"agy\"\n{MIN}");
+        let root = Path::new("/r/p");
+        assert!(Config::parse(&text, root).unwrap().experimental_agy_tree);
+        assert!(Config::select_agent(&text, root, Kind::Claude).is_err());
+        for suffix in [
+            "extra = true\n",
+            "worktree = true\n",
+            "[[roles]]\nname = \"second\"\nprompt = \"Worker\"\n",
+        ] {
+            assert!(
+                errors(&format!("{text}{suffix}"))
+                    .iter()
+                    .any(|error| error.contains("exactly one agy coordinator"))
+            );
+        }
+        let both = format!("experimental_codex_tree = true\n{text}");
+        assert!(
+            errors(&both)
+                .iter()
+                .any(|error| error.contains("cannot both be enabled"))
+        );
+        assert!(!Config::parse(MIN, root).unwrap().experimental_agy_tree);
+        let fixture = include_str!("../tests/fixtures/crew-agy-tree.toml");
+        let parsed = Config::parse(fixture, root).unwrap();
+        assert!(parsed.experimental_agy_tree);
+        assert_eq!(parsed.kind, Kind::Agy);
+        assert_eq!(parsed.roles.len(), 1);
     }
 }

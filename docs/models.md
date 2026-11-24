@@ -1,9 +1,10 @@
 # Models and effort per role
 
-Investigation: 2026-11-20. Sources: Anthropic's current model and effort guidance (Claude
-Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5), `claude --help` 2.1.329, and `codex debug
-models` from Codex CLI 0.170.0. These are starting points for herdr-crew, not benchmarks of
-it; measure on your own tasks before raising a default.
+Investigation: 2026-11-20 (updated 2026-11-23 for `agy`). Sources: Anthropic's current model
+and effort guidance (Claude Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5), `claude --help`
+2.1.329, `codex debug models` from Codex CLI 0.170.0, and `agy models` / `agy --help` from
+Antigravity CLI 1.5.15. These are starting points for herdr-crew, not benchmarks of it;
+measure on your own tasks before raising a default.
 
 ## Why roles need different models
 
@@ -47,22 +48,24 @@ effort into `[roles.<agent>]`. `balanced` is the default.
 
 Tiers map to each agent as follows:
 
-| Tier | Claude Code (`--model`) | Codex (`model`) | pi |
-| --- | --- | --- | --- |
-| frontier | `fable` | `gpt-6.2-astra` | your provider's model |
-| strong | `opus` | `gpt-6.2-astra` | your provider's model |
-| standard | `sonnet` | `gpt-6.2-sol` | your provider's model |
-| light | `haiku` | `gpt-6-luna` | your provider's model |
+| Tier | Claude Code (`--model`) | Codex (`model`) | pi | agy (`--model`) |
+| --- | --- | --- | --- | --- |
+| frontier | `fable` | `gpt-6.2-astra` | your provider's model | `gemini-4-argon` |
+| strong | `opus` | `gpt-6.2-astra` | your provider's model | `gemini-4-neon` |
+| standard | `sonnet` | `gpt-6.2-sol` | your provider's model | `gemini-4-hydrogen` |
+| light | `haiku` | `gpt-6-luna` | your provider's model | `gemini-3.8-flash` |
 
 Claude Code aliases follow the latest model of each family, so the configuration does not age.
-Codex has no aliases; its IDs come from the current catalog and may need updating as models are
-retired (`codex debug models` lists them). pi's model depends on the provider you log in to, so
-profiles set only pi's `thinking` level and leave `model` alone.
+Codex and `agy` use IDs from their current catalogs (`codex debug models`, `agy models`) and
+may need updating as models are retired. For `agy`, crew passes base model names alongside
+`--effort` (rejecting combinations where a suffixed slug like `gemini-4-neon-high` or an
+`orchestrator` model is paired with `effort`). pi's model depends on the provider you log in
+to, so profiles set only pi's `thinking` level and leave `model` alone.
 
-Effort names are shared: `low`, `medium`, `high` and `xhigh` exist for all three agents
-(Claude `--effort`, Codex `model_reasoning_effort`, pi `--thinking`). Codex also accepts
-`ultra` (maximum reasoning with automatic task delegation) and pi clamps a level to what its
-model supports.
+Effort names are shared: `low`, `medium`, `high` and `xhigh` exist for all four agents
+(Claude `--effort`, Codex `model_reasoning_effort`, pi `--thinking`, agy `--effort`). Codex
+also accepts `ultra` (maximum reasoning with automatic task delegation) and pi clamps a level
+to what its model supports.
 
 Duties of an existing crew are guessed from the role names `init` generates: the board writer
 is the lead (or solo, when it is the only role), names containing `review` or `research` are
@@ -95,6 +98,11 @@ session (`/model`, `/effort`) or close the tab and run `up`.
   flags. After a herdr restart, a resumed Claude role may run with Claude Code's own default
   model and effort until a new conversation starts (not yet verified on a live restore). Set a matching `model` in Claude Code's settings,
   or use `/model` in the restored tab, if that matters for a role.
+
+- **agy** is resumed by herdr with a plain `agy --conversation <id>` (via `herdr integration
+  install antigravity-cli`), without crew's launch flags. Verify on your installation whether
+  a restored conversation keeps its original model/effort or falls back to `settings.json`
+  defaults; use `/model` or `/effort` in the restored tab if needed.
 
 `fallback_model` (Claude only) passes `--fallback-model`, a comma-separated list Claude Code
 tries when the main model is busy or unavailable.
