@@ -10,6 +10,8 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-24
+
 ### Added
 
 - Experimental herdr-core host. Crews can run on herdr-core (`hc`) and show in the Herdr app.
@@ -272,7 +274,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/rarce/herdr-crew/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/rarce/herdr-crew/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/rarce/herdr-crew/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rarce/herdr-crew/compare/v0.5.0...v0.6.0
