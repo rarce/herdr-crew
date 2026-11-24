@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::Kind;
+use crate::backend::{AgentState, Backend, Load, LoadError, PromptError};
 use crate::config::{Config, Role};
-use crate::herdr::{CallError, Herdr};
 use crate::plan::{shell_program, shell_word};
 use crate::{codex, files, git};
 
@@ -319,10 +319,7 @@ impl Record {
 
 /// A herdr failure before anything was sent: 77 only when the socket itself is refused, as in a
 /// sandbox; a stopped server or any other error is an ordinary, retryable failure.
-fn unreachable(e: &CallError) -> Refusal {
-    let denied = e.code == "output"
-        && (e.message.contains("Operation not permitted")
-            || e.message.contains("PermissionDenied"));
+fn unreachable(e: &str, denied: bool) -> Refusal {
     if denied {
         refuse(
             EXIT_UNREACHABLE,
@@ -347,7 +344,7 @@ fn now() -> u64 {
 /// crew's workspace. `sender_pane` is the caller's `HERDR_PANE_ID`, a label, not a credential.
 pub fn run(
     c: &Config,
-    herdr: &Herdr,
+    herdr: &dyn Backend,
     target: &str,
     raw: &str,
     sender_pane: Option<&str>,
@@ -359,10 +356,10 @@ pub fn run(
             format!("\"{target}\" is not a session of this crew"),
         ));
     }
-    let workspaces = herdr
-        .call(&["workspace", "list"])
-        .map_err(|e| unreachable(&e))?;
-    let state = herdr.state(&workspaces, c).map_err(|e| refuse(1, e))?;
+    let state = herdr.load(c, Load::Read).map_err(|e| match e {
+        LoadError::Unreachable { message, denied } => unreachable(&message, denied),
+        LoadError::Failed(e) => refuse(1, e),
+    })?;
     let workspace = state.workspace.as_ref().ok_or_else(|| {
         refuse(
             1,
@@ -396,12 +393,12 @@ pub fn run(
         let kind = c.session_role(name).expect("a known session").kind;
         format!("{name} ({})", kind.as_str())
     });
-    let info = herdr
-        .call(&["agent", "get", &receiver.pane_id])
-        .map_err(|e| refuse(1, format!("cannot read {target}'s state: {e}")))?;
-    match info["agent"]["agent_status"].as_str().unwrap_or("unknown") {
-        "idle" | "done" | "working" => {}
-        "blocked" => {
+    match herdr
+        .agent_state(&receiver.pane_id)
+        .map_err(|e| refuse(1, format!("cannot read {target}'s state: {e}")))?
+    {
+        AgentState::Available => {}
+        AgentState::Blocked => {
             return Err(refuse(
                 EXIT_BLOCKED,
                 format!(
@@ -410,7 +407,7 @@ pub fn run(
                 ),
             ));
         }
-        other => {
+        AgentState::Other(other) => {
             return Err(refuse(
                 1,
                 format!("{target}'s agent state is {other}; nothing was sent"),
@@ -427,21 +424,23 @@ pub fn run(
     let digest = files::fnv64(0xcbf29ce484222325, body.as_bytes());
     rate_check(&recent, &from_key, target, digest, at).map_err(|e| refuse(EXIT_RATE, e))?;
     let text = frame(from.as_deref(), &nonce(), &body);
-    let queued = receiver.kind.as_deref() == Some("codex")
-        && codex::messaging::deliver(c, herdr, target, &receiver.pane_id, &text)
-            .map_err(|e| refuse(1, format!("cannot send to {target}: {e}")))?;
+    // Codex's native queue needs the Herdr TUI's pane bindings.
+    let queued = match herdr.tui() {
+        Some(tui) if receiver.kind.as_deref() == Some("codex") => {
+            codex::messaging::deliver(c, tui, target, &receiver.pane_id, &text)
+                .map_err(|e| refuse(1, format!("cannot send to {target}: {e}")))?
+        }
+        _ => false,
+    };
     if !queued {
         herdr
-            .call(&["agent", "prompt", &receiver.pane_id, &text])
-            .map_err(|e| {
-                if e.code == "agent_blocked" {
-                    refuse(
-                        EXIT_BLOCKED,
-                        format!("{target} is waiting at a dialog, which only the user answers; nothing was sent"),
-                    )
-                } else {
-                    refuse(1, format!("cannot send to {target}: {e}"))
-                }
+            .prompt(&receiver.pane_id, &text)
+            .map_err(|e| match e {
+                PromptError::Blocked => refuse(
+                    EXIT_BLOCKED,
+                    format!("{target} is waiting at a dialog, which only the user answers; nothing was sent"),
+                ),
+                PromptError::Failed(e) => refuse(1, format!("cannot send to {target}: {e}")),
             })?;
     }
     recent.push(Sent {

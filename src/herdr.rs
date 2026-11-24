@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::agent::{AgentOptions, Kind};
+use crate::backend::{
+    AgentStart, AgentState, Backend, Created, Load, LoadError, PaneEnv, PromptError, Started,
+};
 use crate::config::Config;
 use crate::plan::{Foreground, HerdrState, PaneRef, Plan, Step, WorkspaceRef, find_workspace};
 use crate::{codex, files, git};
@@ -233,6 +236,198 @@ impl Herdr {
     }
 }
 
+impl Backend for Herdr {
+    fn notify(&self, message: &str) {
+        Herdr::notify(self, message);
+    }
+
+    fn load(&self, c: &Config, mode: Load) -> Result<HerdrState, LoadError> {
+        let workspaces = match mode {
+            Load::Start(root, out) => self.ensure_server(root, out).map_err(LoadError::Failed)?,
+            Load::Read => {
+                self.call(&["workspace", "list"])
+                    .map_err(|e| LoadError::Unreachable {
+                        denied: e.code == "output"
+                            && (e.message.contains("Operation not permitted")
+                                || e.message.contains("PermissionDenied")),
+                        message: e.to_string(),
+                    })?
+            }
+        };
+        self.state(&workspaces, c).map_err(LoadError::Failed)
+    }
+
+    fn foreground(&self, pane: &str) -> Foreground {
+        Herdr::foreground(self, pane)
+    }
+
+    fn require_native(&self, kind: &str) -> Result<(), String> {
+        self.require_native_server(kind)
+    }
+
+    fn create_workspace(&self, label: &str, cwd: &Path, env: &PaneEnv) -> Result<Created, String> {
+        let cwd = cwd.to_string_lossy();
+        let mut args: Vec<String> = [
+            "workspace",
+            "create",
+            "--cwd",
+            &cwd,
+            "--label",
+            label,
+            "--no-focus",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        args.extend(env_args(env));
+        let r = self
+            .call(&args)
+            .map_err(|e| format!("could not create workspace \"{label}\": {e}"))?;
+        Ok(Created {
+            workspace: str_at(&r, &["workspace", "workspace_id"])?,
+            tab: str_at(&r, &["tab", "tab_id"])?,
+            pane: str_at(&r, &["root_pane", "pane_id"])?,
+        })
+    }
+
+    fn rename_workspace(&self, workspace: &str, label: &str) -> Result<(), String> {
+        self.call(&["workspace", "rename", workspace, label])
+            .map(drop)
+            .map_err(|e| format!("could not rename {workspace}: {e}"))
+    }
+
+    fn rename_tab(&self, tab: &str, label: &str) -> Result<(), String> {
+        self.call(&["tab", "rename", tab, label])
+            .map(drop)
+            .map_err(|e| format!("could not rename {tab}: {e}"))
+    }
+
+    fn create_tab(
+        &self,
+        workspace: &str,
+        label: &str,
+        cwd: &Path,
+        env: &PaneEnv,
+    ) -> Result<String, String> {
+        let cwd = cwd.to_string_lossy();
+        let mut args: Vec<String> = [
+            "tab",
+            "create",
+            "--workspace",
+            workspace,
+            "--cwd",
+            &cwd,
+            "--label",
+            label,
+            "--no-focus",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        args.extend(env_args(env));
+        let r = self
+            .call(&args)
+            .map_err(|e| format!("could not create tab \"{label}\": {e}"))?;
+        str_at(&r, &["root_pane", "pane_id"])
+    }
+
+    fn start_agent(&self, s: &AgentStart) -> Result<Started, String> {
+        let mut args: Vec<String> = [
+            "agent",
+            "start",
+            s.name,
+            "--kind",
+            s.kind.as_str(),
+            "--pane",
+            s.pane,
+            "--timeout",
+            "60000",
+            "--",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        args.extend_from_slice(s.args);
+        if let Some(msg) = s.message {
+            if s.kind == Kind::Agy {
+                // `agy` rejects positional prompts; pass initial interactive messages via flag.
+                args.extend(["--prompt-interactive".into(), msg.to_string()]);
+            } else {
+                args.push(msg.to_string());
+            }
+        }
+        let start = Instant::now();
+        loop {
+            match self.call(&args) {
+                Ok(_) => return Ok(Started::Ready),
+                // The pane's shell has not reached its prompt yet.
+                Err(e)
+                    if e.code == "agent_pane_busy" && start.elapsed() < Duration::from_secs(30) =>
+                {
+                    sleep(Duration::from_secs(1));
+                }
+                Err(e) if e.code == "agent_not_ready" => return Ok(Started::Waiting),
+                Err(e) => return Err(format!("could not start {} in {}: {e}", s.name, s.pane)),
+            }
+        }
+    }
+
+    fn run_in_pane(&self, pane: &str, command: &str) -> Result<(), String> {
+        self.call(&["pane", "run", pane, command])
+            .map(drop)
+            .map_err(|e| format!("could not type in {pane}: {e}"))
+    }
+
+    fn close_tab(&self, tab: &str) -> Result<(), String> {
+        self.call(&["tab", "close", tab])
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+
+    fn agent_state(&self, pane: &str) -> Result<AgentState, String> {
+        let info = self
+            .call(&["agent", "get", pane])
+            .map_err(|e| e.to_string())?;
+        Ok(
+            match info["agent"]["agent_status"].as_str().unwrap_or("unknown") {
+                "idle" | "done" | "working" => AgentState::Available,
+                "blocked" => AgentState::Blocked,
+                other => AgentState::Other(other.to_string()),
+            },
+        )
+    }
+
+    fn prompt(&self, pane: &str, text: &str) -> Result<(), PromptError> {
+        self.call(&["agent", "prompt", pane, text])
+            .map(drop)
+            .map_err(|e| {
+                if e.code == "agent_blocked" {
+                    PromptError::Blocked
+                } else {
+                    PromptError::Failed(e.to_string())
+                }
+            })
+    }
+
+    fn will_attach(&self, attach: bool) -> bool {
+        Herdr::will_attach(self, attach)
+    }
+
+    fn focus_and_attach(&self, workspace: &str, root: &Path, attach: bool) -> Result<(), String> {
+        Herdr::focus_and_attach(self, workspace, root, attach)
+    }
+
+    fn tui(&self) -> Option<&Herdr> {
+        Some(self)
+    }
+}
+
+/// `--env K=V` for each variable of a new pane.
+fn env_args(env: &PaneEnv) -> impl Iterator<Item = String> + '_ {
+    env.iter()
+        .flat_map(|(k, v)| ["--env".to_string(), format!("{k}={v}")])
+}
+
 /// Whether this process runs in a herdr pane (`HERDR_ENV=1`).
 pub fn inside_herdr() -> bool {
     std::env::var("HERDR_ENV").is_ok_and(|v| v == "1")
@@ -310,7 +505,7 @@ impl Output {
         println!("herdr-crew: {msg}");
     }
 
-    pub fn warn(&mut self, herdr: &Herdr, msg: &str) {
+    pub fn warn(&mut self, herdr: &dyn Backend, msg: &str) {
         eprintln!("herdr-crew: {msg}");
         herdr.notify(msg);
     }
@@ -319,7 +514,7 @@ impl Output {
 /// Runs the steps in order, resolves the references with the real answers and returns the
 /// project's workspace. An error stops the plan (`up` is re-entrant).
 pub fn execute(
-    herdr: &Herdr,
+    herdr: &dyn Backend,
     c: &Config,
     state: &HerdrState,
     plan: &Plan,
@@ -417,7 +612,7 @@ pub fn execute(
         None
     };
     if let Some(kind) = native {
-        herdr.require_native_server(kind)?;
+        herdr.require_native(kind)?;
     }
     for name in pi_roles {
         if let Some(problem) = crate::pi::prompt_problem(name, prompt_of(name)?) {
@@ -450,6 +645,16 @@ pub fn execute(
             .cloned()
             .ok_or_else(|| format!("no pane for \"{label}\"")),
     };
+    // The variables of a new pane: Codex roles start with the crew's Codex home.
+    let pane_env = |label: &str| -> Result<Vec<(String, String)>, String> {
+        if c.session_role(label)
+            .is_some_and(|role| role.kind == Kind::Codex)
+        {
+            codex::pane_environment()
+        } else {
+            Ok(Vec::new())
+        }
+    };
     for step in &plan.steps {
         match step {
             Step::SetAgent {
@@ -465,38 +670,22 @@ pub fn execute(
                 ));
             }
             Step::CreateWorkspace { label, cwd } => {
-                let cwd = cwd.to_string_lossy();
-                let mut args: Vec<String> = [
-                    "workspace",
-                    "create",
-                    "--cwd",
-                    &cwd,
-                    "--label",
-                    label,
-                    "--no-focus",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect();
-                if c.roles.first().is_some_and(|role| role.kind == Kind::Codex) {
-                    args.extend(codex::pane_environment()?);
-                }
-                let r = herdr
-                    .call(&args)
-                    .map_err(|e| format!("could not create workspace \"{label}\": {e}"))?;
-                let id = str_at(&r, &["workspace", "workspace_id"])?;
-                initial = Some((
-                    str_at(&r, &["tab", "tab_id"])?,
-                    str_at(&r, &["root_pane", "pane_id"])?,
+                // The workspace's first pane hosts the first role.
+                let env = match c.roles.first() {
+                    Some(role) if role.kind == Kind::Codex => codex::pane_environment()?,
+                    _ => Vec::new(),
+                };
+                let created = herdr.create_workspace(label, cwd, &env)?;
+                out.step(&format!(
+                    "workspace \"{label}\" created ({})",
+                    created.workspace
                 ));
-                out.step(&format!("workspace \"{label}\" created ({id})"));
-                workspace = Some(id);
+                initial = Some((created.tab, created.pane));
+                workspace = Some(created.workspace);
             }
             Step::AdoptWorkspace { initial: i, label } => {
                 if i.label != *label {
-                    herdr
-                        .call(&["workspace", "rename", &i.workspace, label])
-                        .map_err(|e| format!("could not rename {}: {e}", i.workspace))?;
+                    herdr.rename_workspace(&i.workspace, label)?;
                 }
                 out.step(&format!("workspace {} adopted as \"{label}\"", i.workspace));
                 initial = Some((i.tab.clone(), i.pane.clone()));
@@ -504,9 +693,7 @@ pub fn execute(
             }
             Step::RenameTab { label } => {
                 let (tab, pane) = initial.clone().ok_or("there is no initial tab to rename")?;
-                herdr
-                    .call(&["tab", "rename", &tab, label])
-                    .map_err(|e| format!("could not rename {tab}: {e}"))?;
+                herdr.rename_tab(&tab, label)?;
                 panes.insert(label.clone(), pane);
             }
             Step::CreateWorktree {
@@ -540,30 +727,8 @@ pub fn execute(
                         workspace.clone().ok_or("the workspace was not created")?
                     }
                 };
-                let cwd = cwd.to_string_lossy();
-                let mut args: Vec<String> = [
-                    "tab",
-                    "create",
-                    "--workspace",
-                    &ws,
-                    "--cwd",
-                    &cwd,
-                    "--label",
-                    label,
-                    "--no-focus",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect();
-                if c.session_role(label)
-                    .is_some_and(|role| role.kind == Kind::Codex)
-                {
-                    args.extend(codex::pane_environment()?);
-                }
-                let r = herdr
-                    .call(&args)
-                    .map_err(|e| format!("could not create tab \"{label}\": {e}"))?;
-                panes.insert(label.clone(), str_at(&r, &["root_pane", "pane_id"])?);
+                let pane = herdr.create_tab(&ws, label, cwd, &pane_env(label)?)?;
+                panes.insert(label.clone(), pane);
             }
             Step::WritePrompt { path, content, .. } => files::write(&c.root, path, content)?,
             Step::StartAgent {
@@ -574,8 +739,13 @@ pub fn execute(
                 agent,
             } => {
                 let pane = pane_of(pane, &panes)?;
+                let tui = || {
+                    herdr.tui().ok_or_else(|| {
+                        format!("{name}: {} roles need the Herdr TUI", agent.kind().as_str())
+                    })
+                };
                 if let AgentOptions::Codex(options) = agent {
-                    codex::prepare(herdr, c, name, &pane, prompt_of(name)?, options)?;
+                    codex::prepare(tui()?, c, name, &pane, prompt_of(name)?, options)?;
                 }
                 let native = match agent {
                     AgentOptions::Claude(options) => {
@@ -613,18 +783,27 @@ pub fn execute(
                         effective.args()
                     }
                 };
+                let request = AgentStart {
+                    name,
+                    pane: &pane,
+                    kind: agent.kind(),
+                    args: &native,
+                    message: message.as_deref(),
+                };
                 let mut start = || {
-                    start_agent(
-                        herdr,
-                        name,
-                        &pane,
-                        agent.kind(),
-                        &native,
-                        message.as_deref(),
-                        out,
-                    )
+                    match herdr.start_agent(&request)? {
+                        Started::Ready => out.step(&format!("{name} in {pane}")),
+                        Started::Waiting => out.warn(
+                            herdr,
+                            &format!(
+                                "{name} in {pane} is waiting for an answer at startup; check that tab"
+                            ),
+                        ),
+                    }
+                    Ok(())
                 };
                 if matches!(agent, AgentOptions::Agy(_)) {
+                    tui()?;
                     crate::agy::launch(&c.root, &pane, prompt_of(name)?, start)?;
                 } else {
                     start()?;
@@ -639,9 +818,7 @@ pub fn execute(
                 if *new_tab {
                     sleep(Duration::from_secs(1)); // let the new shell reach its prompt
                 }
-                herdr
-                    .call(&["pane", "run", &pane, command])
-                    .map_err(|e| format!("could not type in {pane}: {e}"))?;
+                herdr.run_in_pane(&pane, command)?;
                 out.step(&format!("typed in {pane}: {command}"));
             }
             Step::WriteSchema { path, content } => files::write(&c.root, path, content)?,
@@ -653,65 +830,6 @@ pub fn execute(
         }
     }
     Ok(workspace)
-}
-
-fn start_agent(
-    herdr: &Herdr,
-    name: &str,
-    pane: &str,
-    kind: Kind,
-    native: &[String],
-    message: Option<&str>,
-    out: &mut Output,
-) -> Result<(), String> {
-    let mut args: Vec<String> = [
-        "agent",
-        "start",
-        name,
-        "--kind",
-        kind.as_str(),
-        "--pane",
-        pane,
-        "--timeout",
-        "60000",
-        "--",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
-    args.extend_from_slice(native);
-    if let Some(msg) = message {
-        if kind == Kind::Agy {
-            // `agy` rejects positional prompts; pass initial interactive messages via flag.
-            args.extend(["--prompt-interactive".into(), msg.to_string()]);
-        } else {
-            args.push(msg.to_string());
-        }
-    }
-    let start = Instant::now();
-    loop {
-        match herdr.call(&args) {
-            Ok(_) => {
-                out.step(&format!("{name} in {pane}"));
-                return Ok(());
-            }
-            // The pane's shell has not reached its prompt yet.
-            Err(e) if e.code == "agent_pane_busy" && start.elapsed() < Duration::from_secs(30) => {
-                sleep(Duration::from_secs(1));
-            }
-            // The agent runs but waits for an answer (e.g. trusting the folder).
-            Err(e) if e.code == "agent_not_ready" => {
-                out.warn(
-                    herdr,
-                    &format!(
-                        "{name} in {pane} is waiting for an answer at startup; check that tab"
-                    ),
-                );
-                return Ok(());
-            }
-            Err(e) => return Err(format!("could not start {name} in {pane}: {e}")),
-        }
-    }
 }
 
 fn str_at(v: &Value, path: &[&str]) -> Result<String, String> {

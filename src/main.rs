@@ -4,6 +4,7 @@
 
 mod agent;
 mod agy;
+mod backend;
 mod board;
 mod codex;
 mod config;
@@ -31,6 +32,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde_json::Value;
 
+use backend::{Backend, Load, LoadError};
 use config::Config;
 use herdr::{Herdr, Output};
 use lock::{Busy, ProjectLock};
@@ -295,7 +297,12 @@ fn binary() -> PathBuf {
         .unwrap_or_else(|_| "herdr-crew".into())
 }
 
-fn env(c: &Config, state: &HerdrState, herdr: Option<&Herdr>, worktrees: BTreeSet<String>) -> Env {
+fn env(
+    c: &Config,
+    state: &HerdrState,
+    herdr: Option<&dyn Backend>,
+    worktrees: BTreeSet<String>,
+) -> Env {
     let board_pane = state.workspace.as_ref().and_then(|w| {
         let tab = w.tabs.iter().find(|t| t.label == c.board.tab)?;
         let pane = w.panes.iter().find(|p| p.tab_id == tab.id)?;
@@ -319,7 +326,7 @@ fn env(c: &Config, state: &HerdrState, herdr: Option<&Herdr>, worktrees: BTreeSe
     }
 }
 
-fn fail_notify(herdr: &Herdr, msg: String) -> Fail {
+fn fail_notify(herdr: &dyn Backend, msg: String) -> Fail {
     herdr.notify(&msg);
     Fail::run(msg)
 }
@@ -329,7 +336,7 @@ const LOCK_WAIT: Duration = Duration::from_secs(120);
 
 /// The project's lock for a command that changes it. Taken before reading any state, so the
 /// plan always starts from what the previous command left.
-fn lock_project(c: &Config, herdr: &Herdr) -> Result<ProjectLock, Fail> {
+fn lock_project(c: &Config, herdr: &dyn Backend) -> Result<ProjectLock, Fail> {
     ProjectLock::acquire(&c.root, LOCK_WAIT, || {
         eprintln!(
             "herdr-crew: another herdr-crew command is changing {}; waiting up to {} s",
@@ -525,7 +532,12 @@ fn up(c: &Config, a: &Args, select: Option<agent::Kind>) -> Result<(), Fail> {
     })
 }
 
-fn up_inner(c: &Config, a: &Args, select: Option<agent::Kind>, herdr: &Herdr) -> Result<(), Fail> {
+fn up_inner(
+    c: &Config,
+    a: &Args,
+    select: Option<agent::Kind>,
+    herdr: &dyn Backend,
+) -> Result<(), Fail> {
     let lock = if a.dry_run {
         None
     } else {
@@ -558,18 +570,15 @@ fn up_inner(c: &Config, a: &Args, select: Option<agent::Kind>, herdr: &Herdr) ->
             c.board.tab
         ));
     }
-    let workspaces = if a.dry_run {
-        herdr.call(&["workspace", "list"]).ok()
+    let mode = if a.dry_run {
+        Load::Read
     } else {
-        Some(
-            herdr
-                .ensure_server(&c.root, &mut out)
-                .map_err(|e| fail_notify(herdr, e))?,
-        )
+        Load::Start(&c.root, &mut out)
     };
-    let state = match &workspaces {
-        Some(w) => herdr.state(w, c).map_err(|e| fail_notify(herdr, e))?,
-        None => {
+    let state = match herdr.load(c, mode) {
+        Ok(state) => state,
+        Err(e @ LoadError::Failed(_)) => return Err(fail_notify(herdr, e.to_string())),
+        Err(LoadError::Unreachable { .. }) => {
             println!("(no herdr server: the plan assumes an empty one)");
             HerdrState::default()
         }
@@ -795,11 +804,10 @@ fn panes_of(herdr: &Herdr, workspace: &str) -> Result<Vec<plan::Pane>, Fail> {
         .and_then(|v| plan::pane_items(&v).map_err(Fail::run))
 }
 
-fn current_state(c: &Config, herdr: &Herdr) -> Result<HerdrState, Fail> {
-    let workspaces = herdr
-        .call(&["workspace", "list"])
-        .map_err(|e| Fail::run(format!("the herdr server does not answer: {e}")))?;
-    herdr.state(&workspaces, c).map_err(Fail::run)
+fn current_state(c: &Config, herdr: &dyn Backend) -> Result<HerdrState, Fail> {
+    herdr
+        .load(c, Load::Read)
+        .map_err(|e| Fail::run(e.to_string()))
 }
 
 fn add(c: &Config, role: &str) -> Result<(), Fail> {
@@ -821,7 +829,7 @@ fn close(c: &Config, name: &str) -> Result<(), Fail> {
     let state = current_state(c, &herdr)?;
     let close = plan::plan_close(c, &state, name).map_err(Fail::run)?;
     herdr
-        .call(&["tab", "close", &close.tab_id])
+        .close_tab(&close.tab_id)
         .map_err(|e| Fail::run(format!("could not close {name}: {e}")))?;
     let mut out = Output;
     match close.worktree.filter(|p| p.exists()) {
