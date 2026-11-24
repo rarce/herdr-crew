@@ -398,3 +398,39 @@ fn pi_roles_resume_with_their_session_id_only() {
     );
     assert!(!resume.contains("--herdr-crew-prompt"), "{resume}");
 }
+
+#[test]
+fn app_install_writes_only_its_own_mod() {
+    let f = Fixture::new(CONFIG);
+    let home = f.root.join("app-home");
+    let install = |command: &str| {
+        f.crew(&[command])
+            .env("HERDR_APP_HOME", &home)
+            .output()
+            .unwrap()
+    };
+    ok(&install("app-install"));
+    let dir = home.join("mods/herdr-crew");
+    let main = fs::read_to_string(dir.join("main.js")).unwrap();
+    assert!(
+        main.contains(&format!(
+            "const CREW = {};",
+            serde_json::to_string(CREW).unwrap()
+        )),
+        "the mod runs this binary"
+    );
+    assert!(dir.join("mod.json").is_file());
+    // Again: an update in place.
+    ok(&install("app-install"));
+    ok(&install("app-uninstall"));
+    assert!(!dir.exists());
+    // Someone else's mod of that name is left alone.
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("main.js"), "export default 1;").unwrap();
+    assert!(!install("app-install").status.success());
+    assert!(!install("app-uninstall").status.success());
+    assert_eq!(
+        fs::read_to_string(dir.join("main.js")).unwrap(),
+        "export default 1;"
+    );
+}

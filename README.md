@@ -275,8 +275,24 @@ CREW_HOST=herdr-core herdr-crew up
   - Codex and agy roles need the Herdr TUI.
   - Tab names are set only while the app window is open; otherwise the app numbers them.
   - After a core restart, the roles come back as shells until you run `herdr-crew up`. It
-    resumes each Claude or pi conversation in its terminal and restarts the board. Nothing
-    runs `up` for you yet.
+    resumes each Claude or pi conversation in its terminal and restarts the board.
+
+The "Crew" dialog in the app does the same without a terminal:
+
+```sh
+herdr-crew app-install     # writes ~/.config/herdr-app/mods/herdr-crew/ ($HERDR_APP_HOME)
+```
+
+Open the dialog with the app command `mod.open herdr-crew`, or bind a key to it in
+`~/.config/herdr-app/keys.json`:
+
+```json
+"global": { "ctrl-shift-u": { "command": "mod.open", "args": { "name": "herdr-crew" } } }
+```
+
+The dialog shows each role's verdict for the focused terminal's folder. "Bring the crew up"
+runs `herdr-crew up` there. The mod runs the binary that installed it, so run `app-install`
+again after moving herdr-crew. `app-uninstall` removes it.
 
 `herdr-crew check` reports the host it would use. The design and the measured behaviour are
 in [docs/herdr-core.md](docs/herdr-core.md).

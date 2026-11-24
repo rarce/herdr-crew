@@ -290,8 +290,21 @@ Still to test:
      first answer. After `hc server stop` (every agent lost), one `up` resumed lead and dev,
      both with their context, and restarted the board.
    - Nothing runs `up` after a core restart yet: that is step 5.
-5. **App mod** (`herdr-crew app-install`): a palette "Crew: up" entry, and a board pane
-   that replaces the board terminal.
+5. **App mod: done**, for `up`. `herdr-crew app-install` writes
+   `$HERDR_APP_HOME/mods/herdr-crew/`, containing `src/app/main.js` (with the installing
+   binary's path) and a dialog `mod.json`.
+   - **Opening.** The dialog "Crew" opens with `mod.open herdr-crew`, or a key bound to it.
+   - **What it does.** It shows `up --dry-run`'s verdicts for the focused terminal's folder,
+     and "Bring the crew up" runs `CREW_HOST=herdr-core herdr-crew up --no-attach` there.
+     That is how to recover after a core restart without a terminal.
+   - **Checked.** `herdr-app check` passes, and in check mode the mod renders sample data.
+   - **Not done:**
+     - a board mod pane, because the terminal board works and a JS copy would duplicate
+       `board/view.rs`;
+     - running `up` automatically when the app starts, because it could surprise users;
+       the dialog keeps it explicit.
+   - **Not tried yet** against the live window: installing it into the real app and using
+     the dialog.
 6. **Retire the TUI backend** once core + app cover everything. Remove
    `herdr-plugin.toml`, `startup` and the TUI-specific code (Codex native queue, `agent
    prompt`). Update README, `design.md` and the CHANGELOG.

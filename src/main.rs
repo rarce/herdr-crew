@@ -4,6 +4,7 @@
 
 mod agent;
 mod agy;
+mod app;
 mod backend;
 mod board;
 mod codex;
@@ -65,6 +66,8 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   pi-uninstall                   remove only the crew pi extension
   agy-install                    install the crew agy SessionStart hook that delivers role prompts
   agy-uninstall                  remove only the crew agy hook
+  app-install                    install the Herdr app mod Crew (herdr-core, experimental)
+  app-uninstall                  remove only the crew's Herdr app mod
   check                          validate the configuration and the dependencies
   startup                        herdr's startup hook: bring up or repair the projects in herdr";
 
@@ -202,7 +205,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         "add" | "close" | "send" | "check" | "config" | "startup" | "codex-install"
         | "codex-uninstall" | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list"
         | "codex-peers" | "pi-install" | "pi-uninstall" | "agy-install" | "agy-uninstall"
-        | "agy-hook" => &[],
+        | "agy-hook" | "app-install" | "app-uninstall" => &[],
         "board" => &["file", "once", "interval"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
@@ -1209,6 +1212,12 @@ fn run() -> Result<(), Fail> {
                 return Err(Fail::usage("agy hook setup does not take --root"));
             }
             return agy::install(a.command == "agy-uninstall").map_err(Fail::run);
+        }
+        "app-install" | "app-uninstall" => {
+            if a.root.is_some() {
+                return Err(Fail::usage("Herdr app mod setup does not take --root"));
+            }
+            return app::install(a.command == "app-uninstall", &binary()).map_err(Fail::run);
         }
         "agy-hook" => {
             agy::hook();

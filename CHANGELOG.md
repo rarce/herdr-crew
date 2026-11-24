@@ -25,6 +25,11 @@ change between minor versions.
     in `crew.session`. When the agent is lost (a crash, or a core restart that brings kept
     terminals back as shells), `up` resumes that conversation in the same terminal
     (`claude --resume <id>`, `pi --session-id <id>`). It also restarts the board viewer.
+  - `herdr-crew app-install` / `app-uninstall` install or remove a Herdr app mod, "Crew".
+    The mod is a dialog that shows `up --dry-run`'s verdicts for the focused terminal's
+    folder and brings the crew up on herdr-core, for example after a core restart. It
+    writes only `$HERDR_APP_HOME/mods/herdr-crew/` (default `~/.config/herdr-app`) and
+    refuses a folder it did not install.
   - See `docs/herdr-core.md`.
 
 ## [0.7.1] - 2026-11-24
