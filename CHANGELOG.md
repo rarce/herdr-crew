@@ -10,6 +10,22 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-24
+
+### Added
+
+- Antigravity CLI (`agy`) support (`kind = "agy"`), with typed `[agy]` and `[roles.agy]`
+  options (`model`, `effort`, `mode`, `sandbox`, `additional_dirs`), `--prompt-interactive`
+  launch delivery, and `agy --conversation <id>` recovery guidance.
+- `herdr-crew agy-install`, `agy-uninstall`, and `agy-hook`: manages only the named
+  `"herdr-crew"` `SessionStart` hook in `~/.gemini/config/hooks.json` and injects rendered
+  role prompts via one-shot per-pane bindings (`HERDR_PANE_ID`).
+- `agy` model profiles and catalog entries (`gemini-4-argon`, `gemini-4-neon`,
+  `gemini-4-hydrogen`, `gemini-3.8-flash`) in `init`, `config`, and `docs/models.md`.
+- `experimental_agy_tree = true` single-coordinator native subagent mode (`invoke_subagent`,
+  `send_message`, `manage_subagents`), documented in `docs/agy-support.md` with fixture
+  `tests/fixtures/crew-agy-tree.toml`.
+
 ## [0.6.0] - 2026-11-20
 
 ### Added
@@ -222,7 +238,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/rarce/herdr-crew/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rarce/herdr-crew/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rarce/herdr-crew/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/rarce/herdr-crew/compare/v0.4.1...v0.4.2
