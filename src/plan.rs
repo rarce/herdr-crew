@@ -215,6 +215,9 @@ pub struct Env {
     pub worktrees: BTreeSet<String>,
     /// Foreground of the board pane, when the tab exists.
     pub board_pane: Option<Foreground>,
+    /// The host leaves a lost agent's tab as a shell (herdr-core `keep`), so `up` resumes the
+    /// recorded Claude or pi session there instead of only explaining how.
+    pub resume: bool,
     pub status_exists: bool,
     /// Current content of `.herdr/status.schema.json`, when it exists.
     pub current_schema: Option<String>,
@@ -300,6 +303,15 @@ pub enum Step {
         prompt: PathBuf,
         message: Option<String>,
     },
+    /// Resumes the role's recorded conversation in its existing tab, whose shell is in front
+    /// (only on a host that resumes agents, see `Env::resume`).
+    ResumeAgent {
+        agent: AgentOptions,
+        name: String,
+        pane: String,
+        prompt: PathBuf,
+        session: String,
+    },
     /// Types `command` in the pane; `new_tab` waits 1 s for the shell to reach its prompt.
     RunInPane {
         pane: PaneRef,
@@ -364,6 +376,12 @@ impl fmt::Display for Step {
                 )
             }
             Step::WritePrompt { path, .. } => write!(f, "write {}", path.display()),
+            Step::ResumeAgent {
+                name,
+                pane,
+                session,
+                ..
+            } => write!(f, "resume {name} in {pane} (session {session})"),
             Step::StartAgent {
                 name, pane, agent, ..
             } => match agent {
@@ -393,6 +411,8 @@ pub enum Verdict {
     Create,
     Occupied(String),
     NoAgent,
+    /// The tab's agent is gone; its recorded session is resumed.
+    Resume(String),
     Repair,
     LeaveAlone(String),
 }
@@ -403,6 +423,7 @@ impl fmt::Display for Verdict {
             Verdict::Create => write!(f, "create"),
             Verdict::Occupied(why) => write!(f, "occupied ({why})"),
             Verdict::NoAgent => write!(f, "no agent"),
+            Verdict::Resume(session) => write!(f, "resume (session {session})"),
             Verdict::Repair => write!(f, "repair"),
             Verdict::LeaveAlone(why) => write!(f, "leave alone ({why})"),
         }
@@ -557,13 +578,36 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                     .push((r.name.clone(), Verdict::Occupied(describe(a))));
                 warn_agent_mismatch(&mut p.steps, &r.name, r.kind, a);
             } else {
-                p.verdicts.push((r.name.clone(), Verdict::NoAgent));
                 let session_pane = ws.and_then(|w| {
                     w.panes
                         .iter()
                         .filter(|pane| same.iter().any(|t| t.id == pane.tab_id))
                         .find(|pane| pane.agent_session.is_some())
                 });
+                if e.resume
+                    && let Some(pane) = session_pane
+                    && let Some(session) = &pane.agent_session
+                    && matches!(r.kind, Kind::Claude | Kind::Pi)
+                    && pane.session_agent.as_deref().and_then(Kind::parse) == Some(r.kind)
+                {
+                    p.verdicts
+                        .push((r.name.clone(), Verdict::Resume(session.clone())));
+                    let path = prompt::prompt_path(c, &r.name);
+                    p.steps.push(Step::WritePrompt {
+                        name: r.name.clone(),
+                        path: path.clone(),
+                        content: prompt::render(c, &r.name, &e.binary),
+                    });
+                    p.steps.push(Step::ResumeAgent {
+                        agent: r.agent(),
+                        name: r.name.clone(),
+                        pane: pane.id.clone(),
+                        prompt: path,
+                        session: session.clone(),
+                    });
+                    continue;
+                }
+                p.verdicts.push((r.name.clone(), Verdict::NoAgent));
                 if let Some(agent) = session_pane.and_then(|pane| pane.session_agent.as_deref())
                     && Kind::parse(agent).is_none()
                 {
@@ -1139,6 +1183,7 @@ mod tests {
                 Step::CreateTab { label, .. } => format!("tab {label}"),
                 Step::WritePrompt { name, .. } => format!("prompt {name}"),
                 Step::StartAgent { name, .. } => format!("agent {name}"),
+                Step::ResumeAgent { name, session, .. } => format!("resume {name} {session}"),
                 Step::RunInPane { pane, .. } => format!("run {pane}"),
                 Step::WriteSchema { .. } => "schema".into(),
                 Step::SeedStatus { .. } => "seed".into(),
@@ -1405,6 +1450,41 @@ mod tests {
             "tab acme-lead has no agent; restart it there with `claude -r 0f3c -n acme-lead`"
         );
         assert_eq!(p.verdicts[0].1, Verdict::NoAgent);
+    }
+
+    #[test]
+    fn a_resuming_host_resumes_the_recorded_session() {
+        let mut c = basic();
+        let mut s = state(&ALL, &ALL[1..4]);
+        let pane = &mut s.workspace.as_mut().unwrap().panes[0];
+        pane.agent_session = Some("0f3c".into());
+        pane.session_agent = Some("claude".into());
+        let e = Env {
+            resume: true,
+            ..settled(&c, Foreground::Other("herdr-crew".into()))
+        };
+        let p = plan(&c, &s, &e);
+        assert_eq!(p.verdicts[0].1, Verdict::Resume("0f3c".into()));
+        assert_eq!(kinds(&p), ["prompt acme-lead", "resume acme-lead 0f3c"]);
+        let Step::ResumeAgent { pane, .. } = &p.steps[1] else {
+            panic!("{p:?}")
+        };
+        assert_eq!(pane, &s.workspace.as_ref().unwrap().panes[0].id);
+
+        // Without a recorded session, or with another agent's, only the warning remains.
+        s.workspace.as_mut().unwrap().panes[0].session_agent = Some("pi".into());
+        let p = plan(&c, &s, &e);
+        assert_eq!(p.verdicts[0].1, Verdict::NoAgent);
+        assert_eq!(kinds(&p), ["warn"]);
+        s.workspace.as_mut().unwrap().panes[0].agent_session = None;
+        assert_eq!(plan(&c, &s, &e).verdicts[0].1, Verdict::NoAgent);
+
+        // Codex sessions are not resumed this way.
+        c.roles[0].kind = Kind::Codex;
+        let pane = &mut s.workspace.as_mut().unwrap().panes[0];
+        pane.agent_session = Some("0f3c".into());
+        pane.session_agent = Some("codex".into());
+        assert_eq!(plan(&c, &s, &e).verdicts[0].1, Verdict::NoAgent);
     }
 
     #[test]

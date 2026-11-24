@@ -4,12 +4,15 @@
 
 mod agent;
 mod agy;
+mod app;
+mod backend;
 mod board;
 mod codex;
 mod config;
 mod config_edit;
 mod files;
 mod git;
+mod hc;
 mod herdr;
 mod init;
 mod lock;
@@ -31,6 +34,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde_json::Value;
 
+use backend::{Backend, Load, LoadError};
 use config::Config;
 use herdr::{Herdr, Output};
 use lock::{Busy, ProjectLock};
@@ -62,6 +66,8 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   pi-uninstall                   remove only the crew pi extension
   agy-install                    install the crew agy SessionStart hook that delivers role prompts
   agy-uninstall                  remove only the crew agy hook
+  app-install                    install the Herdr app mod Crew (herdr-core, experimental)
+  app-uninstall                  remove only the crew's Herdr app mod
   check                          validate the configuration and the dependencies
   startup                        herdr's startup hook: bring up or repair the projects in herdr";
 
@@ -199,7 +205,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         "add" | "close" | "send" | "check" | "config" | "startup" | "codex-install"
         | "codex-uninstall" | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list"
         | "codex-peers" | "pi-install" | "pi-uninstall" | "agy-install" | "agy-uninstall"
-        | "agy-hook" => &[],
+        | "agy-hook" | "app-install" | "app-uninstall" => &[],
         "board" => &["file", "once", "interval"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
@@ -295,7 +301,12 @@ fn binary() -> PathBuf {
         .unwrap_or_else(|_| "herdr-crew".into())
 }
 
-fn env(c: &Config, state: &HerdrState, herdr: Option<&Herdr>, worktrees: BTreeSet<String>) -> Env {
+fn env(
+    c: &Config,
+    state: &HerdrState,
+    herdr: Option<&dyn Backend>,
+    worktrees: BTreeSet<String>,
+) -> Env {
     let board_pane = state.workspace.as_ref().and_then(|w| {
         let tab = w.tabs.iter().find(|t| t.label == c.board.tab)?;
         let pane = w.panes.iter().find(|p| p.tab_id == tab.id)?;
@@ -312,6 +323,7 @@ fn env(c: &Config, state: &HerdrState, herdr: Option<&Herdr>, worktrees: BTreeSe
         binary: binary(),
         worktrees,
         board_pane,
+        resume: herdr.is_some_and(|h| h.resumes_agents()),
         status_exists: c.board_path().exists(),
         current_schema: std::fs::read_to_string(c.root.join(prompt::SCHEMA_FILE)).ok(),
         now,
@@ -319,7 +331,15 @@ fn env(c: &Config, state: &HerdrState, herdr: Option<&Herdr>, worktrees: BTreeSe
     }
 }
 
-fn fail_notify(herdr: &Herdr, msg: String) -> Fail {
+/// The backend of the host this command drives (see `backend::Host::detect`).
+fn host() -> Result<Box<dyn Backend>, Fail> {
+    backend::from_env().map_err(|e| Fail {
+        code: 2,
+        lines: vec![format!("herdr-crew: {e}")],
+    })
+}
+
+fn fail_notify(herdr: &dyn Backend, msg: String) -> Fail {
     herdr.notify(&msg);
     Fail::run(msg)
 }
@@ -329,7 +349,7 @@ const LOCK_WAIT: Duration = Duration::from_secs(120);
 
 /// The project's lock for a command that changes it. Taken before reading any state, so the
 /// plan always starts from what the previous command left.
-fn lock_project(c: &Config, herdr: &Herdr) -> Result<ProjectLock, Fail> {
+fn lock_project(c: &Config, herdr: &dyn Backend) -> Result<ProjectLock, Fail> {
     ProjectLock::acquire(&c.root, LOCK_WAIT, || {
         eprintln!(
             "herdr-crew: another herdr-crew command is changing {}; waiting up to {} s",
@@ -374,12 +394,12 @@ fn setup_mode(action: bool, yes: bool, terminal: bool) -> Setup {
 
 /// `up` in a project without a configuration: run the setup wizard, then bring the new crew up.
 fn up_new(root: &Path, a: &Args) -> Result<(), Fail> {
-    let herdr = Herdr::from_env();
+    let herdr = host()?;
     let terminal = std::io::IsTerminal::is_terminal(&std::io::stdin());
-    match setup_mode(herdr.action, a.init.yes, terminal) {
-        Setup::Refuse if herdr.action => {
+    match setup_mode(herdr.action(), a.init.yes, terminal) {
+        Setup::Refuse if herdr.action() => {
             return Err(fail_notify(
-                &herdr,
+                herdr.as_ref(),
                 format!(
                     "no crew is configured in {} ({} is missing). Set one up from a terminal in \
                      the project with `herdr-crew up`, which asks for a workflow and an agent and \
@@ -431,12 +451,14 @@ fn outcome(verdict: &plan::Verdict, board: bool) -> String {
         }
         (plan::Verdict::Occupied(why), _) => format!("already running ({why})"),
         (plan::Verdict::NoAgent, _) => "tab without an agent: see the warning above".into(),
+        (plan::Verdict::Resume(_), _) => "resumed its conversation".into(),
         (plan::Verdict::LeaveAlone(why), _) => format!("left alone ({why})"),
     }
 }
 
 /// The closing summary of `up`: one line per session and the board, then what to do next.
-fn summary(c: &Config, p: &plan::Plan, attaching: bool) -> String {
+/// `open` says how to see the crew, when `up` does not attach to it.
+fn summary(c: &Config, p: &plan::Plan, open: Option<&str>) -> String {
     let width = p.verdicts.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     let mut out = format!("herdr-crew: crew \"{}\":\n", c.label);
     for (name, verdict) in &p.verdicts {
@@ -455,16 +477,7 @@ fn summary(c: &Config, p: &plan::Plan, attaching: bool) -> String {
              time an agent runs in a folder it may ask whether you trust it; answer in its tab.\n",
         );
     }
-    if !attaching {
-        let open = if herdr::inside_herdr() {
-            format!("switch to the workspace \"{}\"", c.label)
-        } else {
-            format!(
-                "run `herdr` from {} to open the workspace \"{}\"",
-                c.root.display(),
-                c.label
-            )
-        };
+    if let Some(open) = open {
         out.push_str(&format!("herdr-crew: to see them, {open}.\n"));
     }
     out
@@ -515,17 +528,22 @@ fn up_hints(c: &Config, action: bool) -> Vec<String> {
 }
 
 fn up(c: &Config, a: &Args, select: Option<agent::Kind>) -> Result<(), Fail> {
-    let herdr = Herdr::from_env();
-    up_inner(c, a, select, &herdr).map_err(|mut f| {
+    let herdr = host()?;
+    up_inner(c, a, select, herdr.as_ref()).map_err(|mut f| {
         // A usage or configuration error already says what to change.
         if f.code == 1 {
-            f.lines.extend(up_hints(c, herdr.action));
+            f.lines.extend(up_hints(c, herdr.action()));
         }
         f
     })
 }
 
-fn up_inner(c: &Config, a: &Args, select: Option<agent::Kind>, herdr: &Herdr) -> Result<(), Fail> {
+fn up_inner(
+    c: &Config,
+    a: &Args,
+    select: Option<agent::Kind>,
+    herdr: &dyn Backend,
+) -> Result<(), Fail> {
     let lock = if a.dry_run {
         None
     } else {
@@ -558,21 +576,18 @@ fn up_inner(c: &Config, a: &Args, select: Option<agent::Kind>, herdr: &Herdr) ->
             c.board.tab
         ));
     }
-    let workspaces = if a.dry_run {
-        herdr.call(&["workspace", "list"]).ok()
+    let mode = if a.dry_run {
+        Load::Read
     } else {
-        Some(
-            herdr
-                .ensure_server(&c.root, &mut out)
-                .map_err(|e| fail_notify(herdr, e))?,
-        )
+        Load::Start(&c.root, &mut out)
     };
-    let state = match &workspaces {
-        Some(w) => herdr.state(w, c).map_err(|e| fail_notify(herdr, e))?,
-        None => {
+    let state = match herdr.load(c, mode) {
+        Ok(state) => state,
+        Err(LoadError::Unreachable { .. }) if a.dry_run => {
             println!("(no herdr server: the plan assumes an empty one)");
             HerdrState::default()
         }
+        Err(e) => return Err(fail_notify(herdr, e.to_string())),
     };
     let e = env(c, &state, Some(herdr), worktrees);
     let mut p = plan::plan(c, &state, &e);
@@ -595,7 +610,8 @@ fn up_inner(c: &Config, a: &Args, select: Option<agent::Kind>, herdr: &Herdr) ->
         out.step("everything is already up; nothing to do");
     }
     let attaching = ws.is_some() && herdr.will_attach(!a.no_attach);
-    print!("{}", summary(c, &p, attaching));
+    let open = (!attaching).then(|| herdr.open_hint(&c.label, &c.root));
+    print!("{}", summary(c, &p, open.as_deref()));
     let started = p
         .verdicts
         .iter()
@@ -795,33 +811,34 @@ fn panes_of(herdr: &Herdr, workspace: &str) -> Result<Vec<plan::Pane>, Fail> {
         .and_then(|v| plan::pane_items(&v).map_err(Fail::run))
 }
 
-fn current_state(c: &Config, herdr: &Herdr) -> Result<HerdrState, Fail> {
-    let workspaces = herdr
-        .call(&["workspace", "list"])
-        .map_err(|e| Fail::run(format!("the herdr server does not answer: {e}")))?;
-    herdr.state(&workspaces, c).map_err(Fail::run)
+fn current_state(c: &Config, herdr: &dyn Backend) -> Result<HerdrState, Fail> {
+    herdr
+        .load(c, Load::Read)
+        .map_err(|e| Fail::run(e.to_string()))
 }
 
 fn add(c: &Config, role: &str) -> Result<(), Fail> {
-    let herdr = Herdr::from_env();
-    let _lock = lock_project(c, &herdr)?;
+    let herdr = host()?;
+    let herdr = herdr.as_ref();
+    let _lock = lock_project(c, herdr)?;
     let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
-    let state = current_state(c, &herdr)?;
+    let state = current_state(c, herdr)?;
     let (name, p) =
         plan::plan_add(c, &state, &env(c, &state, None, worktrees), role).map_err(Fail::run)?;
     let mut out = Output;
-    herdr::execute(&herdr, c, &state, &p, &mut out).map_err(|e| fail_notify(&herdr, e))?;
+    herdr::execute(herdr, c, &state, &p, &mut out).map_err(|e| fail_notify(herdr, e))?;
     out.step(&format!("new instance {name}"));
     Ok(())
 }
 
 fn close(c: &Config, name: &str) -> Result<(), Fail> {
-    let herdr = Herdr::from_env();
-    let _lock = lock_project(c, &herdr)?;
-    let state = current_state(c, &herdr)?;
+    let herdr = host()?;
+    let herdr = herdr.as_ref();
+    let _lock = lock_project(c, herdr)?;
+    let state = current_state(c, herdr)?;
     let close = plan::plan_close(c, &state, name).map_err(Fail::run)?;
     herdr
-        .call(&["tab", "close", &close.tab_id])
+        .close_tab(&close.tab_id)
         .map_err(|e| Fail::run(format!("could not close {name}: {e}")))?;
     let mut out = Output;
     match close.worktree.filter(|p| p.exists()) {
@@ -935,8 +952,18 @@ fn check(c: &Config) -> Result<(), Fail> {
         ]
     };
     let mut missing = Vec::new();
+    let host = backend::Host::from_env().map_err(|e| Fail {
+        code: 2,
+        lines: vec![format!("herdr-crew: {e}")],
+    })?;
+    if host == backend::Host::Core {
+        check_core(c, &mut missing);
+    }
     let herdr_bin = std::env::var_os("HERDR_BIN_PATH");
     for (program, install) in installers {
+        if program == "herdr" && host == backend::Host::Core {
+            continue;
+        }
         if program == "claude" && !c.roles.iter().any(|r| r.kind == agent::Kind::Claude) {
             continue;
         }
@@ -998,6 +1025,7 @@ fn check(c: &Config) -> Result<(), Fail> {
         agent::Kind::Claude => None,
     });
     if native.is_some()
+        && host == backend::Host::Herdr
         && let Err(error) = Herdr::from_env().require_native_version()
     {
         missing.push(format!("herdr-crew: {error}"));
@@ -1078,7 +1106,7 @@ fn check(c: &Config) -> Result<(), Fail> {
             }
         }
     }
-    if Herdr::from_env().call(&["workspace", "list"]).is_ok() {
+    if host == backend::Host::Herdr && Herdr::from_env().call(&["workspace", "list"]).is_ok() {
         if let Some(kind) = native
             && let Err(error) = Herdr::from_env().require_server_version(kind)
         {
@@ -1106,6 +1134,30 @@ fn check(c: &Config) -> Result<(), Fail> {
     }
 }
 
+/// `check`'s herdr-core half: `hc` runs, and every role's agent works without the TUI.
+fn check_core(c: &Config, missing: &mut Vec<String>) {
+    let hc = std::env::var_os("CREW_HC_BIN").unwrap_or_else(|| "hc".into());
+    match executable(&hc.to_string_lossy(), None) {
+        Ok(path) => println!(
+            "herdr-crew: host herdr-core ({}): crews show in the Herdr app",
+            path.display()
+        ),
+        Err(why) => missing.push(format!(
+            "herdr-crew: herdr-core is missing: {why} (install it with: curl -fsSL \
+             https://releases.herdr.dev/core/install.sh | sh)"
+        )),
+    }
+    for role in &c.roles {
+        if matches!(role.kind, agent::Kind::Codex | agent::Kind::Agy) {
+            missing.push(format!(
+                "herdr-crew: role {} uses {}, which needs the Herdr TUI for now (set CREW_HOST=herdr)",
+                role.name,
+                role.kind.as_str()
+            ));
+        }
+    }
+}
+
 /// `send`: the message from stdin into another session (docs/messaging.md §4). Its refusals use
 /// their own exit codes and no usage text, because the caller is usually a model.
 fn send(c: &Config, target: &str) -> Result<(), Fail> {
@@ -1113,8 +1165,13 @@ fn send(c: &Config, target: &str) -> Result<(), Fail> {
         code: 2,
         lines: vec![format!("herdr-crew: {e}")],
     })?;
-    let pane = std::env::var("HERDR_PANE_ID").ok();
-    match send::run(c, &Herdr::from_env(), target, &raw, pane.as_deref()) {
+    let herdr = host()?;
+    // The sender's own pane: a herdr pane, or a herdr-core terminal address.
+    let pane = match backend::Host::from_env() {
+        Ok(backend::Host::Core) => std::env::var("HC_TERMINAL_ID").ok(),
+        _ => std::env::var("HERDR_PANE_ID").ok(),
+    };
+    match send::run(c, herdr.as_ref(), target, &raw, pane.as_deref()) {
         Ok(line) => {
             println!("{line}");
             Ok(())
@@ -1155,6 +1212,12 @@ fn run() -> Result<(), Fail> {
                 return Err(Fail::usage("agy hook setup does not take --root"));
             }
             return agy::install(a.command == "agy-uninstall").map_err(Fail::run);
+        }
+        "app-install" | "app-uninstall" => {
+            if a.root.is_some() {
+                return Err(Fail::usage("Herdr app mod setup does not take --root"));
+            }
+            return app::install(a.command == "app-uninstall", &binary()).map_err(Fail::run);
         }
         "agy-hook" => {
             agy::hook();
@@ -1318,7 +1381,7 @@ mod tests {
             ],
             steps: Vec::new(),
         };
-        let text = summary(&c, &p, false);
+        let text = summary(&c, &p, Some("run `herdr`"));
         assert!(
             text.starts_with("herdr-crew: crew \"acme\":\n  acme-lead    started\n"),
             "{text}"
@@ -1330,7 +1393,7 @@ mod tests {
         assert!(text.contains("acme-status  board tab created"), "{text}");
         assert!(text.contains("wait for a task"), "{text}");
         assert!(text.contains("to see them"), "{text}");
-        let attached = summary(&c, &p, true);
+        let attached = summary(&c, &p, None);
         assert!(!attached.contains("to see them"), "{attached}");
         let hints = up_hints(&c, true).join("\n");
         for hint in [

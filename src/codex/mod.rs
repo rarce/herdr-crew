@@ -36,14 +36,14 @@ pub fn validate_runtime(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn pane_environment() -> Result<Vec<String>, String> {
+pub fn pane_environment() -> Result<Vec<(String, String)>, String> {
     Ok(vec![
-        "--env".into(),
-        format!("CODEX_HOME={}", integration::home()?.display()),
-        "--env".into(),
-        "CODEX_THREAD_ID=".into(),
-        "--env".into(),
-        "CREW_CODEX_BINDING=".into(),
+        (
+            "CODEX_HOME".into(),
+            integration::home()?.display().to_string(),
+        ),
+        ("CODEX_THREAD_ID".into(), String::new()),
+        ("CREW_CODEX_BINDING".into(), String::new()),
     ])
 }
 

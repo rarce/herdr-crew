@@ -255,6 +255,50 @@ Crew validates the effective provider/model combination after applying defaults 
 
 `[pi]` sets defaults and `[roles.pi]` overrides individual options; extras inherit their base role's. Options for an inactive agent remain saved for a later switch and are not passed to the selected agent. If a pi tab loses its agent, `up` suggests `pi --session <file>` with the session herdr recorded; the extension restores the role from it. A role whose conversation never sent a request has no session file to resume: close its tab and run `herdr-crew up`. Pi's project trust controls resource loading, rather than approving each tool call; a pi role can run commands with the permissions of its process. See [pi's trust and isolation model](https://pi.dev/docs/latest/security).
 
+## Herdr app (herdr-core), experimental
+
+Herdr TUI is being replaced by [herdr-core](https://herdr.dev/core/) (`hc`) and the Herdr app.
+herdr-crew can bring a crew up on herdr-core:
+
+```sh
+# from a terminal of the Herdr app (it sets HC_TERMINAL_ID), or anywhere with:
+CREW_HOST=herdr-core herdr-crew up
+```
+
+- **What you get.** Each role and the board run in a kept herdr-core terminal. Their labels
+  (`herdr.space`, `herdr.tab`) make the app show them as tabs of one space for the project.
+  `up` is idempotent, `add`/`close` manage extra instances, and `send` types the framed
+  message into the receiver's terminal.
+- **Detection.** Crew uses herdr-core when it runs inside a herdr-core terminal, unless
+  `CREW_HOST=herdr` is set. Herdr TUI plugin actions always use the TUI, and so does a
+  Herdr TUI pane opened inside an app terminal.
+- **Limits for now:**
+  - Codex and agy roles need the Herdr TUI.
+  - Tab names are set only while the app window is open; otherwise the app numbers them.
+  - After a core restart, the roles come back as shells until you run `herdr-crew up`. It
+    resumes each Claude or pi conversation in its terminal and restarts the board. A role
+    that died before saving its first message starts a new conversation instead.
+
+The "Crew" dialog in the app does the same without a terminal:
+
+```sh
+herdr-crew app-install     # writes ~/.config/herdr-app/mods/herdr-crew/ ($HERDR_APP_HOME)
+```
+
+Open the dialog with the app command `mod.open herdr-crew`, or bind a key to it in
+`~/.config/herdr-app/keys.json`:
+
+```json
+"global": { "ctrl-shift-u": { "command": "mod.open", "args": { "name": "herdr-crew" } } }
+```
+
+The dialog shows each role's verdict for the focused terminal's folder. "Bring the crew up"
+runs `herdr-crew up` there. The mod runs the binary that installed it, so run `app-install`
+again after moving herdr-crew. `app-uninstall` removes it.
+
+`herdr-crew check` reports the host it would use. The design and the measured behaviour are
+in [docs/herdr-core.md](docs/herdr-core.md).
+
 ## Configure a crew
 
 ```sh

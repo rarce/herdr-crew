@@ -1,3 +1,7 @@
 /target/
 /bin/
 /papers/
+
+# Written by `herdr-app check src/app`
+/src/app/gpui-kit.d.ts
+/src/app/jsconfig.json
