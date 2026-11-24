@@ -276,7 +276,20 @@ Still to test:
      7 s; no `HERDR_*` or `CLAUDE_CODE_*` variables in the terminals, although crew started
      the core from inside a TUI pane and a Claude session. A second `up` changed nothing.
      `send` from lead was delivered framed, and dev answered with its role name.
-4. **Restore**: `up` repairs roles that came back as shells, using stored session ids.
+4. **Restore: done.**
+   - **Session ids.** Under core, Claude and pi roles start with `--session-id <uuid v4>`,
+     recorded in the terminal label `crew.session`.
+   - **Plan.** With `Env::resume`, a role tab with no agent and a recorded session of the
+     same kind gets `Verdict::Resume` and `Step::ResumeAgent`. Claude resumes with
+     `claude --resume <id> -n <role> --append-system-prompt-file …`, and pi with
+     `pi --session-id <id>` and its model options; the extension restores the prompt.
+   - **Recovering terminals.** A terminal still recovering right after a core restart has
+     no foreground. It counts as no agent, and `foreground` waits up to 10 s for it, so the
+     board is repaired too.
+   - **Real test.** After a SIGKILL of the lead's Claude, `up` resumed it and it recalled its
+     first answer. After `hc server stop` (every agent lost), one `up` resumed lead and dev,
+     both with their context, and restarted the board.
+   - Nothing runs `up` after a core restart yet: that is step 5.
 5. **App mod** (`herdr-crew app-install`): a palette "Crew: up" entry, and a board pane
    that replaces the board terminal.
 6. **Retire the TUI backend** once core + app cover everything. Remove

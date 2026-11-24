@@ -43,6 +43,9 @@ fn host_variable(name: &str) -> bool {
 /// How long `start_agent` waits for a new shell to reach its prompt.
 const SHELL_WAIT: Duration = Duration::from_secs(30);
 
+/// How long `foreground` waits for a recovering terminal to report its foreground.
+const RECOVERY_WAIT: Duration = Duration::from_secs(10);
+
 /// How long `start_agent` waits for the agent's first status report.
 const READY_WAIT: Duration = Duration::from_secs(60);
 
@@ -220,6 +223,25 @@ fn kind_of_app(app: &str) -> String {
     }
 }
 
+/// A random version 4 UUID, as Claude's and pi's `--session-id` take.
+fn new_uuid() -> std::io::Result<String> {
+    let hex = files::random_hex(16)?;
+    let mut b: Vec<char> = hex.chars().collect();
+    b[12] = '4';
+    // The variant: the two high bits of the 17th digit are 10.
+    let low = b[16].to_digit(16).unwrap_or(0) & 3;
+    b[16] = ['8', '9', 'a', 'b'][low as usize];
+    let s: String = b.into_iter().collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &s[0..8],
+        &s[8..12],
+        &s[12..16],
+        &s[16..20],
+        &s[20..32]
+    ))
+}
+
 /// The project's space id: stable for its main checkout, readable in labels.
 pub fn space_id(root: &Path) -> String {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -247,17 +269,19 @@ fn state_of(space: &str, terminals: &[Value]) -> HerdrState {
         panes.push(Pane {
             id: address.into(),
             tab_id: tab.into(),
-            agent_session: None,
-            session_agent: None,
+            agent_session: label(t, "crew.session").map(str::to_string),
+            session_agent: label(t, "crew.kind").map(str::to_string),
             session_kind: None,
             session_source: None,
             cwd: t["cwd"].as_str().map(Into::into),
         });
         // An agent runs while something other than the shell is in front and either the crew
-        // started it or it reports a status.
+        // started it or it reports a status. Right after a core restart a kept terminal has no
+        // foreground yet: it is coming back as a shell, so it has no agent.
         let app = t["status"]["app"].as_str();
         let crew_agent = label(t, "crew.agent");
-        if !shell_in_front(t) && (crew_agent.is_some() || app.is_some()) {
+        let in_front = t["foreground"]["pid"].is_u64() && !shell_in_front(t);
+        if in_front && (crew_agent.is_some() || app.is_some()) {
             agents.push(Agent {
                 kind: app
                     .map(kind_of_app)
@@ -303,7 +327,19 @@ impl Backend for Hc {
     }
 
     fn foreground(&self, pane: &str) -> Foreground {
-        match self.terminal(pane) {
+        // A kept terminal that is still recovering (just after a core restart) has no
+        // foreground yet; give it a moment to come back as a shell.
+        let since = Instant::now();
+        let mut answer = self.terminal(pane);
+        while answer
+            .as_ref()
+            .is_ok_and(|t| !t["foreground"]["pid"].is_u64())
+            && since.elapsed() < RECOVERY_WAIT
+        {
+            sleep(Duration::from_millis(250));
+            answer = self.terminal(pane);
+        }
+        match answer {
             Ok(t) if shell_in_front(&t) => Foreground::Shell,
             Ok(t) if t["foreground"].is_object() => Foreground::Other(
                 t["foreground"]["name"]
@@ -380,7 +416,32 @@ impl Backend for Hc {
             }
             sleep(Duration::from_millis(250));
         }
+        // Claude and pi take a session id chosen up front, which `crew.session` records so a
+        // later `up` can resume the conversation in the kept shell.
         let mut words = vec![s.kind.as_str().to_string()];
+        let session = match (s.kind, s.resume) {
+            (Kind::Claude, Some(id)) => {
+                words.extend(["--resume".into(), id.to_string()]);
+                Some(id.to_string())
+            }
+            (Kind::Pi, Some(id)) => {
+                words.extend(["--session-id".into(), id.to_string()]);
+                Some(id.to_string())
+            }
+            (_, Some(_)) => {
+                return Err(format!(
+                    "{}: herdr-crew cannot resume {} sessions",
+                    s.name,
+                    s.kind.as_str()
+                ));
+            }
+            (Kind::Claude | Kind::Pi, None) => {
+                let id = new_uuid().map_err(|e| format!("could not start {}: {e}", s.name))?;
+                words.extend(["--session-id".into(), id.clone()]);
+                Some(id)
+            }
+            (_, None) => None,
+        };
         words.extend(s.args.iter().cloned());
         if let Some(msg) = s.message {
             if s.kind == Kind::Agy {
@@ -396,7 +457,9 @@ impl Backend for Hc {
             .join(" ");
         let agent = format!("crew.agent={}", s.name);
         let kind = format!("crew.kind={}", s.kind.as_str());
-        self.call(&["label", s.pane, &agent, &kind]).map_err(fail)?;
+        let session = format!("crew.session={}", session.unwrap_or_default());
+        self.call(&["label", s.pane, &agent, &kind, &session])
+            .map_err(fail)?;
         self.call(&["send", s.pane, &line]).map_err(fail)?;
         let timeout = READY_WAIT.as_secs().to_string();
         let waited = self
@@ -444,6 +507,10 @@ impl Backend for Hc {
                 PromptError::Failed(e.to_string())
             }
         })
+    }
+
+    fn resumes_agents(&self) -> bool {
+        true
     }
 
     fn will_attach(&self, _attach: bool) -> bool {
@@ -510,6 +577,24 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_still_recovering_has_no_agent() {
+        let mut t = terminal(
+            "t1",
+            "s-a",
+            json!({"crew.tab": "lead", "crew.agent": "lead", "crew.session": "u"}),
+            11,
+            Value::Null,
+        );
+        t.as_object_mut().unwrap().remove("foreground");
+        let s = state_of("s", &[t]);
+        assert!(s.agents.is_empty(), "{:?}", s.agents);
+        assert_eq!(
+            s.workspace.unwrap().panes[0].agent_session.as_deref(),
+            Some("u")
+        );
+    }
+
+    #[test]
     fn no_terminals_means_no_workspace() {
         assert_eq!(state_of("s", &[]), HerdrState::default());
     }
@@ -545,6 +630,20 @@ mod tests {
         for name in ["HC_SESSION", "HC_SOCKET", "HOME", "PATH", "CODEX_HOME"] {
             assert!(!host_variable(name), "{name}");
         }
+    }
+
+    #[test]
+    fn session_ids_are_version_4_uuids() {
+        let id = new_uuid().unwrap();
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12],
+            "{id}"
+        );
+        assert!(parts[2].starts_with('4'), "{id}");
+        assert!("89ab".contains(&parts[3][..1]), "{id}");
+        assert_ne!(id, new_uuid().unwrap());
     }
 
     #[test]

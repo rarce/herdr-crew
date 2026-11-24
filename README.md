@@ -274,8 +274,9 @@ CREW_HOST=herdr-core herdr-crew up
 - **Limits for now:**
   - Codex and agy roles need the Herdr TUI.
   - Tab names are set only while the app window is open; otherwise the app numbers them.
-  - After a core restart, the roles come back as shells. `up` reports them without
-    restarting the agents.
+  - After a core restart, the roles come back as shells until you run `herdr-crew up`. It
+    resumes each Claude or pi conversation in its terminal and restarts the board. Nothing
+    runs `up` for you yet.
 
 `herdr-crew check` reports the host it would use. The design and the measured behaviour are
 in [docs/herdr-core.md](docs/herdr-core.md).

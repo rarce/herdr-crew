@@ -85,7 +85,14 @@ impl Fixture {
         let mut c = Command::new(CREW);
         c.env_clear()
             .env("HOME", &self.root)
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.root.join("tools").display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
             .env("SHELL", "/bin/sh")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("CREW_HOST", "herdr-core")
@@ -158,9 +165,12 @@ fn up_creates_one_labeled_terminal_per_tab_in_the_project_space() {
     assert_eq!(lead["labels"]["crew.agent"], "lead");
     assert_eq!(lead["labels"]["crew.kind"], "claude");
     let typed = lead["typed"][0].as_str().unwrap();
+    let session = lead["labels"]["crew.session"].as_str().unwrap();
+    assert_eq!(session.len(), 36, "{session}");
     assert!(
-        typed.starts_with("claude -n lead --append-system-prompt-file ")
-            && typed.ends_with("'Confirm your role'"),
+        typed.starts_with(&format!(
+            "claude --session-id {session} -n lead --append-system-prompt-file "
+        )) && typed.ends_with("'Confirm your role'"),
         "{typed}"
     );
     assert_eq!(lead["status"]["app"], "claude-code");
@@ -309,4 +319,82 @@ fn add_and_close_an_extra_instance() {
         "a base role is never closed: {base:?}"
     );
     assert_eq!(f.tab("dev")["state"], "live");
+}
+
+/// What a core restart or a crash leaves: the kept shell back in front, no status.
+fn lose_agent(f: &Fixture, tab: &str) {
+    let mut state: Value =
+        serde_json::from_slice(&fs::read(f.state.join("hc.json")).unwrap()).unwrap();
+    for t in state["terminals"].as_array_mut().unwrap() {
+        if t["labels"]["crew.tab"] == tab {
+            t["foreground"]["pid"] = t["pid"].clone();
+            t["status"] = Value::Null;
+        }
+    }
+    fs::write(f.state.join("hc.json"), state.to_string()).unwrap();
+}
+
+#[test]
+fn up_resumes_a_lost_agent_in_its_kept_shell() {
+    let f = Fixture::new(CONFIG);
+    ok(&f.run(&["up"]));
+    let before = f.tab("lead");
+    let session = before["labels"]["crew.session"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    lose_agent(&f, "lead");
+    let dry = ok(&f.run(&["up", "--dry-run"]));
+    assert!(
+        dry.contains(&format!("resume (session {session})")),
+        "{dry}"
+    );
+    let text = ok(&f.run(&["up"]));
+    assert!(text.contains("lead resumed in"), "{text}");
+    assert!(text.contains("resumed its conversation"), "{text}");
+    let lead = f.tab("lead");
+    assert_eq!(lead["address"], before["address"], "same terminal");
+    let typed = lead["typed"].as_array().unwrap();
+    assert_eq!(typed.len(), 2, "{typed:?}");
+    let resume = typed[1].as_str().unwrap();
+    assert!(
+        resume.starts_with(&format!(
+            "claude --resume {session} -n lead --append-system-prompt-file "
+        )),
+        "{resume}"
+    );
+    assert!(
+        !resume.contains("Confirm your role"),
+        "no new first message: {resume}"
+    );
+    assert_eq!(lead["labels"]["crew.session"], session.as_str());
+    // Resumed and running again: nothing more to do.
+    assert!(ok(&f.run(&["up"])).contains("nothing to do"));
+}
+
+#[test]
+fn pi_roles_resume_with_their_session_id_only() {
+    let f = Fixture::new(&CONFIG.replace("version = 1", "version = 1\nkind = \"pi\""));
+    // pi's preflight needs a recent pi and the crew's extension.
+    let tools = f.root.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    fs::write(tools.join("pi"), "#!/bin/sh\necho 99.0.0\n").unwrap();
+    fs::set_permissions(tools.join("pi"), fs::Permissions::from_mode(0o755)).unwrap();
+    ok(&f.run(&["pi-install"]));
+    ok(&f.run(&["up"]));
+    let start = f.tab("lead")["typed"][0].as_str().unwrap().to_string();
+    assert!(start.contains("--herdr-crew-prompt"), "{start}");
+    let session = f.tab("lead")["labels"]["crew.session"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    lose_agent(&f, "lead");
+    ok(&f.run(&["up"]));
+    let typed = f.tab("lead")["typed"].as_array().unwrap().clone();
+    let resume = typed[1].as_str().unwrap();
+    assert!(
+        resume.starts_with(&format!("pi --session-id {session}")),
+        "{resume}"
+    );
+    assert!(!resume.contains("--herdr-crew-prompt"), "{resume}");
 }

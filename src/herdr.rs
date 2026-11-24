@@ -347,6 +347,12 @@ impl Backend for Herdr {
     }
 
     fn start_agent(&self, s: &AgentStart) -> Result<Started, String> {
+        if s.resume.is_some() {
+            return Err(format!(
+                "{}: the Herdr TUI resumes its agents itself",
+                s.name
+            ));
+        }
         let mut args: Vec<String> = [
             "agent",
             "start",
@@ -773,48 +779,14 @@ pub fn execute(
                 if let AgentOptions::Codex(options) = agent {
                     codex::prepare(tui()?, c, name, &pane, prompt_of(name)?, options)?;
                 }
-                let native = match agent {
-                    AgentOptions::Claude(options) => {
-                        let mut args = vec![
-                            "-n".into(),
-                            name.clone(),
-                            "--append-system-prompt-file".into(),
-                            prompt.display().to_string(),
-                        ];
-                        args.extend(options.args());
-                        args
-                    }
-                    AgentOptions::Codex(options) => {
-                        let mut effective = options.clone();
-                        effective.resolve_dirs(&c.root)?;
-                        let mut args = effective.args();
-                        args.extend(["-c".into(), "features.hooks=true".into()]);
-                        args
-                    }
-                    // The crew's pi extension reads these flags and keeps the prompt in the session.
-                    AgentOptions::Pi(pi) => {
-                        let mut args = vec![
-                            "--herdr-crew-role".into(),
-                            name.clone(),
-                            "--herdr-crew-prompt".into(),
-                            prompt.display().to_string(),
-                        ];
-                        args.extend(pi.args());
-                        args
-                    }
-                    // The crew's agy SessionStart hook consumes this one-shot pane binding.
-                    AgentOptions::Agy(options) => {
-                        let mut effective = options.clone();
-                        effective.resolve_dirs(&c.root)?;
-                        effective.args()
-                    }
-                };
+                let native = agent_args(c, name, prompt, agent, false)?;
                 let request = AgentStart {
                     name,
                     pane: &pane,
                     kind: agent.kind(),
                     args: &native,
                     message: message.as_deref(),
+                    resume: None,
                 };
                 let mut start = || {
                     match herdr.start_agent(&request)? {
@@ -833,6 +805,32 @@ pub fn execute(
                     crate::agy::launch(&c.root, &pane, prompt_of(name)?, start)?;
                 } else {
                     start()?;
+                }
+            }
+            Step::ResumeAgent {
+                agent,
+                name,
+                pane,
+                prompt,
+                session,
+            } => {
+                let native = agent_args(c, name, prompt, agent, true)?;
+                let request = AgentStart {
+                    name,
+                    pane,
+                    kind: agent.kind(),
+                    args: &native,
+                    message: None,
+                    resume: Some(session),
+                };
+                match herdr.start_agent(&request)? {
+                    Started::Ready => out.step(&format!("{name} resumed in {pane}")),
+                    Started::Waiting => out.warn(
+                        herdr,
+                        &format!(
+                            "{name} resumed in {pane} but waits for an answer; check that tab"
+                        ),
+                    ),
                 }
             }
             Step::RunInPane {
@@ -856,6 +854,54 @@ pub fn execute(
         }
     }
     Ok(workspace)
+}
+
+/// The agent's own arguments for a role. A resumed pi session already holds its role prompt
+/// (the crew's extension restores it), so it gets only its model options.
+fn agent_args(
+    c: &Config,
+    name: &str,
+    prompt: &Path,
+    agent: &AgentOptions,
+    resume: bool,
+) -> Result<Vec<String>, String> {
+    Ok(match agent {
+        AgentOptions::Claude(options) => {
+            let mut args = vec![
+                "-n".into(),
+                name.to_string(),
+                "--append-system-prompt-file".into(),
+                prompt.display().to_string(),
+            ];
+            args.extend(options.args());
+            args
+        }
+        AgentOptions::Codex(options) => {
+            let mut effective = options.clone();
+            effective.resolve_dirs(&c.root)?;
+            let mut args = effective.args();
+            args.extend(["-c".into(), "features.hooks=true".into()]);
+            args
+        }
+        AgentOptions::Pi(pi) if resume => pi.args(),
+        // The crew's pi extension reads these flags and keeps the prompt in the session.
+        AgentOptions::Pi(pi) => {
+            let mut args = vec![
+                "--herdr-crew-role".into(),
+                name.to_string(),
+                "--herdr-crew-prompt".into(),
+                prompt.display().to_string(),
+            ];
+            args.extend(pi.args());
+            args
+        }
+        // The crew's agy SessionStart hook consumes this one-shot pane binding.
+        AgentOptions::Agy(options) => {
+            let mut effective = options.clone();
+            effective.resolve_dirs(&c.root)?;
+            effective.args()
+        }
+    })
 }
 
 fn str_at(v: &Value, path: &[&str]) -> Result<String, String> {

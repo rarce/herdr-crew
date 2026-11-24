@@ -31,6 +31,8 @@ pub struct AgentStart<'a> {
     pub args: &'a [String],
     /// The first message, typed once the agent is ready.
     pub message: Option<&'a str>,
+    /// The recorded session to resume instead of starting a new one.
+    pub resume: Option<&'a str>,
 }
 
 /// How a started agent was left.
@@ -134,6 +136,12 @@ pub trait Backend {
 
     /// Submits `text` to the agent in `pane`.
     fn prompt(&self, pane: &str, text: &str) -> Result<(), PromptError>;
+
+    /// Whether a lost agent leaves its tab as a shell that `up` resumes the session in (see
+    /// `Env::resume`).
+    fn resumes_agents(&self) -> bool {
+        false
+    }
 
     /// Whether `focus_and_attach` would take over this terminal.
     fn will_attach(&self, attach: bool) -> bool;

@@ -320,6 +320,7 @@ fn env(
         binary: binary(),
         worktrees,
         board_pane,
+        resume: herdr.is_some_and(|h| h.resumes_agents()),
         status_exists: c.board_path().exists(),
         current_schema: std::fs::read_to_string(c.root.join(prompt::SCHEMA_FILE)).ok(),
         now,
@@ -447,6 +448,7 @@ fn outcome(verdict: &plan::Verdict, board: bool) -> String {
         }
         (plan::Verdict::Occupied(why), _) => format!("already running ({why})"),
         (plan::Verdict::NoAgent, _) => "tab without an agent: see the warning above".into(),
+        (plan::Verdict::Resume(_), _) => "resumed its conversation".into(),
         (plan::Verdict::LeaveAlone(why), _) => format!("left alone ({why})"),
     }
 }
