@@ -320,8 +320,8 @@ Still to test:
        `board/view.rs`;
      - running `up` automatically when the app starts, because it could surprise users;
        the dialog keeps it explicit.
-   - **Not tried yet** against the live window: installing it into the real app and using
-     the dialog.
+   - **Checked** in the live window: installed with `app-install`, the dialog opens and
+     shows the verdicts for the focused tab's folder.
 6. **Codex and agy on core: done.**
    - **Pane keys.** Hooks find their pane by `Backend::pane_key`: `HERDR_PANE_ID`, or
      `hc:<HC_SESSION or default>:<HC_TERMINAL_ID>`. A hook in a TUI pane inside an app
@@ -350,6 +350,14 @@ Still to test:
    order, then the board, then other tabs). Tabs someone named keep their names. With no
    window it does nothing; the dialog's "Bring the crew up" runs `up`, so opening it fixes
    the names.
+   - `herdr-app ls` has no `named` field (the mods' `spaces()` does): a tab nobody named is
+     listed by its place ("1", "2"…) and a space by its repo's folder, so `tidy` reads them
+     that way. The tab bar itself shows an unnamed tab by its agent ("Claude Code").
+   - **Checked in the live window** (Herdr 0.1.18, core 0.1.22): after unnaming the space
+     and a tab and moving the board first, a no-change `up` restored the names and the
+     order; a space and a tab renamed by hand kept their names. The palette entry loads
+     without errors (`herdr-app status`), but typing into the palette could not be
+     automated.
 8. **Retire the TUI backend** once core + app cover everything. Remove
    `herdr-plugin.toml`, `startup` and the TUI-specific code (Codex native queue, `agent
    prompt`). Update README, `design.md` and the CHANGELOG.
