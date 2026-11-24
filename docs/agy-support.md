@@ -29,11 +29,9 @@ Two CLI differences from Claude Code, Codex and pi shape how crew starts `agy`:
 ## Role prompt delivery and restoration
 
 `herdr-crew agy-install` requires the public `herdr-crew` launcher on `PATH` and registers a
-named `"herdr-crew"` entry in `~/.gemini/config/hooks.json` (respecting
-`ANTIGRAVITY_CLI_CONFIG_DIR` for parity with `herdr integration` and offline tests; note that
-`agy 1.5.15` itself reads global hooks only from `~/.gemini/config/hooks.json` and workspace
-hooks from `.agents/hooks.json`), coexisting with Herdr's own `antigravity-cli` hook and any
-user hooks:
+named `"herdr-crew"` entry in `~/.gemini/config/hooks.json`, alongside Herdr's own `antigravity-cli` hook and any
+user hooks. Installation and preflight use this path even when
+`ANTIGRAVITY_CLI_CONFIG_DIR` is set, matching the global hooks loaded by agy 1.5.15.
 
 ```json
 {
@@ -50,8 +48,9 @@ user hooks:
 ```
 
 Right before launching an `agy` role (whether via `CreateWorkspace`, `AdoptWorkspace`,
-`CreateTab`, or `add`), crew writes a one-shot pending binding file for that pane in
-`.herdr/prompts/agy-pending-<hash>.json`. On `SessionStart`, `herdr-crew agy-hook` resolves
+`CreateTab`, or `add`), crew saves the rendered prompt for that repository and pane in
+the private directory `~/.herdr-crew-agy/`. A failed launch clears its pending prompt.
+On `SessionStart`, `herdr-crew agy-hook` resolves
 the repository root from `cwd`, atomically consumes the pending binding for `HERDR_PANE_ID`,
 and returns:
 

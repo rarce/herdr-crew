@@ -2,7 +2,7 @@
 //!
 //! `agy` has no `--append-system-prompt-file` flag, and herdr resumes it with a plain
 //! `agy --conversation <id>`. Before starting an `agy` role, crew writes a one-shot pending
-//! binding for that pane in `.herdr/prompts/`; on `SessionStart`, `herdr-crew agy-hook` resolves
+//! binding with the rendered prompt in private per-user state; on `SessionStart`, `herdr-crew agy-hook` resolves
 //! the project root from `cwd`, atomically consumes the pending binding for `HERDR_PANE_ID`, and
 //! injects the rendered role prompt as a persistent `systemMessage`. Because each binding is
 //! consumed once, subagents spawned by a coordinator (`experimental_agy_tree`) and resumed
@@ -10,6 +10,7 @@
 
 use std::fs;
 use std::io::{self, Read};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::codex::integration::LAUNCHER_MARKER;
-use crate::{files, git, process, prompt};
+use crate::{files, git, process};
 
 /// Top-level hook key owned by herdr-crew inside `hooks.json`.
 pub const HOOK_NAME: &str = "herdr-crew";
@@ -32,38 +33,21 @@ pub const MIN_AGY: (u32, u32, u32) = (1, 5, 0);
 #[serde(deny_unknown_fields)]
 struct Pending {
     pane: String,
-    prompt: PathBuf,
+    root: PathBuf,
+    token: String,
+    prompt: String,
 }
 
-/// `agy`'s global customization directory: `ANTIGRAVITY_CLI_CONFIG_DIR` (with `~` expansion) or
-/// `~/.gemini/config`. Note: `agy 1.5.15` reads global hooks from `~/.gemini/config/hooks.json`;
-/// the env override is kept for parity with `herdr integration` and offline tests.
-pub fn config_dir() -> Result<PathBuf, String> {
-    let home = || {
-        std::env::var_os("HOME")
-            .filter(|h| !h.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME is not set".to_string())
-    };
-    let path = match std::env::var("ANTIGRAVITY_CLI_CONFIG_DIR") {
-        Ok(value) if value == "~" => home()?,
-        Ok(value) if value.starts_with("~/") => home()?.join(&value[2..]),
-        Ok(value) if !value.is_empty() => PathBuf::from(value),
-        Ok(_) | Err(std::env::VarError::NotPresent) => home()?.join(".gemini").join("config"),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err("ANTIGRAVITY_CLI_CONFIG_DIR must be UTF-8".into());
-        }
-    };
-    if !path.is_absolute() {
-        return Err("ANTIGRAVITY_CLI_CONFIG_DIR must be absolute".into());
-    }
-    if path
-        .to_str()
-        .is_none_or(|s| s.chars().any(char::is_control))
-    {
-        return Err("the agy config directory must be UTF-8 without control characters".into());
-    }
-    Ok(path)
+fn home() -> Result<PathBuf, String> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .ok_or_else(|| "agy requires an absolute HOME".into())
+}
+
+// agy 1.5.15 ignores ANTIGRAVITY_CLI_CONFIG_DIR for global hooks.
+fn config_dir() -> Result<PathBuf, String> {
+    Ok(home()?.join(".gemini/config"))
 }
 
 fn hooks_path() -> Result<PathBuf, String> {
@@ -124,9 +108,10 @@ fn has_hook(value: &Value) -> bool {
             entry.get("SessionStart")?.as_array()
         })
         .is_some_and(|handlers| {
-            handlers
-                .iter()
-                .any(|h| h.get("command").and_then(Value::as_str) == Some(HOOK_COMMAND))
+            handlers.iter().any(|h| {
+                h.get("command").and_then(Value::as_str) == Some(HOOK_COMMAND)
+                    && h.get("type").is_none_or(|t| t == "command")
+            })
         })
 }
 
@@ -230,25 +215,116 @@ pub fn prompt_problem(name: &str, prompt_text: &str) -> Option<String> {
     })
 }
 
-fn pending_path(root: &Path, pane: &str) -> PathBuf {
-    let key = files::fnv64(0xcbf29ce484222325, pane.as_bytes());
-    root.join(prompt::PROMPTS_DIR)
-        .join(format!("agy-pending-{key:016x}.json"))
+struct Slot {
+    dir: PathBuf,
+    path: PathBuf,
 }
 
-/// Writes the one-shot pending binding for `pane` before `agent start` launches `agy`.
-/// Works identically for `CreateWorkspace`, `AdoptWorkspace`, `CreateTab`, and `add`.
-pub fn prepare(root: &Path, pane: &str, prompt_path: &Path) -> Result<(), String> {
-    let relative = prompt_path
-        .strip_prefix(root)
-        .map_err(|_| format!("{} is outside {}", prompt_path.display(), root.display()))?;
-    let path = pending_path(root, pane);
+impl Slot {
+    fn new(home: &Path, root: &Path, pane: &str, create: bool) -> Result<Self, String> {
+        let dir = home
+            .canonicalize()
+            .map_err(|e| e.to_string())?
+            .join(".herdr-crew-agy");
+        if dir.starts_with(root) {
+            return Err("agy runtime state must be outside the checkout".into());
+        }
+        if create {
+            match fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        let meta = fs::symlink_metadata(&dir).map_err(|e| e.to_string())?;
+        if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "{} must be a private directory (0700)",
+                dir.display()
+            ));
+        }
+        let project = files::fnv64(0xcbf29ce484222325, root.as_os_str().as_encoded_bytes());
+        let key = files::fnv64(0xcbf29ce484222325, pane.as_bytes());
+        let path = dir.join(format!("{project:016x}-{key:016x}.json"));
+        Ok(Self { dir, path })
+    }
+
+    // Serialize publication, consumption and rollback, including overlapping launches.
+    fn lock(&self) -> Result<fs::File, String> {
+        let file = fs::File::open(&self.dir).map_err(|e| e.to_string())?;
+        file.lock().map_err(|e| e.to_string())?;
+        Ok(file)
+    }
+
+    fn read(&self) -> Result<Option<Pending>, String> {
+        match fs::read(&self.path) {
+            Ok(data) => serde_json::from_slice(&data)
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn consume(&self, root: &Path, pane: &str) -> Option<String> {
+        let _lock = self.lock().ok()?;
+        let pending = self.read().ok()??;
+        if pending.root != root
+            || pending.pane != pane
+            || prompt_problem(pane, &pending.prompt).is_some()
+        {
+            return None;
+        }
+        self.remove().ok()?;
+        Some(pending.prompt)
+    }
+
+    fn cancel(&self, token: &str) -> Result<(), String> {
+        let _lock = self.lock()?;
+        if self.read()?.is_some_and(|pending| pending.token == token) {
+            self.remove()?;
+        }
+        Ok(())
+    }
+
+    fn remove(&self) -> Result<(), String> {
+        fs::remove_file(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))
+    }
+}
+
+pub fn launch(
+    root: &Path,
+    pane: &str,
+    prompt: &str,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let slot = Slot::new(&home()?, root, pane, true)?;
     let record = Pending {
-        pane: pane.to_string(),
-        prompt: relative.to_path_buf(),
+        pane: pane.into(),
+        root: root.into(),
+        prompt: prompt.into(),
+        token: files::random_hex(16).map_err(|e| e.to_string())?,
     };
-    let text = serde_json::to_string(&record).map_err(|e| e.to_string())?;
-    files::write(root, &path, &text)
+    {
+        let _lock = slot.lock()?;
+        if slot.read()?.is_some() {
+            return Err(format!(
+                "an agy launch is already pending for {pane} ({})",
+                slot.path.display()
+            ));
+        }
+        files::write(
+            &slot.dir,
+            &slot.path,
+            &serde_json::to_string(&record).map_err(|e| e.to_string())?,
+        )?;
+    }
+    if let Err(error) = start() {
+        slot.cancel(&record.token)
+            .map_err(|e| format!("{error}; could not clear pending launch: {e}"))?;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// `agy-hook`: invoked by `agy` on `SessionStart`. Reads camelCase JSON on stdin and prints the
@@ -283,40 +359,12 @@ fn hook_response(stdin: &str, pane: Option<&str>) -> Value {
     let Ok(root) = git::main_root(Path::new(cwd)) else {
         return json!({});
     };
-    let path = pending_path(&root, pane);
-    let Ok(validated_pending) = files::validate(&root, &path, files::Kind::File) else {
+    let Ok(slot) = home().and_then(|home| Slot::new(&home, &root, pane, false)) else {
         return json!({});
     };
-    let Ok(text) = fs::read_to_string(&validated_pending) else {
+    let Some(prompt_text) = slot.consume(&root, pane) else {
         return json!({});
     };
-    // Consume the pending binding atomically so only this initial session gets the role prompt,
-    // never subagents spawned by a coordinator or resumed conversations.
-    if fs::remove_file(&validated_pending).is_err() {
-        return json!({});
-    }
-    let Ok(pending) = serde_json::from_str::<Pending>(&text) else {
-        return json!({});
-    };
-    if pending.pane != pane {
-        return json!({});
-    }
-    let prompt_file = root.join(&pending.prompt);
-    let Ok(validated_prompt) = files::validate(&root, &prompt_file, files::Kind::File) else {
-        return json!({});
-    };
-    let Ok(meta) = fs::symlink_metadata(&validated_prompt) else {
-        return json!({});
-    };
-    if !meta.is_file() || meta.len() > MAX_PROMPT as u64 {
-        return json!({});
-    }
-    let Ok(prompt_text) = fs::read_to_string(&validated_prompt) else {
-        return json!({});
-    };
-    if prompt_text.trim().is_empty() || prompt_text.len() > MAX_PROMPT {
-        return json!({});
-    }
     json!({
         "injectSteps": [
             {
@@ -349,31 +397,19 @@ mod tests {
     }
 
     #[test]
-    fn hook_consumes_pending_binding_once_and_ignores_subagents_and_non_crew() {
-        let root = git::test_repo("agy-hook");
-        let prompt_file = root.join(prompt::PROMPTS_DIR).join("lead.txt");
-        files::write(&root, &prompt_file, "You are lead.").unwrap();
-        prepare(&root, "w1:p1", &prompt_file).unwrap();
-
-        let stdin = json!({"conversationId": "c1", "cwd": root}).to_string();
-
-        // Non-Herdr session without HERDR_PANE_ID gets empty object and does not consume binding.
-        assert_eq!(hook_response(&stdin, None), json!({}));
-        // Unrelated pane gets empty object and does not consume binding.
-        assert_eq!(hook_response(&stdin, Some("w1:p9")), json!({}));
-
-        // First SessionStart for w1:p1 consumes binding and injects systemMessage.
-        let first = hook_response(&stdin, Some("w1:p1"));
-        assert_eq!(
-            first["injectSteps"][0]["systemMessage"]["systemMessage"].as_str(),
-            Some("You are lead.")
-        );
-
-        // Second SessionStart (subagent or resume) gets empty object; no prompt leakage.
-        let subagent_stdin = json!({"conversationId": "sub-1", "cwd": root}).to_string();
-        assert_eq!(hook_response(&subagent_stdin, Some("w1:p1")), json!({}));
-
-        let _ = fs::remove_dir_all(&root);
+    fn handler_type_defaults_to_command() {
+        for (kind, valid) in [
+            (None, true),
+            (Some(json!("command")), true),
+            (Some(json!("other")), false),
+            (Some(Value::Null), false),
+        ] {
+            let mut h = json!({"command": HOOK_COMMAND});
+            if let Some(kind) = kind {
+                h["type"] = kind;
+            }
+            assert_eq!(has_hook(&json!({HOOK_NAME: {"SessionStart": [h]}})), valid);
+        }
     }
 
     #[test]

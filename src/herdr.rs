@@ -608,21 +608,27 @@ pub fn execute(
                     }
                     // The crew's agy SessionStart hook consumes this one-shot pane binding.
                     AgentOptions::Agy(options) => {
-                        crate::agy::prepare(&c.root, &pane, prompt)?;
                         let mut effective = options.clone();
                         effective.resolve_dirs(&c.root)?;
                         effective.args()
                     }
                 };
-                start_agent(
-                    herdr,
-                    name,
-                    &pane,
-                    agent.kind(),
-                    &native,
-                    message.as_deref(),
-                    out,
-                )?;
+                let mut start = || {
+                    start_agent(
+                        herdr,
+                        name,
+                        &pane,
+                        agent.kind(),
+                        &native,
+                        message.as_deref(),
+                        out,
+                    )
+                };
+                if matches!(agent, AgentOptions::Agy(_)) {
+                    crate::agy::launch(&c.root, &pane, prompt_of(name)?, start)?;
+                } else {
+                    start()?;
+                }
             }
             Step::RunInPane {
                 pane,

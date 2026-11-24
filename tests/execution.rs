@@ -2789,12 +2789,20 @@ fn agy_install_launch_hook_and_recovery() {
         r#"{"herdr":{"PreInvocation":[{"type":"command","command":"herdr-agent-state.sh"}]}}"#,
     )
     .unwrap();
-    success(f.crew(&["agy-install"]));
+    let overridden = |arg| {
+        f.command(CREW)
+            .env("ANTIGRAVITY_CLI_CONFIG_DIR", f.root.join("override"))
+            .arg(arg)
+            .output()
+            .unwrap()
+    };
+    success(overridden("agy-install"));
+    assert!(!f.root.join("override/hooks.json").exists());
     let installed: Value = serde_json::from_str(&fs::read_to_string(&hooks).unwrap()).unwrap();
     assert!(installed.get("herdr").is_some());
     assert!(installed.get("herdr-crew").is_some());
 
-    let checked = success(f.crew(&["check"]));
+    let checked = success(overridden("check"));
     assert!(checked.contains("herdr-crew: agy 1.5.15 at "), "{checked}");
     assert!(
         checked.contains("the crew agy hook is installed"),
@@ -2853,11 +2861,19 @@ fn agy_install_launch_hook_and_recovery() {
         assert!(out.status.success(), "{out:?}");
         serde_json::from_slice(&out.stdout).unwrap()
     };
+    let rendered = f.read(".herdr/prompts/lead.txt");
+    fs::write(
+        f.repo.join(".herdr/prompts/lead.txt"),
+        "edited after launch",
+    )
+    .unwrap();
+    assert_eq!(run_hook("", &hook_input), json!({}));
+    assert_eq!(run_hook("unrelated", &hook_input), json!({}));
     let first = run_hook(&lead_pane, &hook_input);
     let injected = first["injectSteps"][0]["systemMessage"]["systemMessage"]
         .as_str()
         .unwrap_or_default();
-    assert!(injected.contains("lead"), "{first}");
+    assert_eq!(injected, rendered);
     let second = run_hook(
         &lead_pane,
         &format!(
@@ -2866,6 +2882,11 @@ fn agy_install_launch_hook_and_recovery() {
         ),
     );
     assert_eq!(second, serde_json::json!({}));
+
+    f.fail_once("agent start dev-2", "start_failed");
+    failure(f.crew(&["add", "dev"]), "could not start dev-2");
+    let failed_pane = fs::read_to_string(f.tab("dev-2").join("pane")).unwrap();
+    assert_eq!(run_hook(&failed_pane, &hook_input), json!({}));
 
     // Empty-tab recovery advises `agy --conversation <id>`.
     fs::remove_file(f.tab("lead").join("agent")).unwrap();
