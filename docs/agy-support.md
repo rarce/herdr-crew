@@ -65,13 +65,14 @@ user hooks. Installation and preflight use this path even when
 Right before launching an `agy` role (whether via `CreateWorkspace`, `AdoptWorkspace`,
 `CreateTab`, or `add`), crew saves the rendered prompt for that repository and pane in
 the private directory `~/.herdr-crew-agy/`. A failed launch clears its pending prompt.
-When a role has a `start_message`, Crew waits for the hook to consume the binding
-before reporting the role as started. If the binding is still pending five seconds
-after Herdr reports startup, Crew clears it and reports an error. Close the named
-tab, verify checkout trust and hook installation, then retry. If an older
+When Herdr reports a role with a `start_message` is ready, Crew gives the hook
+five seconds to consume the binding. If it is still pending, Crew clears it and
+reports an error. Close the named tab, verify checkout trust and hook installation,
+then retry. If Herdr reports the role is waiting at startup, Crew warns the operator
+and keeps the binding for `SessionStart` after the dialog. Roles without a
+`start_message` also keep their binding for the first conversation. If an older
 abandoned launch blocks a reused pane, the error identifies the exact file to
-remove after the old agent has exited. A role without a `start_message` keeps its
-binding available for the first conversation to begin.
+remove after the old agent has exited.
 On `SessionStart`, `herdr-crew agy-hook` resolves
 the repository root from `cwd`, atomically consumes the pending binding for `HERDR_PANE_ID` (on herdr-core, for the terminal's `crew.core` label, where it also records the `conversationId` in the terminal's `crew.session` label so that `up` can resume it with `agy --conversation <id>`),
 and returns:

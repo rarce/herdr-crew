@@ -692,10 +692,8 @@ fn app_install_writes_only_its_own_mod() {
     );
 }
 
-#[test]
-fn agy_roles_get_their_prompt_and_resume_their_conversation() {
-    let f =
-        Fixture::new(&CONFIG.replace("start_message = \"Confirm your role\"", "kind = \"agy\""));
+fn agy_fixture(config: &str) -> Fixture {
+    let f = Fixture::new(&config.replace("version = 1", "version = 1\nkind = \"agy\""));
     // agy's preflight needs agy 1.5+, the public launcher on PATH and the crew hook.
     let tools = f.root.join("tools");
     fs::create_dir_all(&tools).unwrap();
@@ -710,6 +708,44 @@ fn agy_roles_get_their_prompt_and_resume_their_conversation() {
     .unwrap();
     launcher(&f);
     ok(&f.run(&["agy-install"]));
+    f
+}
+
+#[test]
+fn agy_startup_dialog_preserves_the_role_prompt_until_session_start() {
+    let f = agy_fixture(CONFIG);
+    let up = f
+        .crew(&["up", "--no-attach"])
+        .env("CREW_TEST_HC_READY", "blocked")
+        .output()
+        .unwrap();
+    assert!(ok(&up).contains("waiting for an answer at startup"));
+    let lead = f.tab("lead");
+    assert_eq!(lead["status"]["state"], "blocked");
+    assert!(
+        lead["typed"][0]
+            .as_str()
+            .unwrap()
+            .contains("--prompt-interactive 'Confirm your role'")
+    );
+
+    let address = lead["address"].as_str().unwrap();
+    let input = serde_json::json!({"conversationId": "after-dialog", "cwd": f.repo}).to_string();
+    let first = hook(&f, "agy-hook", address, &input, &[]);
+    assert_eq!(
+        first["injectSteps"][0]["systemMessage"]["systemMessage"],
+        fs::read_to_string(f.repo.join(".herdr/prompts/lead.txt")).unwrap()
+    );
+    assert_eq!(f.tab("lead")["labels"]["crew.session"], "after-dialog");
+    assert_eq!(
+        hook(&f, "agy-hook", address, &input, &[]),
+        serde_json::json!({})
+    );
+}
+
+#[test]
+fn agy_roles_get_their_prompt_and_resume_their_conversation() {
+    let f = agy_fixture(&CONFIG.replace("start_message = \"Confirm your role\"", ""));
     ok(&f.run(&["check"]));
     ok(&f.run(&["up"]));
     let lead = f.tab("lead");

@@ -435,8 +435,9 @@ pub fn launch(
             return Err(error);
         }
     };
-    // Without an initial message, agy may wait for the first user input to start a conversation.
-    if has_start_message
+    // A startup dialog can delay SessionStart, as can waiting for the first user message.
+    if started == Started::Ready
+        && has_start_message
         && !slot
             .wait_for_hook(&record.token)
             .map_err(|e| format!("cannot verify the agy role prompt for {name} in {pane}: {e}"))?
