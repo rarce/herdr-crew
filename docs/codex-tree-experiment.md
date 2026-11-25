@@ -1,6 +1,15 @@
-# Native Codex crew tree (experimental)
+# Native Codex crew tree (`codex_tree = true`)
 
-Date: 2026-10-19 (America/Santiago). Prototype only; no production startup changes.
+> **Now available in `init` and first-time `up`:** Multi-role Codex crews (`review`,
+> `parallel`, `research`) can now enable native tree mode directly via
+> `herdr-crew init --agent codex --preset review --topology tree` or first-time
+> `herdr-crew up --topology tree` (or by choosing `tree` at the `Topology` step in the
+> setup wizard; `tabs` remains the default). Generated configurations set
+> `codex_tree = true`; `experimental_codex_tree = true` remains accepted as a
+> backward-compatible alias. The original experiment design, validation record, and
+> `experiments/codex_tree.py` conversion script are preserved below.
+
+Original experiment date: 2026-10-19 (America/Santiago). Prototype design and validation notes:
 
 Prompt/validation correction: 2026-10-20. Generated configurations now set
 `experimental_codex_tree = true`. This selects the coordinator's native-tree

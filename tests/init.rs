@@ -136,10 +136,136 @@ fn agy_multi_role_presets_use_tree_mode_without_remote() {
 }
 
 #[test]
-fn agy_tree_rejects_topology_flag_and_base_without_writing() {
+fn codex_multi_role_presets_default_to_tabs_and_support_tree_without_remote() {
+    let remote = Repo::new(true);
+    success(remote.init(&[
+        "--agent", "codex", "--preset", "review", "--name", "acme", "--yes",
+    ]));
+    let tabs_config = remote.config();
+    assert_eq!(tabs_config["kind"].as_str(), Some("codex"));
+    assert!(tabs_config.get("codex_tree").is_none());
+    assert_eq!(
+        tabs_config["worktrees"]["base"].as_str(),
+        Some("upstream/trunk")
+    );
+    assert_eq!(tabs_config["roles"].as_array().unwrap().len(), 3);
+
+    for (preset, extra_args, expected_manifest) in [
+        (
+            "review",
+            vec![],
+            vec![
+                "- dev (task_name: \"dev\"):",
+                "- reviewer (task_name: \"reviewer\"):",
+            ],
+        ),
+        (
+            "review",
+            vec!["--shared-checkout"],
+            vec![
+                "- dev (task_name: \"dev\"):",
+                "- reviewer (task_name: \"reviewer\"):",
+            ],
+        ),
+        (
+            "parallel",
+            vec![],
+            vec![
+                "- dev-a (task_name: \"dev_a\"):",
+                "- dev-b (task_name: \"dev_b\"):",
+                "- reviewer (task_name: \"reviewer\"):",
+            ],
+        ),
+        (
+            "research",
+            vec![],
+            vec![
+                "- research-a (task_name: \"research_a\"):",
+                "- research-b (task_name: \"research_b\"):",
+            ],
+        ),
+    ] {
+        let repo = Repo::new(false);
+        let mut args = vec![
+            "--agent",
+            "codex",
+            "--preset",
+            preset,
+            "--topology",
+            "tree",
+            "--name",
+            "acme",
+            "--yes",
+        ];
+        args.extend(extra_args);
+        let out = success(repo.init(&args));
+        assert!(out.contains("features.multi_agent_v2 = true"), "{out}");
+        let config = repo.config();
+        assert_eq!(config["kind"].as_str(), Some("codex"));
+        assert_eq!(config["codex_tree"].as_bool(), Some(true));
+        assert!(config.get("agy_tree").is_none());
+        assert!(config.get("worktrees").is_none());
+        let roles = config["roles"].as_array().unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0]["name"].as_str(), Some("acme-lead"));
+        assert_eq!(roles[0]["worktree"].as_bool(), Some(false));
+        assert_eq!(roles[0]["extra"].as_bool(), Some(false));
+        assert_eq!(config["board"]["writer"].as_str(), Some("acme-lead"));
+        let prompt = roles[0]["prompt"].as_str().unwrap();
+        for needle in expected_manifest {
+            assert!(prompt.contains(needle), "missing {needle} in:\n{prompt}");
+        }
+        assert!(
+            !fs::read_to_string(repo.root.join(".gitignore"))
+                .unwrap()
+                .contains("/.worktrees/")
+        );
+        let plan = success(repo.command().args(["up", "--dry-run"]).output().unwrap());
+        assert!(plan.contains("acme-lead"), "{plan}");
+    }
+}
+
+#[test]
+fn topology_and_base_combinations_validate_without_writing() {
     let repo = Repo::new(true);
     for options in [
         vec!["--topology", "tree", "--yes"],
+        vec![
+            "--topology",
+            "tree",
+            "--agent",
+            "claude",
+            "--preset",
+            "review",
+            "--yes",
+        ],
+        vec![
+            "--topology",
+            "tree",
+            "--agent",
+            "pi",
+            "--preset",
+            "research",
+            "--yes",
+        ],
+        vec![
+            "--topology",
+            "tree",
+            "--agent",
+            "codex",
+            "--preset",
+            "solo",
+            "--yes",
+        ],
+        vec![
+            "--topology",
+            "tree",
+            "--agent",
+            "agy",
+            "--preset",
+            "solo",
+            "--yes",
+        ],
         vec![
             "--topology",
             "tabs",
@@ -147,6 +273,17 @@ fn agy_tree_rejects_topology_flag_and_base_without_writing() {
             "agy",
             "--preset",
             "review",
+            "--yes",
+        ],
+        vec![
+            "--topology",
+            "tree",
+            "--agent",
+            "codex",
+            "--preset",
+            "review",
+            "--base",
+            "upstream/trunk",
             "--yes",
         ],
         vec![
@@ -179,18 +316,20 @@ fn agy_tree_rejects_topology_flag_and_base_without_writing() {
         repo.unchanged();
     }
 
-    // `--topology` is rejected as an unknown option on both `init` and `up`.
-    let unknown_init = repo.init(&["--topology", "tree"]);
-    assert_eq!(unknown_init.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&unknown_init.stderr).contains("unknown option --topology"));
-    let unknown_up = repo
-        .command()
-        .args(["up", "--topology", "tree", "--dry-run"])
-        .output()
-        .unwrap();
-    assert_eq!(unknown_up.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&unknown_up.stderr).contains("unknown option --topology"));
-    repo.unchanged();
+    // `--topology tree` is accepted for multi-role `agy` (matches its native tree mode).
+    let agy_tree_repo = Repo::new(false);
+    success(agy_tree_repo.init(&[
+        "--agent",
+        "agy",
+        "--preset",
+        "review",
+        "--topology",
+        "tree",
+        "--name",
+        "acme",
+        "--yes",
+    ]));
+    assert_eq!(agy_tree_repo.config()["agy_tree"].as_bool(), Some(true));
 
     // Without --yes, --agent agy --base fails immediately before asking.
     for args in [
@@ -229,12 +368,21 @@ fn agy_tree_rejects_topology_flag_and_base_without_writing() {
         repo.unchanged();
     }
 
-    // Without a remote, --base fails fast before asking or opening a wizard.
+    // Without a remote, --base fails fast before asking or opening a wizard with no_remote().
     let local = Repo::new(false);
     for args in [
         vec![
             "--agent",
-            "agy",
+            "claude",
+            "--preset",
+            "parallel",
+            "--base",
+            "upstream/trunk",
+            "--no-tui",
+        ],
+        vec![
+            "--agent",
+            "codex",
             "--preset",
             "parallel",
             "--base",
@@ -257,27 +405,47 @@ fn agy_tree_rejects_topology_flag_and_base_without_writing() {
             args,
             String::from_utf8_lossy(&out.stdout)
         );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("configured Git remote"),
+            "{:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
         local.unchanged();
     }
 
-    // With a remote and --base (without --agent), interactive review rejects agy and accepts claude.
+    // With a remote and --base (without --agent), interactive review rejects agy,
+    // rejects codex+tree, and accepts codex+tabs.
     let interactive_base = repo.interactive(
         &["--base", "upstream/trunk", "--no-tui"],
-        "sample\nreview\nagy\nclaude\n\n\n\ny\n",
+        "sample\nreview\nagy\ncodex\ntree\ntabs\n\n\n\ny\n",
     );
     let out = success(interactive_base);
     assert!(
         out.contains("native tree mode without [worktrees]"),
         "{out}"
     );
+    assert!(
+        out.contains("--base does not apply with --topology tree; choose tabs or omit --base"),
+        "{out}"
+    );
     let base_config = repo.config();
-    assert!(base_config.get("kind").is_none());
-    assert!(base_config.get("agy_tree").is_none());
+    assert_eq!(base_config["kind"].as_str(), Some("codex"));
+    assert!(base_config.get("codex_tree").is_none());
     assert_eq!(
         base_config["worktrees"]["base"].as_str(),
         Some("upstream/trunk")
     );
     assert_eq!(base_config["roles"].as_array().unwrap().len(), 3);
+
+    // `up --topology` on an existing configuration exits 2.
+    let existing = repo
+        .command()
+        .args(["up", "--topology", "tree", "--dry-run"])
+        .output()
+        .unwrap();
+    assert_eq!(existing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&existing.stderr).contains("--topology"));
 }
 
 #[test]

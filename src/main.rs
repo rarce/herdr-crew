@@ -42,13 +42,13 @@ use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, Worksp
 
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi|agy]
-       [--models inherit|economy|balanced|quality]
+       [--topology tabs|tree] [--models inherit|economy|balanced|quality]
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
        [--dry-run]
                                  configure a crew with the setup wizard
   config                         edit each role's agent, model and effort in a terminal UI
   up [--agent claude|codex|pi|agy] [--no-attach] [--dry-run]
-     [--preset ...] [--models ...] [--name NAME]
+     [--preset ...] [--topology tabs|tree] [--models ...] [--name NAME]
      [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
                                  (setup options as for init); --agent on an existing
@@ -159,6 +159,13 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
                         .ok_or_else(|| Fail::usage("--agent must be claude, codex, pi or agy"))?,
                 )
             }
+            "--topology" => {
+                let topology = value("--topology")?;
+                a.init.topology = Some(
+                    init::Topology::parse(&topology)
+                        .ok_or_else(|| Fail::usage("--topology must be tabs or tree"))?,
+                );
+            }
             "--models" => {
                 let profile = value("--models")?;
                 a.init.models = Some(models::Profile::parse(&profile).ok_or_else(|| {
@@ -183,6 +190,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         "init" => &[
             "agent",
             "preset",
+            "topology",
             "models",
             "no_tui",
             "name",
@@ -198,6 +206,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "no_attach",
             "dry_run",
             "preset",
+            "topology",
             "models",
             "no_tui",
             "name",
@@ -224,6 +233,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ("interval", a.interval.is_some()),
         ("agent", a.agent.is_some()),
         ("preset", a.init.preset.is_some()),
+        ("topology", a.init.topology.is_some()),
         ("models", a.init.models.is_some()),
         ("no_tui", a.init.no_tui),
         ("name", a.init.name.is_some()),
@@ -1287,6 +1297,7 @@ fn run() -> Result<(), Fail> {
         }
         let i = &a.init;
         if i.preset.is_some()
+            || i.topology.is_some()
             || i.models.is_some()
             || i.no_tui
             || i.name.is_some()
@@ -1295,7 +1306,7 @@ fn run() -> Result<(), Fail> {
             || i.no_ignore
         {
             return Err(Fail::usage(format!(
-                "--preset, --models, --name, --base, --shared-checkout, --no-ignore \
+                "--preset, --topology, --models, --name, --base, --shared-checkout, --no-ignore \
                  and --no-tui only apply when up sets up a new crew; {} already exists, so edit \
                  it instead",
                 path.display()
@@ -1375,10 +1386,17 @@ mod tests {
         let a = args("board --file /f --once --interval 2").unwrap();
         assert!(a.once && a.interval == Some(Duration::from_secs(2)));
         // Without a configuration, up sets one up first and takes init's options for it.
-        let up = args("up --preset review --name acme --agent agy --yes --no-attach").unwrap();
+        let up =
+            args("up --preset review --name acme --agent codex --topology tree --yes --no-attach")
+                .unwrap();
         assert_eq!(up.init.preset, Some(init::Preset::Review));
-        assert_eq!(up.init.agent, Some(agent::Kind::Agy));
+        assert_eq!(up.init.agent, Some(agent::Kind::Codex));
+        assert_eq!(up.init.topology, Some(init::Topology::Tree));
         assert!(up.init.yes && up.no_attach);
+        assert_eq!(
+            args("init --topology tabs").unwrap().init.topology,
+            Some(init::Topology::Tabs)
+        );
     }
 
     #[test]
@@ -1479,9 +1497,8 @@ mod tests {
             "startup --dry-run",
             "init --preset unknown",
             "init --topology",
-            "init --topology tree",
-            "init --topology tabs",
-            "up --topology tree",
+            "init --topology mesh",
+            "up --topology unknown",
             "check --topology tree",
             "board --topology tabs",
             "init --base",

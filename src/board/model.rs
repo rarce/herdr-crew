@@ -409,7 +409,7 @@ pub(crate) mod tests {
         c.roles[0].kind = crate::agent::Kind::Codex;
         c.roles[0].worktree = false;
         c.roles[0].extra = false;
-        c.experimental_codex_tree = true;
+        c.codex_tree = true;
         c
     }
 

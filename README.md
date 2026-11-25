@@ -69,7 +69,7 @@ Launcher removal also works after the plugin has been uninstalled. Use `--bin-di
 
 ## Quick start
 
-The shortest path is to run `herdr-crew up` inside your Git repository. If the project has no `.herdr/crew.toml` yet, `up` runs the [setup wizard](#configure-a-crew) first: choose a workflow and an agent, review the preview, and once it is saved `up` creates the workspace and starts the sessions. `up --yes` takes the defaults (a solo crew) without asking, and accepts `init`'s options (`--preset`, `--name`, `--agent`, `--base`, `--shared-checkout`, `--no-ignore`). Without a terminal to ask in, and as the `herdr-crew.up` action, `up` does not guess: it explains how to set the crew up and changes nothing. Codex, pi and agy crews still need their one-time setup (`codex-install`, `pi-install`, `agy-install`) before their roles can start; `up` says so if it is missing.
+The shortest path is to run `herdr-crew up` inside your Git repository. If the project has no `.herdr/crew.toml` yet, `up` runs the [setup wizard](#configure-a-crew) first: choose a workflow and an agent, review the preview, and once it is saved `up` creates the workspace and starts the sessions. `up --yes` takes the defaults (a solo crew) without asking, and accepts `init`'s options (`--preset`, `--name`, `--agent`, `--topology`, `--base`, `--shared-checkout`, `--no-ignore`). Without a terminal to ask in, and as the `herdr-crew.up` action, `up` does not guess: it explains how to set the crew up and changes nothing. Codex, pi and agy crews still need their one-time setup (`codex-install`, `pi-install`, `agy-install`) before their roles can start; `up` says so if it is missing.
 
 To review the configuration before anything starts:
 
@@ -186,13 +186,17 @@ For manual recovery, find the binding with `herdr-crew codex-list`, then run `he
 
 Codex sandbox permissions remain in effect. Git metadata can require approvals even in workspace-write mode. If a board writer uses a worktree, explicitly include the main checkout's `.herdr` directory in `additional_dirs` when it needs to write the board. Crew supplies absolute board/schema paths and does not automatically grant access to the entire main checkout. `check` validates only the agents selected by the crew; repairing an existing board does not require a working Codex installation or trusted hook.
 
-### Experimental native Codex tree
+### Native Codex tree mode (`codex_tree = true`)
 
-A separate prototype starts one Codex coordinator in Herdr and lets it create worker roles as native subagents in the same collaboration tree. The coordinator assigns followups through `collaboration`; each worker's final response returns to it automatically. This coordination works within `workspace-write` without giving workers access to the Herdr socket. In the tested CLI, workers have no `send_message` tool for intermediate updates, so the coordinator forwards results and handles questions returned in their final responses.
+For multi-role Codex presets (`review`, `parallel`, `research`), `herdr-crew init` and first-time `herdr-crew up` let you choose between **tabs** (default: independent Herdr tabs with optional worktrees) and **tree** (`--topology tree`, writing `codex_tree = true`):
 
-Herdr shows a coordinator tab and a board tab. Inspect the worker threads with Codex `/subagents`; they do not have their own Herdr tabs. The prototype supports Codex roles in a shared checkout and inherits the parent's permissions. Its generator sets `experimental_codex_tree = true` to select native coordination instructions for the single coordinator; it rejects unsupported extras and initial messages. It was verified with Codex 0.163.0, Herdr 0.9.5 and the real `gpt-6.1-sol` model, including review/fix handoff and the same worker identities after a cold restart.
+```sh
+herdr-crew init --agent codex --preset review --topology tree --yes
+```
 
-This mode is available through the experiment scripts, not a released `up` option. `up --agent codex` continues to start independent role sessions. See the [native tree guide](docs/codex-tree-experiment.md) for preparation, offline and live test commands, communication behavior, recovery requirements and remaining limits.
+In tree mode, Herdr starts one Codex coordinator tab and the status board tab, without `[worktrees]` or a Git remote requirement. The coordinator spawns manifest worker roles as native subagents in the same collaboration tree (`spawn_agent` / `followup_task` / `list_agents`); each worker's final response returns to the coordinator automatically without Herdr socket access, keeping `workspace-write` permissions intact. Inspect worker threads with Codex `/subagents`.
+
+Tree mode requires Codex 0.163.0+ with `features.multi_agent_v2 = true` in `~/.codex/config.toml` and runs all workers in the shared main checkout (for `parallel`, assign disjoint files before parallel edits). Only the coordinator writes `.herdr/status.json`, tracking itself and any active or tracked subagent workers in `sessions[]`. `experimental_codex_tree = true` remains accepted as a backward-compatible alias, and `experiments/codex_tree.py` remains available for converting an existing multi-tab crew into a disposable checkout. See the [native Codex tree guide](docs/codex-tree-experiment.md) for preparation, communication details, recovery requirements and limits.
 
 ## Claude Code options
 
@@ -280,11 +284,7 @@ The coordinator delegates manifest workers via Antigravity's native subagent too
 - Implementers use `TypeName: "self"` with `Workspace: "share"` for isolated native git worktrees (or `Workspace: "inherit"` in `review --shared-checkout`).
 - Reviewers and researchers use `TypeName: "research"` with `Workspace: "inherit"` (read-only).
 - Worker communication stays inside `agy` with zero Herdr socket access, so `agy`'s default `auto` mode and terminal sandbox work without friction.
-- Only the coordinator writes `.herdr/status.json`; subagent messages never grant user approval.
-
-### Independent tabs (existing or mixed-agent configs)
-
-Existing or manually authored multi-tab `agy` configurations (without `agy_tree = true`, for example mixed-agent crews combining `agy` with `claude`/`codex`/`pi`, or separate Herdr tabs per role) remain supported at runtime. Independent `agy` tabs communicate via `herdr-crew send`; note that `agy`'s terminal sandbox (`--sandbox` / `--mode auto`) normally blocks access to the local Herdr socket outside the workspace unless allowed.
+- Only the coordinator writes `.herdr/status.json`, tracking itself and any active or tracked native subagent workers in `sessions[]` using valid lowercase worker names (e.g. `dev`, `reviewer`); subagent messages never grant user approval.
 
 ```toml
 version = 1
@@ -306,6 +306,10 @@ writer = "payments-lead"
 name = "payments-lead"
 prompt = '''You are {{NAME}} in {{REPO}}. Coordinate the manifest workers via invoke_subagent.'''
 ```
+
+### Independent tabs (existing or mixed-agent configs)
+
+Existing or manually authored multi-tab `agy` configurations (without `agy_tree = true`, for example mixed-agent crews combining `agy` with `claude`/`codex`/`pi`, or separate Herdr tabs per role) remain supported at runtime. Independent `agy` tabs communicate via `herdr-crew send`; note that `agy`'s terminal sandbox (`--sandbox` / `--mode auto`) normally blocks access to the local Herdr socket outside the workspace unless allowed.
 
 | `agy` option | Values |
 | --- | --- |
@@ -377,7 +381,7 @@ in [docs/herdr-core.md](docs/herdr-core.md).
 herdr-crew init
 ```
 
-The wizard asks for a project name, a workflow, the agent (`claude`, `codex`, `pi` or `agy`), a model profile, worktree/isolation settings and generated-file ignore rules. It previews the complete configuration before saving. In a terminal it opens a full-screen wizard (arrow keys or numbers to choose, Enter to continue, Esc to go back) that shows each role's model and effort as you pick a profile; command-line flags prefill its answers. `--no-tui` keeps the line-by-line questions, which also run whenever input is not a terminal. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
+The wizard asks for a project name, a workflow, the agent (`claude`, `codex`, `pi` or `agy`), a topology (`tabs` or `tree` for multi-role Codex crews), a model profile, worktree/isolation settings and generated-file ignore rules. It previews the complete configuration before saving. In a terminal it opens a full-screen wizard (arrow keys or numbers to choose, Enter to continue, Esc to go back) that shows each role's model and effort as you pick a profile; command-line flags prefill its answers. `--no-tui` keeps the line-by-line questions, which also run whenever input is not a terminal. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
 
 | Preset | Agent sessions | Use it for |
 | --- | --- | --- |
@@ -424,13 +428,13 @@ Generated board files, prompts and optional `.worktrees/` entries are appended t
 ```text
 herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi|agy]
-       [--models inherit|economy|balanced|quality]
+       [--topology tabs|tree] [--models inherit|economy|balanced|quality]
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
        [--dry-run]
                                  configure a crew with the setup wizard
   config                         edit each role's agent, model and effort in a terminal UI
   up [--agent claude|codex|pi|agy] [--no-attach] [--dry-run]
-     [--preset ...] [--models ...] [--name NAME]
+     [--preset ...] [--topology tabs|tree] [--models ...] [--name NAME]
      [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
                                  (setup options as for init); --agent on an existing
@@ -515,6 +519,7 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
 | Key                | Required         | Meaning                                                                                                                                                                                             |
 | ------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `kind`             | no               | Project agent default: `claude`, `codex`, `pi` or `agy`; absent means Claude. |
+| `codex_tree`       | no               | `true` for single-coordinator Codex native subagent tree mode (requires 1 Codex role without `worktree` or `extra`). `experimental_codex_tree` is accepted as a legacy alias. |
 | `agy_tree`         | no               | `true` for single-coordinator `agy` native subagent tree mode (requires 1 `agy` role without `worktree` or `extra`). `experimental_agy_tree` is accepted as a legacy alias. |
 | `claude`           | no               | Typed defaults for Claude Code roles, described above. |
 | `codex`            | no               | Typed defaults for Codex roles, described above. |

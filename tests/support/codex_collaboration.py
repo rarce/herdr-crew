@@ -356,7 +356,7 @@ try:
     start()
     print(run_crew("up", "--no-attach"), flush=True)
     rendered = repo.joinpath(".herdr/prompts/tree-lead.txt").read_text()
-    runtime = rendered.split("Crew runtime communication (experimental Codex tree):", 1)[1]
+    runtime = rendered.split("Crew runtime communication (Codex native tree):", 1)[1]
     assert "native final responses" in runtime
     assert "Crew roles are independent" not in runtime and "relay" not in runtime
     wait_for("native tree bootstrap", lambda: completed("bootstrap"), seconds=45)
