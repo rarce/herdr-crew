@@ -250,9 +250,17 @@ try:
     home.joinpath("config.toml").write_text(codex_config + '\n[hooks.state.' + json.dumps(hook["key"]) + ']\ntrusted_hash = ' + json.dumps(hook["currentHash"]) + '\n')
     start()
     print(run_crew("up", "--no-attach"), flush=True)
+    # Herdr can report the agent started before it publishes the native conversation ID.
+    wait_for("initial interactive agents", agents_ready)
+    wait_for("initial native IDs", lambda: all(
+        panes().get(role, {}).get("agent_session", {}).get("value") for role in ("lead", "dev")
+    ))
     initial = panes()
     ids = {role: initial[role]["agent_session"]["value"] for role in ["lead", "dev"]}
     assert ids["lead"] != ids["dev"]
+    preflight = run_crew("send", "--check", "dev", sender="lead")
+    assert "native Codex queue (queue-store write access untested)" in preflight, preflight
+    assert "No message sent" in preflight, preflight
     send("lead", "dev", "PROBE_TO_DEV\nUnicode «á»; quotes ' and `commands` stay literal.")
     verify_delivery("PROBE_TO_DEV", "dev")
     peer_map = json.loads(run_crew("codex-peers"))
@@ -271,6 +279,8 @@ try:
     context = json.dumps(deliveries("PROBE_TO_DEV")[0].get("input", []))
     assert "codex_tui.send_message_to_thread" in context
     assert "codex-peers" in context
+    assert "send --check <session>" in context
+    assert "already has an active writer" in context
     assert "use the authorized crew send route" in context
     print("Real CLI send_message_to_thread available: " + str(native_available)
           + "; project-local discovery verified; testing crew queue fallback.", flush=True)

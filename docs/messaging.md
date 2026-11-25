@@ -112,18 +112,23 @@ This is still text the model is asked to respect. It is not enforcement (§7).
 
 ### 4.5 Repeats
 
-`send` refuses an identical body to the same receiver within 60 seconds, and more than 10 messages from one sender to one receiver within 10 minutes. It returns exit 75 and tells the model to batch its messages. State lives in `herdr-crew-send.json` in the repository's common Git directory, next to the `up` lock: private to the repository's owner, shared by its worktrees, and never in `git status`. The file is locked from the check to the write, so concurrent sends can't both pass. It is best effort: a record that can't be opened or locked never blocks a message. This is a brake on loops between two models, not a precise limit.
+`send` refuses an identical body to the same receiver within 60 seconds, and more than 10 submissions from one sender to one receiver within 10 minutes. It records successful submissions and failures that may already have delivered. State lives in `herdr-crew-send.json` in the repository's common Git directory. The file is locked from the check to the write so concurrent sends can't both pass. This best-effort guard needs access to the record and applies only to sends through Crew by the same sender. For an uncertain result, verify receipt before retrying through any route.
 
 ### 4.6 Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Queued natively (`queued to`) or typed into the receiver (`sent to`); no processing receipt. |
+| 0 | Queued natively (`queued to`), typed into the receiver (`sent to`), or route inspected with `--check`. Ask the recipient to acknowledge receipt. |
 | 2 | Usage or configuration error. |
-| 75 | Rate limit; retry later or batch. |
+| 75 | Rate limit. Check receipt before repeating a submission. Batch distinct messages. |
 | 76 | Receiver blocked at a dialog; the user must act first. |
-| 77 | The herdr socket refused the connection ("Operation not permitted"), as a sandbox does. The message says: "No direct channel from this session: report in your output or commits, or ask the user to relay." |
+| 77 | Effective permissions denied the host socket. An operator can relay in the recipient's pane or use `send` from a terminal that already has access. |
 | 1 | Anything else, including a stopped server, a stale Codex binding or native queue failure. A failed native command may already have enqueued its message; it is never retried through terminal input. |
+
+`send --check <session>` runs recipient and route validation from the caller's
+environment without reading stdin, submitting a message or updating the repeat
+record. It reports which route Crew would use. Terminal submission, native
+queue-store writes and optional Codex host sends require separate verification.
 
 ## 5. `{{PEERS}}`: telling each role its channels
 

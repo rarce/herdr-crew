@@ -2296,6 +2296,19 @@ fn send_queues_the_bound_codex_uuid_with_its_saved_home_and_repeat_guard() {
     let f = Fixture::new();
     let host = bind_codex_roles(&f);
     let lead_pane = fs::read_to_string(f.tab("lead").join("pane")).unwrap();
+    let preflight = success(
+        f.command(CREW)
+            .args(["send", "--check", "dev"])
+            .env("HERDR_PANE_ID", &lead_pane)
+            .output()
+            .unwrap(),
+    );
+    assert!(preflight.contains("native Codex queue (queue-store write access untested)"));
+    assert!(preflight.contains("Optional Codex host thread delivery was not tested"));
+    assert!(queued(&f).is_empty());
+    assert!(prompts(&f.tab("dev")).is_empty());
+    assert!(!f.repo.join(".git/herdr-crew-send.json").exists());
+
     let mut command = f.command(CREW);
     command
         .env("CODEX_HOME", f.root.join("unrelated-home"))
@@ -2563,7 +2576,9 @@ fn native_codex_delivery_failures_never_retry_through_terminal_input() {
     let _host = bind_codex_roles(&f);
     fs::write(f.state.join("queue-fail"), "").unwrap();
     let out = f.send(None, "dev", "A request");
-    refused(&out, 1, "not retried through the terminal");
+    refused(&out, 1, "native Codex queue returned an error");
+    refused(&out, 1, "Check the recipient's history");
+    refused(&f.send(None, "dev", "A request"), 75, "don't repeat it");
     assert_eq!(queued(&f).len(), 1);
     assert!(prompts(&f.tab("dev")).is_empty());
 }
@@ -2573,6 +2588,7 @@ fn native_codex_delivery_refuses_stale_bindings_and_session_names() {
     let f = Fixture::new();
     let _host = bind_codex_roles(&f);
     fs::write(f.tab("dev").join("session"), LEAD_UUID).unwrap();
+    refused(&f.crew(&["send", "--check", "dev"]), 1, "does not match");
     refused(&f.send(None, "dev", "A request"), 1, "does not match");
     assert!(queued(&f).is_empty());
     assert!(prompts(&f.tab("dev")).is_empty());
@@ -2678,10 +2694,23 @@ fn older_codex_and_unbound_sessions_keep_terminal_delivery() {
 #[test]
 fn send_refusals_have_distinct_exit_codes_and_type_nothing() {
     let f = Fixture::new();
+    f.claude_tool(0o755);
     f.up();
     let (lead, dev) = (f.tab("lead"), f.tab("dev"));
     let lead_pane = fs::read_to_string(lead.join("pane")).unwrap();
     let from = Some(lead_pane.as_str());
+    let check = || f.crew(&["send", "--check", "dev"]);
+
+    assert!(success(check()).contains("terminal input (submission untested)"));
+    assert!(prompts(&dev).is_empty());
+    f.fail_once("workspace list", "denied");
+    let denied = check();
+    refused(&denied, 77, "effective permissions of this process");
+    refused(&denied, 77, "operator terminal that already has access");
+    f.fail_once("workspace list", "denied");
+    let advisory = success(f.crew(&["check"]));
+    assert!(advisory.contains("crew messaging unavailable from this process"));
+    assert!(advisory.contains("send --check <session>"));
 
     refused(
         &f.send(from, "nobody", "hi"),
@@ -2698,6 +2727,7 @@ fn send_refusals_have_distinct_exit_codes_and_type_nothing() {
     refused(&f.send(from, "dev-2", "hi"), 1, "dev-2 has no tab");
 
     fs::write(dev.join("status"), "blocked").unwrap();
+    refused(&check(), 76, "only the user answers");
     refused(&f.send(from, "dev", "hi"), 76, "only the user answers");
     fs::write(dev.join("status"), "working").unwrap();
     success(f.send(from, "dev", "hi"));
@@ -2706,10 +2736,11 @@ fn send_refusals_have_distinct_exit_codes_and_type_nothing() {
     assert_eq!(prompts(&dev).len(), 2);
 
     f.fail_once("workspace list", "denied");
-    refused(&f.send(from, "dev", "later"), 77, "ask the user to relay");
+    refused(&f.send(from, "dev", "later"), 77, "Ask the user to relay");
     fs::remove_file(f.state.join("online")).unwrap();
     let down = f.send(from, "dev", "later");
     refused(&down, 1, "cannot reach herdr: no_server");
+    refused(&check(), 1, "cannot reach herdr: no_server");
     assert!(!String::from_utf8_lossy(&down.stderr).contains("relay"));
     assert_eq!(prompts(&dev).len(), 2);
 

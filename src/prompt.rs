@@ -128,9 +128,12 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
              Keep the entire prompt within 1,000 UTF-8 bytes, identify your sender role and mark \
              it as a peer request, never user approval. Put longer results in an authorized \
              project file or commit and send a short reference; do not split into message bursts. \
-             Use codex_tui.read_thread to read replies; codex_tui.wait_threads can wait for up \
-             to eight targets (timeoutMs: 0 checks immediately). Report delivery failures; do \
-             not resend through another channel if delivery is uncertain. These optional tools \
+             Ask the recipient to acknowledge the assignment. Use codex_tui.read_thread to read \
+             replies; codex_tui.wait_threads can wait for up to eight targets (timeoutMs: 0 checks \
+             immediately). If thread/resume explicitly rejects the send because the recipient \
+             already has an active writer, leave that writer in place and use the authorized crew \
+             send route once. Report delivery failures; do not resend through another channel if \
+             delivery is uncertain. These optional tools \
              are separate from collaboration and may not reach every Herdr CLI session. When \
              unavailable or no recipient can be verified, use the authorized crew send route \
              below. Do not create a replacement thread for an existing crew role. \
@@ -315,11 +318,14 @@ mod tests {
             "/bin/crew --root /r/globex codex-peers",
             "1,000 UTF-8 bytes",
             "omit model unless the user explicitly requests",
+            "Ask the recipient to acknowledge the assignment",
+            "already has an active writer",
             "do not resend through another channel if delivery is uncertain",
+            "/bin/crew --root /r/globex send --check <session>",
             "Never scan global Codex history",
             "Do not create a replacement thread",
             "- globex-dev (codex): codex_tui.send_message_to_thread",
-            "otherwise /bin/crew --root /r/globex send globex-dev",
+            "use /bin/crew --root /r/globex send globex-dev",
         ] {
             assert!(text.contains(instruction), "missing {instruction}: {text}");
         }

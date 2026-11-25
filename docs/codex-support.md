@@ -39,6 +39,31 @@ create replacement tasks, or retry uncertain delivery through another channel.
 Native delivery bypasses crew's command-level framing, rate and dialog checks;
 these tools retain their host's behavior and do not grant peer approval.
 
+### Live peer handoff
+
+| Configuration | Supported route |
+| --- | --- |
+| The optional Codex host send can address the verified thread | Send once with `codex_tui.send_message_to_thread`. Ask for acknowledgment and look for it with `read_thread`. |
+| The host tool is absent, cannot verify the recipient, or explicitly rejects `thread/resume` because the live thread already has an active writer | Use `herdr-crew send <role>` if the sender can reach Herdr. On the Herdr TUI, compatible bound recipients use the durable Codex queue with their saved home and profile. The sender needs write access to that queue store. The running Codex process consumes the message without a writer takeover. |
+| The sender can reach Herdr but the receiver has an older CLI, a legacy unversioned binding, or no binding | Crew uses terminal input. The herdr-core backend also uses terminal input. |
+| Managed policy denies the host socket and the optional host send is unavailable or explicitly refused | Ask the operator to relay once in the recipient's pane or run the crew command from an operator terminal with existing access. |
+
+Run `herdr-crew --root <project> send --check <role>` from the lead's session
+before assigning work. Exit 77 identifies a permission-denied host connection
+from that process. A successful check identifies the selected route and the live
+recipient state at the time of the probe. It leaves the queue and terminal input
+untouched, so it cannot confirm write access or delivery. The ordinary
+`herdr-crew check` still validates setup and reports a denied Herdr TUI connection
+as a messaging advisory.
+
+When the host response explicitly says `thread/resume failed` because the thread
+`already has an active writer`, the resume step failed. Leave the writer running
+and use the authorized crew route once. For timeouts or other ambiguous results,
+check the recipient's history or wait for acknowledgment before attempting
+another delivery. [Issue #27](https://github.com/rarce/herdr-crew/issues/27)
+
+### Observed host behavior
+
 A manual experiment found the user's existing `herdr-crew-2` thread absent from
 `list_threads`, verified its known ID through `read_thread`, sent a prompt and
 received `CREW_EXISTING_SESSION_ACK` with the expected repository directory.
