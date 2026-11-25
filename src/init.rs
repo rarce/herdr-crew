@@ -102,10 +102,60 @@ impl Preset {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Topology {
+    Tree,
+    Tabs,
+}
+
+impl Topology {
+    pub(crate) const ALL: [Self; 2] = [Self::Tree, Self::Tabs];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "tree" => Some(Self::Tree),
+            "tabs" => Some(Self::Tabs),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Tree => "tree",
+            Self::Tabs => "tabs",
+        }
+    }
+
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Tree => {
+                "1 coordinator + native subagents; no sandbox socket friction (recommended)"
+            }
+            Self::Tabs => "independent Herdr tabs per role; uses herdr-crew send",
+        }
+    }
+}
+
+pub(crate) fn supports_tree(agent: Kind, preset: Preset) -> bool {
+    agent == Kind::Agy && preset != Preset::Solo
+}
+
+pub(crate) fn configured_roles(
+    preset: Preset,
+    topology: Topology,
+) -> &'static [(&'static str, Duty)] {
+    if topology == Topology::Tree {
+        &preset.roles()[..1]
+    } else {
+        preset.roles()
+    }
+}
+
 #[derive(Default)]
 pub struct Options {
     pub agent: Option<crate::agent::Kind>,
     pub preset: Option<Preset>,
+    pub topology: Option<Topology>,
     pub models: Option<Profile>,
     pub name: Option<String>,
     pub base: Option<String>,
@@ -129,19 +179,25 @@ pub struct Selection {
     pub agent: crate::agent::Kind,
     pub name: String,
     pub preset: Preset,
+    pub topology: Topology,
     pub profile: Profile,
     pub overrides: BTreeMap<String, RoleModelOverride>,
     pub base: Option<String>,
+    /// In `tree` mode, whether implementer workers use isolated native worktrees (`Workspace: "share"`)
+    /// rather than the shared checkout (`Workspace: "inherit"`).
+    pub tree_isolated: bool,
     pub ignore: bool,
 }
 
 impl Selection {
-    /// Whether any role's effective model or effort differs from the selected profile.
+    /// Whether any configured role's effective model or effort differs from the selected profile.
     pub fn is_customized(&self) -> bool {
-        self.preset.roles().iter().any(|(suffix, duty)| {
-            role_options(self.agent, self.profile, *duty, self.overrides.get(*suffix))
-                != self.profile.options(self.agent, *duty)
-        })
+        configured_roles(self.preset, self.topology)
+            .iter()
+            .any(|(suffix, duty)| {
+                role_options(self.agent, self.profile, *duty, self.overrides.get(*suffix))
+                    != self.profile.options(self.agent, *duty)
+            })
     }
 }
 
@@ -227,6 +283,8 @@ pub(crate) fn validate_role_options(options: &AgentOptions) -> Result<(), String
 struct Template {
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<crate::agent::Kind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agy_tree: Option<bool>,
     version: i64,
     common_prompt: String,
     start_message: &'static str,
@@ -346,12 +404,69 @@ fn io_fail(error: io::Error) -> Fail {
     Fail::run(error.to_string())
 }
 
+fn validate_options(options: &Options) -> Result<(), Fail> {
+    if let Some(name) = &options.name
+        && !valid_name(name)
+    {
+        return Err(Fail::usage(format!(
+            "--name must match [a-z][a-z0-9_-]{{0,{}}}",
+            MAX_PREFIX - 1
+        )));
+    }
+    let effective_preset = options
+        .preset
+        .or_else(|| options.yes.then_some(Preset::Solo));
+    let effective_agent = options
+        .agent
+        .or_else(|| options.yes.then_some(Kind::default()));
+    if options.shared_checkout && effective_preset.is_some_and(|p| p != Preset::Review) {
+        return Err(Fail::usage(
+            "--shared-checkout applies only to the review preset; parallel requires worktrees",
+        ));
+    }
+    if options.topology == Some(Topology::Tree) {
+        if effective_agent.is_some_and(|a| a != Kind::Agy) {
+            return Err(Fail::usage("--topology tree applies only with --agent agy"));
+        }
+        if effective_preset == Some(Preset::Solo) {
+            return Err(Fail::usage(
+                "--topology tree applies only to multi-role presets (review, parallel, research)",
+            ));
+        }
+        if options.base.is_some() {
+            return Err(Fail::usage(
+                "--base does not apply with --topology tree (tree mode does not use [worktrees])",
+            ));
+        }
+    }
+    if options.base.is_some() {
+        if options.shared_checkout
+            || effective_preset.is_some_and(|p| !matches!(p, Preset::Review | Preset::Parallel))
+        {
+            return Err(Fail::usage(
+                "--base requires a review or parallel preset using worktrees",
+            ));
+        }
+        if options.yes
+            && effective_agent == Some(Kind::Agy)
+            && options.topology.is_none()
+            && effective_preset.is_some_and(|p| matches!(p, Preset::Review | Preset::Parallel))
+        {
+            return Err(Fail::usage(
+                "--base does not apply in agy tree mode (use --topology tabs for worktree tabs)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn choose(
     root: &Path,
     options: &Options,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<Selection, Fail> {
+    validate_options(options)?;
     let default_name = suggested_name(root);
     let name = if let Some(name) = &options.name {
         name.clone()
@@ -413,6 +528,11 @@ fn choose(
             "--shared-checkout applies only to the review preset; parallel requires worktrees",
         ));
     }
+    if options.topology == Some(Topology::Tree) && preset == Preset::Solo {
+        return Err(Fail::usage(
+            "--topology tree applies only to multi-role presets (review, parallel, research)",
+        ));
+    }
     if options.base.is_some()
         && (options.shared_checkout || !matches!(preset, Preset::Review | Preset::Parallel))
     {
@@ -420,11 +540,16 @@ fn choose(
             "--base requires a review or parallel preset using worktrees",
         ));
     }
-    // Flag combinations are checked first, so an invalid command line fails before asking.
-    let flags_need_worktrees = preset == Preset::Parallel
-        || (preset == Preset::Review
-            && !options.shared_checkout
-            && (options.base.is_some() || options.yes));
+    // Check remote before asking for the agent when flags already require git worktrees.
+    let known_tabs = options.agent.is_some_and(|a| a != Kind::Agy)
+        || (options.yes && options.agent.is_none())
+        || options.topology == Some(Topology::Tabs)
+        || options.base.is_some();
+    let flags_need_worktrees = known_tabs
+        && (preset == Preset::Parallel
+            || (preset == Preset::Review
+                && !options.shared_checkout
+                && (options.base.is_some() || options.yes)));
     if flags_need_worktrees && !git::has_remote(root).map_err(Fail::run)? {
         return Err(no_remote());
     }
@@ -448,6 +573,59 @@ fn choose(
             writeln!(output, "Enter one of: {}.", names.join(", ")).map_err(io_fail)?;
         }
     };
+    if options.topology == Some(Topology::Tree) && agent != Kind::Agy {
+        return Err(Fail::usage("--topology tree applies only with --agent agy"));
+    }
+    let topology = if supports_tree(agent, preset) {
+        if let Some(topology) = options.topology {
+            topology
+        } else if options.yes {
+            Topology::Tree
+        } else {
+            writeln!(output, "\nChoose a topology for agy roles:").map_err(io_fail)?;
+            for (i, topology) in Topology::ALL.iter().enumerate() {
+                writeln!(
+                    output,
+                    "  {}. {}: {}",
+                    i + 1,
+                    topology.as_str(),
+                    topology.description()
+                )
+                .map_err(io_fail)?;
+            }
+            loop {
+                let choice = ask(input, output, "Topology", Some("1"))?;
+                if let Some(topology) =
+                    Topology::parse(&choice.to_ascii_lowercase()).or_else(|| {
+                        choice
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|i| i.checked_sub(1))
+                            .and_then(|i| Topology::ALL.get(i).copied())
+                    })
+                {
+                    break topology;
+                }
+                writeln!(output, "Enter 1-2 or tree, tabs.").map_err(io_fail)?;
+            }
+        }
+    } else {
+        Topology::Tabs
+    };
+    if topology == Topology::Tree && options.base.is_some() {
+        return Err(Fail::usage(
+            "--base does not apply with --topology tree (use --topology tabs for worktree tabs)",
+        ));
+    }
+    if topology == Topology::Tabs {
+        let tabs_need_worktrees = preset == Preset::Parallel
+            || (preset == Preset::Review
+                && !options.shared_checkout
+                && (options.base.is_some() || options.yes));
+        if tabs_need_worktrees && !git::has_remote(root).map_err(Fail::run)? {
+            return Err(no_remote());
+        }
+    }
     let profile = if let Some(profile) = options.models {
         profile
     } else if options.yes {
@@ -496,7 +674,7 @@ fn choose(
     {
         let efforts_hint = models::efforts(agent).join(", ");
         let effort_key = models::effort_key(agent);
-        for (suffix, duty) in preset.roles() {
+        for (suffix, duty) in configured_roles(preset, topology) {
             let (default_model, default_effort) =
                 options_model_effort(&profile.options(agent, *duty));
             writeln!(output, "\nRole {name}-{suffix} ({}):", duty.as_str()).map_err(io_fail)?;
@@ -544,59 +722,76 @@ fn choose(
             }
         }
     }
-    let suggested_base = git::default_base(root);
-    let isolated = match preset {
-        Preset::Parallel => true,
-        Preset::Review if options.shared_checkout => false,
-        Preset::Review if options.base.is_some() || options.yes => true,
-        Preset::Review => yes_no(
-            input,
-            output,
-            "Use separate worktrees for development and review?",
-            suggested_base.is_some(),
-        )?,
-        _ => false,
-    };
-    let base = if isolated {
-        // Also reached after the interactive review answers yes to worktrees.
-        if !git::has_remote(root).map_err(Fail::run)? {
-            return Err(no_remote());
-        }
-        writeln!(output, "Worktrees start from a remote branch, not uncommitted local changes. No fetch runs during setup.").map_err(io_fail)?;
-        // An explicit base, from --base or the --yes default, is used once; the prompt
-        // follows when it is declined. Without --yes, an unfetched base needs confirmation.
-        let mut given = options.base.clone();
-        if given.is_none() && options.yes {
-            given = Some(suggested_base.clone().ok_or_else(|| Fail::usage("no remote branch found; set --base REMOTE/BRANCH, or use review --shared-checkout"))?);
-        }
-        loop {
-            let explicit = given.take();
-            let base = match &explicit {
-                Some(base) => base.clone(),
-                None => ask(
-                    input,
-                    output,
-                    "Worktree base (configured remote/branch)",
-                    suggested_base.as_deref(),
-                )?,
-            };
-            if let Err(error) = git::validate_base(root, &base) {
-                if explicit.is_some() {
-                    return Err(Fail::usage(error));
-                }
-                writeln!(output, "{error}").map_err(io_fail)?;
-                continue;
-            }
-            if git::knows_base(root, &base) {
-                break Some(base);
-            }
-            writeln!(output, "{}", unfetched(&base)).map_err(io_fail)?;
-            if options.yes || yes_no(input, output, &format!("Use {base} anyway?"), false)? {
-                break Some(base);
-            }
-        }
+    let (base, tree_isolated) = if topology == Topology::Tree {
+        let tree_isolated = match preset {
+            Preset::Parallel => true,
+            Preset::Review if options.shared_checkout => false,
+            Preset::Review if options.yes => true,
+            Preset::Review => yes_no(
+                input,
+                output,
+                "Use isolated native worktrees (Workspace: \"share\") for implementation workers?",
+                true,
+            )?,
+            _ => false,
+        };
+        (None, tree_isolated)
     } else {
-        None
+        let suggested_base = git::default_base(root);
+        let isolated = match preset {
+            Preset::Parallel => true,
+            Preset::Review if options.shared_checkout => false,
+            Preset::Review if options.base.is_some() || options.yes => true,
+            Preset::Review => yes_no(
+                input,
+                output,
+                "Use separate worktrees for development and review?",
+                suggested_base.is_some(),
+            )?,
+            _ => false,
+        };
+        let base = if isolated {
+            // Also reached after the interactive review answers yes to worktrees.
+            if !git::has_remote(root).map_err(Fail::run)? {
+                return Err(no_remote());
+            }
+            writeln!(output, "Worktrees start from a remote branch, not uncommitted local changes. No fetch runs during setup.").map_err(io_fail)?;
+            // An explicit base, from --base or the --yes default, is used once; the prompt
+            // follows when it is declined. Without --yes, an unfetched base needs confirmation.
+            let mut given = options.base.clone();
+            if given.is_none() && options.yes {
+                given = Some(suggested_base.clone().ok_or_else(|| Fail::usage("no remote branch found; set --base REMOTE/BRANCH, or use review --shared-checkout"))?);
+            }
+            loop {
+                let explicit = given.take();
+                let base = match &explicit {
+                    Some(base) => base.clone(),
+                    None => ask(
+                        input,
+                        output,
+                        "Worktree base (configured remote/branch)",
+                        suggested_base.as_deref(),
+                    )?,
+                };
+                if let Err(error) = git::validate_base(root, &base) {
+                    if explicit.is_some() {
+                        return Err(Fail::usage(error));
+                    }
+                    writeln!(output, "{error}").map_err(io_fail)?;
+                    continue;
+                }
+                if git::knows_base(root, &base) {
+                    break Some(base);
+                }
+                writeln!(output, "{}", unfetched(&base)).map_err(io_fail)?;
+                if options.yes || yes_no(input, output, &format!("Use {base} anyway?"), false)? {
+                    break Some(base);
+                }
+            }
+        } else {
+            None
+        };
+        (base, false)
     };
     let ignore = !options.no_ignore
         && (options.yes
@@ -610,9 +805,11 @@ fn choose(
         agent,
         name,
         preset,
+        topology,
         profile,
         overrides,
         base,
+        tree_isolated,
         ignore,
     })
 }
@@ -629,66 +826,139 @@ pub(crate) fn unfetched(base: &str) -> String {
     )
 }
 
+fn duty_responsibilities(preset: Preset, kind: Duty) -> &'static str {
+    match kind {
+        Duty::Solo => {
+            "Own the full task: clarify acceptance, reproduce or understand the problem, implement a focused change, and validate it using the repository's actual commands. Keep investigation, editing and test feedback in one loop. Report the result and remaining limitations to the user."
+        }
+        Duty::Lead if preset == Preset::Research => {
+            "Define a common reproduction and independent hypotheses for research-a and research-b. Assign a bounded question, expected evidence and stopping condition to each researcher. Compare their reports, resolve contradictions with observations, and select one implementation decision. Perform or assign the chosen fix after consolidation, and validate the result before reporting it to the user."
+        }
+        Duty::Lead => {
+            "Coordinate the user's task. Define acceptance, dependencies, base commit, file ownership and a bounded assignment for each worker. Agree interfaces before parallel edits. Collect evidence and exact commits, request corrections, and integrate only reviewed deliveries in dependency order. Validate the combined result before accepting it. Handle requirements and architecture decisions yourself unless a separate investigation is useful."
+        }
+        Duty::Developer => {
+            "Implement only your assigned component. Reproduce relevant failures, preserve interfaces and file ownership, make focused changes, and run relevant reproduction and regression checks. Deliver the exact commit, affected files, commands and results, and limitations to the coordinator. Address reviewer findings; do not integrate another worker's changes yourself."
+        }
+        Duty::Reviewer => {
+            "Review the exact delivered commit against its acceptance criteria. Check correctness, regressions, interfaces and missing validation. Return actionable findings with file locations, consequences and reproduction steps. Request changes or explicitly accept with evidence. Do not silently fix the implementation; the developer owns corrections and the coordinator owns integration."
+        }
+        Duty::Researcher => {
+            "Investigate only the assigned hypothesis or question. Gather commands, observations, relevant code locations and primary references. Explain evidence for and against the hypothesis, uncertainty and a recommended next step. Report to the coordinator before any implementation. Do not edit source files, change Git state, or start shared services."
+        }
+    }
+}
+
+fn render_agy_tree_manifest(selection: &Selection, coordinator: &str) -> String {
+    let mut lines = vec![
+        "Manifest workers (spawn only on explicit delegation via invoke_subagent with these full role instructions):".to_string(),
+    ];
+    for (suffix, duty) in &selection.preset.roles()[1..] {
+        let type_name = match duty {
+            Duty::Developer => "self",
+            Duty::Reviewer | Duty::Researcher => "research",
+            Duty::Solo | Duty::Lead => unreachable!("manifest workers are non-lead roles"),
+        };
+        let workspace = match duty {
+            Duty::Developer if selection.tree_isolated => "share",
+            _ => "inherit",
+        };
+        let responsibilities = duty_responsibilities(selection.preset, *duty);
+        let isolation = match (duty, workspace) {
+            (Duty::Developer, "share") => {
+                "Works in an isolated native worktree (Workspace: \"share\"). Create or use a focused task branch before committing, preserve interfaces and file ownership, and never reset or delete another session's branch."
+            }
+            (Duty::Developer, _) => {
+                "Shares the main checkout (Workspace: \"inherit\"). Preserve the user's changes and do not switch or reset branches while other sessions use it. Only the assigned implementer edits source files; coordinate validation commands that generate files with the coordinator."
+            }
+            _ => {
+                "Read-only in the shared checkout (Workspace: \"inherit\"). Do not edit source files, change Git state, or start shared services."
+            }
+        };
+        lines.push(format!(
+            "- {suffix} (TypeName: \"{type_name}\", Workspace: \"{workspace}\"):\n  \
+             Responsibilities: {responsibilities}\n  \
+             Ownership and isolation: {isolation}\n  \
+             Reporting: Report progress, blockers, evidence, exact commits, validation commands/results and limitations to {coordinator} via your native subagent reply; never edit {{{{STATUS}}}} directly."
+        ));
+    }
+    lines.join("\n")
+}
+
 pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
     let coordinator = format!("{}-{}", selection.name, selection.preset.roles()[0].0);
+    let is_tree = selection.topology == Topology::Tree;
     let mut roles = Vec::new();
-    for (suffix, kind) in selection.preset.roles() {
-        let worktree = selection.base.is_some() && matches!(kind, Duty::Developer | Duty::Reviewer);
-        let responsibilities = match kind {
-            Duty::Solo => {
-                "Own the full task: clarify acceptance, reproduce or understand the problem, implement a focused change, and validate it using the repository's actual commands. Keep investigation, editing and test feedback in one loop. Report the result and remaining limitations to the user."
-            }
-            Duty::Lead if selection.preset == Preset::Research => {
-                "Define a common reproduction and independent hypotheses for research-a and research-b. Assign a bounded question, expected evidence and stopping condition to each researcher. Compare their reports, resolve contradictions with observations, and select one implementation decision. Perform or assign the chosen fix after consolidation, and validate the result before reporting it to the user."
-            }
-            Duty::Lead => {
-                "Coordinate the user's task. Define acceptance, dependencies, base commit, file ownership and a bounded assignment for each worker. Agree interfaces before parallel edits. Collect evidence and exact commits, request corrections, and integrate only reviewed deliveries in dependency order. Validate the combined result before accepting it. Handle requirements and architecture decisions yourself unless a separate investigation is useful."
-            }
-            Duty::Developer => {
-                "Implement only your assigned component. Reproduce relevant failures, preserve interfaces and file ownership, make focused changes, and run relevant reproduction and regression checks. Deliver the exact commit, affected files, commands and results, and limitations to the coordinator. Address reviewer findings; do not integrate another worker's changes yourself."
-            }
-            Duty::Reviewer => {
-                "Review the exact delivered commit against its acceptance criteria. Check correctness, regressions, interfaces and missing validation. Return actionable findings with file locations, consequences and reproduction steps. Request changes or explicitly accept with evidence. Do not silently fix the implementation; the developer owns corrections and the coordinator owns integration."
-            }
-            Duty::Researcher => {
-                "Investigate only the assigned hypothesis or question. Gather commands, observations, relevant code locations and primary references. Explain evidence for and against the hypothesis, uncertainty and a recommended next step. Report to the coordinator before any implementation. Do not edit source files, change Git state, or start shared services."
-            }
-        };
-        let reporting = if matches!(kind, Duty::Solo | Duty::Lead) {
-            "Report progress, blockers and accepted results to the user.".to_string()
-        } else {
-            format!(
-                "Report progress, blockers and deliveries to {coordinator}; ask the user to relay them if no direct channel is available."
-            )
-        };
-        let isolation = if worktree {
-            "You work in an isolated worktree. New worktrees start with detached HEAD from the configured remote base and do not inherit the lead's local edits. Check the assigned base and existing changes, then create a task branch before committing. For review, inspect the delivered commit and validate that exact version in your worktree without discarding local work. Git references are shared: never reset or delete another session's branch."
-        } else {
-            "You share the main checkout. Preserve the user's changes and do not switch or reset branches while other sessions use it. Only the assigned implementer edits source files; review and research are read-only. Coordinate validation commands that generate files with the implementer."
-        };
-        let (mut claude, mut codex, mut pi, mut agy) = (None, None, None, None);
-        match role_options(
+    if is_tree {
+        let (suffix, kind) = selection.preset.roles()[0];
+        let responsibilities = duty_responsibilities(selection.preset, kind);
+        let manifest = render_agy_tree_manifest(selection, &coordinator);
+        let agy = match role_options(
             selection.agent,
             selection.profile,
-            *kind,
-            selection.overrides.get(*suffix),
+            kind,
+            selection.overrides.get(suffix),
         ) {
-            AgentOptions::Claude(o) if o != ClaudeOptions::default() => claude = Some(o),
-            AgentOptions::Codex(o) if o != CodexOptions::default() => codex = Some(o),
-            AgentOptions::Pi(o) if o != PiOptions::default() => pi = Some(o),
-            AgentOptions::Agy(o) if o != AgyOptions::default() => agy = Some(o),
-            _ => {}
-        }
+            AgentOptions::Agy(o) if o != AgyOptions::default() => Some(o),
+            _ => None,
+        };
         roles.push(Role {
             name: format!("{}-{suffix}", selection.name),
-            prompt: format!("You are {{{{NAME}}}} in {{{{REPO}}}}.\n{responsibilities}\n{reporting}\n{isolation}\n"),
-            worktree,
-            extra: worktree && matches!(kind, Duty::Developer),
-            claude,
-            codex,
-            pi,
+            prompt: format!(
+                "You are {{{{NAME}}}} in {{{{REPO}}}}.\n\
+                 {responsibilities}\n\
+                 Report progress, blockers and accepted results to the user.\n\
+                 You coordinate in the main checkout and integrate reviewed deliveries. Preserve the user's changes and do not switch or reset branches unexpectedly.\n\n\
+                 {manifest}\n"
+            ),
+            worktree: false,
+            extra: false,
+            claude: None,
+            codex: None,
+            pi: None,
             agy,
         });
+    } else {
+        for (suffix, kind) in selection.preset.roles() {
+            let worktree =
+                selection.base.is_some() && matches!(kind, Duty::Developer | Duty::Reviewer);
+            let responsibilities = duty_responsibilities(selection.preset, *kind);
+            let reporting = if matches!(kind, Duty::Solo | Duty::Lead) {
+                "Report progress, blockers and accepted results to the user.".to_string()
+            } else {
+                format!(
+                    "Report progress, blockers and deliveries to {coordinator}; ask the user to relay them if no direct channel is available."
+                )
+            };
+            let isolation = if worktree {
+                "You work in an isolated worktree. New worktrees start with detached HEAD from the configured remote base and do not inherit the lead's local edits. Check the assigned base and existing changes, then create a task branch before committing. For review, inspect the delivered commit and validate that exact version in your worktree without discarding local work. Git references are shared: never reset or delete another session's branch."
+            } else {
+                "You share the main checkout. Preserve the user's changes and do not switch or reset branches while other sessions use it. Only the assigned implementer edits source files; review and research are read-only. Coordinate validation commands that generate files with the implementer."
+            };
+            let (mut claude, mut codex, mut pi, mut agy) = (None, None, None, None);
+            match role_options(
+                selection.agent,
+                selection.profile,
+                *kind,
+                selection.overrides.get(*suffix),
+            ) {
+                AgentOptions::Claude(o) if o != ClaudeOptions::default() => claude = Some(o),
+                AgentOptions::Codex(o) if o != CodexOptions::default() => codex = Some(o),
+                AgentOptions::Pi(o) if o != PiOptions::default() => pi = Some(o),
+                AgentOptions::Agy(o) if o != AgyOptions::default() => agy = Some(o),
+                _ => {}
+            }
+            roles.push(Role {
+                name: format!("{}-{suffix}", selection.name),
+                prompt: format!("You are {{{{NAME}}}} in {{{{REPO}}}}.\n{responsibilities}\n{reporting}\n{isolation}\n"),
+                worktree,
+                extra: worktree && matches!(kind, Duty::Developer),
+                claude,
+                codex,
+                pi,
+                agy,
+            });
+        }
     }
     let workflow = match selection.preset {
         Preset::Solo => {
@@ -704,18 +974,25 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
             "Common reproduction -> independent hypotheses -> evidence reports -> comparison by the lead -> one implementation decision. Researchers do not produce competing patches by default; the lead assigns or performs the chosen fix afterwards."
         }
     };
-    let expansion = if roles.iter().any(|role| role.extra) {
+    let expansion = if is_tree {
+        "Spawn manifest subagents only on explicit delegation when the task benefits from them."
+    } else if roles.iter().any(|role| role.extra) {
         "Add extra developers with {{LAUNCHER}} add <role> only when the user requests or approves it and the task has independent ownership."
     } else {
         "No extra instances are enabled in this configuration. Reconsider the workflow and role ownership before expanding the crew."
     };
     let template = Template {
         kind: (selection.agent != crate::agent::Kind::Claude).then_some(selection.agent),
+        agy_tree: is_tree.then_some(true),
         version: config::SUPPORTED_VERSION,
         common_prompt: format!(
             "Workflow: {workflow}\nFollow the repository's contributor instructions and discover its actual build, lint and test commands. Wait for an explicit task before changing files. A handoff includes objective, acceptance criteria, exact base and delivery commits, validation results and limitations. A 'done' report is not acceptance of the integrated result.\nOnly {coordinator} writes {{{{STATUS}}}}, following {{{{SCHEMA}}}}; other roles report status without editing the board. Write the whole board atomically through a .tmp file and rename.\nAdditional sessions cost time and tokens. {expansion}\n{{{{PEERS}}}}\n"
         ),
-        start_message: "Confirm your role in one line and wait for an explicit task before changing files.",
+        start_message: if is_tree {
+            "Confirm your coordinator role in one line and wait for an explicit task before changing files."
+        } else {
+            "Confirm your role in one line and wait for an explicit task before changing files."
+        },
         workspace: Workspace {
             label: selection.name.clone(),
         },
@@ -723,10 +1000,14 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
             tab: format!("{}-status", selection.name),
             writer: coordinator,
         },
-        worktrees: selection.base.as_ref().map(|base| Worktrees {
-            dir: ".worktrees",
-            base: base.clone(),
-        }),
+        worktrees: (!is_tree)
+            .then(|| {
+                selection.base.as_ref().map(|base| Worktrees {
+                    dir: ".worktrees",
+                    base: base.clone(),
+                })
+            })
+            .flatten(),
         roles,
     };
     let models_note = if selection.is_customized() {
@@ -734,8 +1015,9 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
     } else {
         selection.profile.as_str().to_string()
     };
+    let topology_note = if is_tree { ", agy tree topology" } else { "" };
     let text = format!(
-        "# Generated by herdr-crew init ({} workflow, {} models). Edit prompts and roles for your project.\n# Workflow guidance: https://github.com/rarce/herdr-crew/blob/main/docs/workflows.md\n# Models and effort: https://github.com/rarce/herdr-crew/blob/main/docs/models.md; change them with herdr-crew config\n{}",
+        "# Generated by herdr-crew init ({} workflow{topology_note}, {} models). Edit prompts and roles for your project.\n# Workflow guidance: https://github.com/rarce/herdr-crew/blob/main/docs/workflows.md\n# Models and effort: https://github.com/rarce/herdr-crew/blob/main/docs/models.md; change them with herdr-crew config\n{}",
         selection.preset.id(),
         models_note,
         toml::to_string_pretty(&template)
@@ -907,8 +1189,32 @@ pub(crate) fn summary(selection: &Selection) -> String {
             selection.profile.description()
         )
     };
+    if selection.topology == Topology::Tree {
+        let isolation = match selection.preset {
+            Preset::Research => "read-only in main checkout (Workspace: \"inherit\")",
+            _ if selection.tree_isolated => {
+                "isolated native worktrees (Workspace: \"share\") for implementers"
+            }
+            _ => "shared main checkout (Workspace: \"inherit\")",
+        };
+        return format!(
+            "{}\nWorkspace: {}\nAgent: {}\nTopology: tree (1 agy coordinator + native subagents)\nModels: {}\nWorker isolation: {}\nBoard writer: {}-{}",
+            selection.preset.description(),
+            selection.name,
+            selection.agent.as_str(),
+            models_summary,
+            isolation,
+            selection.name,
+            selection.preset.roles()[0].0
+        );
+    }
+    let topology_line = if supports_tree(selection.agent, selection.preset) {
+        "Topology: tabs (independent Herdr tabs)\n"
+    } else {
+        ""
+    };
     format!(
-        "{}\nWorkspace: {}\nAgent: {}\nModels: {}\nWorktree base: {}\nBoard writer: {}-{}",
+        "{}\nWorkspace: {}\nAgent: {}\n{topology_line}Models: {}\nWorktree base: {}\nBoard writer: {}-{}",
         selection.preset.description(),
         selection.name,
         selection.agent.as_str(),
@@ -1082,6 +1388,7 @@ pub fn setup(
 ) -> Result<bool, Fail> {
     if !options.yes && !options.no_tui && crate::tui::interactive() {
         ensure_new_config(root)?;
+        validate_options(options)?;
         let Some((selection, text)) = crate::tui::wizard::run(root, options).map_err(io_fail)?
         else {
             println!("Cancelled: no files created or changed.");
@@ -1119,9 +1426,11 @@ mod tests {
                 agent: crate::agent::Kind::Claude,
                 name: "a".repeat(MAX_PREFIX),
                 preset,
+                topology: Topology::Tabs,
                 profile: Profile::Balanced,
                 overrides: BTreeMap::new(),
                 base,
+                tree_isolated: false,
                 ignore: true,
             };
             let text =
@@ -1243,6 +1552,13 @@ mod tests {
         for options in [
             Options {
                 preset: Some(Preset::Parallel),
+                agent: Some(Kind::Claude),
+                ..Options::default()
+            },
+            Options {
+                preset: Some(Preset::Parallel),
+                agent: Some(Kind::Agy),
+                topology: Some(Topology::Tabs),
                 ..Options::default()
             },
             Options {
@@ -1412,9 +1728,11 @@ mod tests {
                 agent,
                 name: "demo".into(),
                 preset: Preset::Review,
+                topology: Topology::Tabs,
                 profile: Profile::Balanced,
                 overrides,
                 base: None,
+                tree_isolated: false,
                 ignore: false,
             };
             assert!(selection.is_customized());
@@ -1436,17 +1754,19 @@ mod tests {
     #[test]
     fn line_by_line_wizard_customizes_role_models_and_retries_invalid_settings() {
         let root = git::test_repo("init-custom-models");
-        // name=demo, workflow=2 (review), agent=agy, profile=3 (balanced), customize=y:
+        // name=demo, workflow=2 (review), agent=agy, topology=tabs, profile=3 (balanced), customize=y:
         // lead: invalid suffixed model + high effort -> retry with base model + xhigh
         // dev: keep default model, inherit effort
         // reviewer: inherit model, keep default effort
         // worktrees=n, ignore=n
-        let answers = "demo\n2\nagy\n3\ny\ngemini-4-neon-high\nhigh\nclaude-opus-5-5\nxhigh\n\ninherit\ninherit\n\nn\nn\n";
+        let answers = "demo\n2\nagy\ntabs\n3\ny\ngemini-4-neon-high\nhigh\nclaude-opus-5-5\nxhigh\n\ninherit\ninherit\n\nn\nn\n";
         let (selection, output) = choose_with(&root, &Options::default(), answers);
+        assert_eq!(selection.topology, Topology::Tabs);
         assert!(output.contains("Invalid setting:"), "{output}");
         assert!(selection.is_customized());
         let text = ok(render(&selection, &root));
         let config = config::Config::parse(&text, &root).unwrap();
+        assert!(!config.agy_tree);
         let lead = config.role("demo-lead").unwrap();
         assert_eq!(lead.agy.model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(lead.agy.effort.as_deref(), Some("xhigh"));
@@ -1456,6 +1776,134 @@ mod tests {
         let reviewer = config.role("demo-reviewer").unwrap();
         assert_eq!(reviewer.agy.model, None);
         assert_eq!(reviewer.agy.effort.as_deref(), Some("high"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn agy_tree_presets_render_valid_single_coordinator_manifest_without_remote() {
+        let root = git::test_repo("init-agy-tree");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["remote", "remove", "origin"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        for (preset, shared, expected_workers) in [
+            (
+                Preset::Review,
+                false,
+                vec![
+                    ("- dev (TypeName: \"self\", Workspace: \"share\")", true),
+                    (
+                        "- reviewer (TypeName: \"research\", Workspace: \"inherit\")",
+                        true,
+                    ),
+                ],
+            ),
+            (
+                Preset::Review,
+                true,
+                vec![
+                    ("- dev (TypeName: \"self\", Workspace: \"inherit\")", true),
+                    (
+                        "- reviewer (TypeName: \"research\", Workspace: \"inherit\")",
+                        true,
+                    ),
+                ],
+            ),
+            (
+                Preset::Parallel,
+                false,
+                vec![
+                    ("- dev-a (TypeName: \"self\", Workspace: \"share\")", true),
+                    ("- dev-b (TypeName: \"self\", Workspace: \"share\")", true),
+                    (
+                        "- reviewer (TypeName: \"research\", Workspace: \"inherit\")",
+                        true,
+                    ),
+                ],
+            ),
+            (
+                Preset::Research,
+                false,
+                vec![
+                    (
+                        "- research-a (TypeName: \"research\", Workspace: \"inherit\")",
+                        true,
+                    ),
+                    (
+                        "- research-b (TypeName: \"research\", Workspace: \"inherit\")",
+                        true,
+                    ),
+                ],
+            ),
+        ] {
+            let options = Options {
+                agent: Some(Kind::Agy),
+                preset: Some(preset),
+                name: Some("acme".into()),
+                shared_checkout: shared,
+                yes: true,
+                ..Options::default()
+            };
+            let (selection, _) = choose_with(&root, &options, "");
+            assert_eq!(selection.topology, Topology::Tree);
+            assert!(selection.base.is_none());
+            let text = ok(render(&selection, &root));
+            assert!(text.contains("agy_tree = true"), "{text}");
+            assert!(!text.contains("[worktrees]"), "{text}");
+            let config = config::Config::parse(&text, &root).unwrap();
+            assert!(config.agy_tree);
+            assert_eq!(config.kind, Kind::Agy);
+            assert!(config.worktrees.is_none());
+            assert_eq!(config.roles.len(), 1);
+            assert_eq!(config.roles[0].name, "acme-lead");
+            assert!(!config.roles[0].worktree);
+            assert!(!config.roles[0].extra);
+            assert_eq!(config.board.writer, "acme-lead");
+            let full_prompt =
+                crate::prompt::render(&config, "acme-lead", Path::new("/bin/herdr-crew"));
+            assert!(!full_prompt.contains("{{"));
+            assert!(full_prompt.contains("Crew runtime communication (agy native tree):"));
+            for (needle, present) in expected_workers {
+                assert_eq!(
+                    full_prompt.contains(needle),
+                    present,
+                    "{needle}\n{full_prompt}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn line_by_line_agy_tree_wizard_asks_topology_and_only_customizes_coordinator() {
+        let root = git::test_repo("init-agy-tree-wizard");
+        // name=demo, workflow=review, agent=agy, topology=default(tree), profile=balanced,
+        // customize=y -> only lead (model=claude-opus-5-5, effort=xhigh), isolation=y (share), ignore=n
+        let answers = "demo\n2\nagy\n\n3\ny\nclaude-opus-5-5\nxhigh\ny\nn\n";
+        let (selection, output) = choose_with(&root, &Options::default(), answers);
+        assert_eq!(selection.topology, Topology::Tree);
+        assert!(selection.tree_isolated);
+        assert!(
+            output.contains("Choose a topology for agy roles:"),
+            "{output}"
+        );
+        assert!(output.contains("Role demo-lead (lead):"), "{output}");
+        assert!(!output.contains("Role demo-dev"), "{output}");
+        assert!(!output.contains("Role demo-reviewer"), "{output}");
+        assert!(output.contains("Use isolated native worktrees"), "{output}");
+        let text = ok(render(&selection, &root));
+        let config = config::Config::parse(&text, &root).unwrap();
+        assert!(config.agy_tree);
+        assert_eq!(config.roles.len(), 1);
+        assert_eq!(
+            config.roles[0].agy.model.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(config.roles[0].agy.effort.as_deref(), Some("xhigh"));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

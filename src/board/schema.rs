@@ -20,7 +20,7 @@ pub fn generate(c: &Config) -> String {
     let (sessions_text, role_schema) = if extras.is_empty() {
         (
             format!(
-                "Status board of the Claude Code sessions, one per role ({}).",
+                "Status board of the crew sessions, one per role ({}).",
                 roles.join(", ")
             ),
             json!({ "description": "The session's role.", "enum": roles }),
@@ -28,7 +28,7 @@ pub fn generate(c: &Config) -> String {
     } else {
         (
             format!(
-                "Status board of the Claude Code sessions, one per role ({}), plus the extra \
+                "Status board of the crew sessions, one per role ({}), plus the extra \
                  instances <role>-N of {} that {writer} starts with `herdr-crew add <role>` once \
                  the user agrees.",
                 roles.join(", "),
@@ -179,12 +179,10 @@ mod tests {
             v["$defs"]["session"]["properties"]["role"]["anyOf"][1]["pattern"],
             "^(globex-dev|globex-reviewer)-([2-9]|[1-9][0-9]+)$"
         );
-        assert!(
-            v["description"]
-                .as_str()
-                .unwrap()
-                .contains("ONLY globex-lead writes it")
-        );
+        let desc = v["description"].as_str().unwrap();
+        assert!(desc.contains("Status board of the crew sessions"));
+        assert!(!desc.contains("Claude Code"));
+        assert!(desc.contains("ONLY globex-lead writes it"));
     }
 
     #[test]

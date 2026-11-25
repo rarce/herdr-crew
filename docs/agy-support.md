@@ -92,7 +92,7 @@ and returns:
 Per Antigravity's `hooks.md` contract, an injected `systemMessage` persists in the
 conversation trajectory across turns, so a plain `agy --conversation <id>` restore retains
 the role prompt. Because the pending binding is atomically deleted on first consumption,
-subagents spawned by a coordinator (`experimental_agy_tree = true`), resumed conversations,
+subagents spawned by a coordinator (`agy_tree = true`), resumed conversations,
 and non-crew `agy` sessions never receive duplicate or leaked role prompts (they receive `{}`).
 
 Custom agents (`--agent <name>` via `.agents/agents/<name>.md` with `mainAgent: true`) were
@@ -127,28 +127,49 @@ the invariant from [messaging.md](messaging.md): it never widens permissions or 
 sandbox. Generated `agy` prompts state this limitation explicitly and instruct roles to
 report actual failures and deliver through commits/output or ask the user to relay.
 
-A separate single-coordinator native mode is also supported via `experimental_agy_tree = true`
-(see below and `tests/fixtures/crew-agy-tree.toml`), analogous to
+First-class single-coordinator native tree mode is enabled via `agy_tree = true`
+(with `experimental_agy_tree = true` accepted as a backward-compatible alias; see below
+and `tests/fixtures/crew-agy-tree.toml`), analogous to
 [codex-tree-experiment.md](codex-tree-experiment.md).
 
-## Single-coordinator native mode (`experimental_agy_tree = true`) — Recommended for `agy`-only crews
+## Single-coordinator native mode (`agy_tree = true`) — Recommended for `agy`-only crews
 
-When `experimental_agy_tree = true` is set in `.herdr/crew.toml`:
+When `agy_tree = true` is set in `.herdr/crew.toml` (or legacy alias `experimental_agy_tree = true`;
+specifying both keys with contradictory values is rejected):
 
 - Configuration validation requires **exactly one `agy` coordinator role** without `worktree`
-  or `extra` (and cannot be combined with `experimental_codex_tree`).
-- `prompt::render` replaces the independent-tabs routing block with native Antigravity
-  subagent coordination instructions: the coordinator delegates manifest workers via
-  `invoke_subagent` (`TypeName: "self"` or `"research"`, `Workspace: "share"` for isolated
-  git worktrees) and reuses returned `conversationId`s via `send_message` / `manage_subagents`.
+  or `extra` (and cannot be combined with `experimental_codex_tree`). `herdr-crew config`
+  also refuses changing the coordinator's agent away from `agy` while `agy_tree` is active.
+- `herdr-crew init` and first-time `herdr-crew up` support `--topology tree|tabs`:
+  - For multi-role `agy` presets (`review`, `parallel`, `research`), `--yes` defaults to
+    `tree` and the interactive wizard (TUI and `--no-tui`) offers a `Topology` step
+    defaulting to `tree`.
+  - `--topology tree` is valid only with `--agent agy` and a multi-role preset (rejected
+    with other agents, `--preset solo`, or `--base`).
+  - Tree mode requires no Git remote and emits no `[worktrees]` section; the `Models` step
+    configures only `<name>-lead`.
+  - In `review`, isolation chooses between isolated native worktrees (`Workspace: "share"`,
+    default) and shared checkout (`Workspace: "inherit"`, via `--shared-checkout`). In
+    `parallel`, `dev-a` and `dev-b` default to `Workspace: "share"`.
+  - `--topology tabs` preserves the independent multi-tab configuration.
+- `prompt::render` emits the `Crew runtime communication (agy native tree):` block: the
+  coordinator delegates manifest workers via `invoke_subagent` (`TypeName: "self"` for
+  implementers, `"research"` for read-only reviewers/researchers; `Workspace: "share"` or
+  `"inherit"`), reuses returned `conversationId`s via `send_message`, and inspects active
+  workers via `manage_subagents (Action: "list")`.
 - **No Herdr socket access is needed** for worker communication, so `agy`'s default `auto`
   mode and terminal sandbox work with zero friction.
+- **Post-restore recovery (`agy --conversation <id>`):** After a session restore, the
+  coordinator's runtime instructions require checking `manage_subagents (Action: "list")`
+  first and reusing any surviving worker `conversationId` via `send_message` before
+  considering a replacement, and reporting recovery failures to the user instead of
+  spawning duplicate workers.
 
 ```toml
 version = 1
 kind = "agy"
-experimental_agy_tree = true
-start_message = "Confirm your coordinator role in one line and wait for an explicit task."
+agy_tree = true
+start_message = "Confirm your coordinator role in one line and wait for an explicit task before changing files."
 
 [agy]
 model = "gemini-4-neon"
@@ -193,8 +214,8 @@ Both modes were tested in an isolated Herdr server and temporary repository with
     `send_message` → receive `MODE2_SECOND_ACK` → coordinator summary) succeeded in `22.0 s`
     with zero approval friction, zero sandbox socket blocks, and automatic reactive wakeup.
 
-**Recommendation:** Use `experimental_agy_tree = true` for `agy`-only crews when you want
-Claude-like native messaging fluidity; use independent tabs when you need separate Herdr
+**Recommendation:** Use `agy_tree = true` (default for multi-role `agy` in `init`, or `--topology tree`) for `agy`-only crews when you want
+Claude-like native messaging fluidity; use independent tabs (`--topology tabs`) when you need separate Herdr
 tabs per role or mixed-agent crews (`agy` + `claude`/`codex`/`pi`).
 
 ## Launch options and models
