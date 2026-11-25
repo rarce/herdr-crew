@@ -772,8 +772,10 @@ impl Backend for Hc {
         self.call(&["send", pane, text]).map(drop).map_err(|e| {
             if e.kind.contains("block") {
                 PromptError::Blocked
+            } else if e.kind == "no_hc" {
+                PromptError::Rejected(e.to_string())
             } else {
-                PromptError::Failed(e.to_string())
+                PromptError::Uncertain(e.to_string())
             }
         })
     }

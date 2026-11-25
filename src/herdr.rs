@@ -32,6 +32,15 @@ impl std::fmt::Display for CallError {
     }
 }
 
+impl CallError {
+    pub fn socket_denied(&self) -> bool {
+        self.code == "output"
+            && (self.message.contains("Operation not permitted")
+                || self.message.contains("PermissionDenied")
+                || self.message.contains("Permission denied"))
+    }
+}
+
 pub struct Herdr {
     bin: OsString,
     /// Runs as a herdr action (`HERDR_PLUGIN_ID`): no visible terminal.
@@ -262,9 +271,7 @@ impl Backend for Herdr {
             Load::Read => {
                 self.call(&["workspace", "list"])
                     .map_err(|e| LoadError::Unreachable {
-                        denied: e.code == "output"
-                            && (e.message.contains("Operation not permitted")
-                                || e.message.contains("PermissionDenied")),
+                        denied: e.socket_denied(),
                         message: e.to_string(),
                     })?
             }
@@ -421,12 +428,12 @@ impl Backend for Herdr {
     fn prompt(&self, pane: &str, text: &str) -> Result<(), PromptError> {
         self.call(&["agent", "prompt", pane, text])
             .map(drop)
-            .map_err(|e| {
-                if e.code == "agent_blocked" {
-                    PromptError::Blocked
-                } else {
-                    PromptError::Failed(e.to_string())
+            .map_err(|e| match e.code.as_str() {
+                "agent_blocked" => PromptError::Blocked,
+                "agent_not_found" | "agent_not_ready" | "no_herdr" => {
+                    PromptError::Rejected(e.to_string())
                 }
+                _ => PromptError::Uncertain(e.to_string()),
             })
     }
 

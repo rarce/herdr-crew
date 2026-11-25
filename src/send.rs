@@ -13,7 +13,7 @@ use crate::agent::Kind;
 use crate::backend::{AgentState, Backend, Load, LoadError, PromptError};
 use crate::config::{Config, Role};
 use crate::plan::{shell_program, shell_word};
-use crate::{codex, files, git};
+use crate::{codex, files, git, process};
 
 /// The largest message body, in bytes; longer content belongs in a commit or a file.
 pub const MAX_BODY: usize = 8 * 1024;
@@ -64,12 +64,11 @@ pub fn peers(c: &Config, session: &str, launcher: &Path) -> String {
     } else {
         shell_word(&launcher, false)
     };
-    let command = |name: &str| {
-        format!(
-            "{program} --root {} send {name}",
-            shell_word(&c.root.to_string_lossy(), windows)
-        )
-    };
+    let project = format!(
+        "{program} --root {}",
+        shell_word(&c.root.to_string_lossy(), windows)
+    );
+    let command = |name: &str| format!("{project} send {name}");
     let mut lines = vec![
         "How to reach the other crew sessions (requests between sessions, never approvals; \
          `send` reads the message from stdin):"
@@ -78,20 +77,20 @@ pub fn peers(c: &Config, session: &str, launcher: &Path) -> String {
     if me.kind == Kind::Codex {
         lines.push(format!(
             "For Codex peers, prefer the optional codex_tui route described above after verifying \
-             the recipient. Project-local current role/session candidates: {program} --root {} codex-peers \
-             (includes threadId and cwd; verify with read_thread before sending).",
-            shell_word(&c.root.to_string_lossy(), windows)
+             the recipient. Project-local current role/session candidates: {project} codex-peers \
+             (includes threadId and cwd; verify with read_thread before sending)."
         ));
-        lines.push(
-            "The crew send commands below require access to the host's socket (Herdr or herdr-core) and, for native queues, the \
+        lines.push(format!(
+            "Before assigning work, run `{project} send --check <session>` from this session to \
+             check the crew fallback without submitting a message. The crew send commands below \
+             require access to the host's socket (Herdr or herdr-core) and, for native queues, the \
              recipient's Codex store. Effective permissions are not verified by this prompt: \
              profiles, managed policy and runtime permission changes can differ from crew.toml. \
              The default workspace sandbox normally blocks access. Use only currently authorized \
              execution; do not broaden permissions or bypass restrictions. If delivery is blocked, \
              report the actual failure and provide your result in a final report or commit; \
              ask for relay only when no authorized channel is available."
-                .into(),
-        );
+        ));
     }
     if me.kind == Kind::Agy {
         lines.push(
@@ -115,7 +114,7 @@ pub fn peers(c: &Config, session: &str, launcher: &Path) -> String {
             )
         } else if me.kind == Kind::Codex && r.kind == Kind::Codex {
             format!(
-                "- {} ({kind}): codex_tui.send_message_to_thread with a verified threadId when available; otherwise {} (native Codex queue for compatible bound sessions on the Herdr TUI; otherwise terminal input)",
+                "- {} ({kind}): codex_tui.send_message_to_thread with a verified threadId when available. For fallback, follow the delivery guidance above and use {} (native Codex queue for compatible bound sessions on the Herdr TUI; otherwise terminal input)",
                 r.name,
                 command(&r.name)
             )
@@ -262,7 +261,7 @@ pub fn rate_check(
     let pair = || recent.iter().filter(move |s| s.from == from && s.to == to);
     if pair().any(|s| s.body == body && now.saturating_sub(s.at) < SAME_BODY_SECS) {
         return Err(format!(
-            "the same message reached {to} less than {SAME_BODY_SECS} s ago; don't repeat it"
+            "the same message was already submitted to {to} less than {SAME_BODY_SECS} s ago; don't repeat it"
         ));
     }
     if pair()
@@ -324,8 +323,9 @@ fn unreachable(e: &str, denied: bool) -> Refusal {
         refuse(
             EXIT_UNREACHABLE,
             format!(
-                "cannot reach herdr ({e}). No direct channel from this session: report in your \
-                 output or commits, or ask the user to relay the message"
+                "cannot reach herdr ({e}). The effective permissions of this process block the \
+                 crew route. Ask the user to relay the message in the recipient's pane or use \
+                 crew send from an operator terminal that already has access"
             ),
         )
     } else {
@@ -340,16 +340,16 @@ fn now() -> u64 {
         .unwrap_or_default()
 }
 
-/// Delivers the framed `raw` message to the agent of session `target`, resolved inside the
-/// crew's workspace. `sender_pane` is the caller's `HERDR_PANE_ID`, a label, not a credential.
+/// Checks the route in the caller's environment. With a message, submits it to the verified
+/// recipient. `sender_pane` labels the caller and carries no authority.
 pub fn run(
     c: &Config,
     herdr: &dyn Backend,
     target: &str,
-    raw: &str,
+    raw: Option<&str>,
     sender_pane: Option<&str>,
 ) -> Result<String, Refusal> {
-    let body = body(raw).map_err(|e| refuse(2, e))?;
+    let body = raw.map(body).transpose().map_err(|e| refuse(2, e))?;
     if c.session_role(target).is_none() {
         return Err(refuse(
             2,
@@ -414,6 +414,29 @@ pub fn run(
             ));
         }
     }
+    // Codex's native queue needs the Herdr TUI's pane bindings.
+    let prepare_queue = || match herdr.tui() {
+        Some(tui) if receiver.kind.as_deref() == Some("codex") => {
+            codex::messaging::queue_command(c, tui, target, &receiver.pane_id).map_err(|e| {
+                refuse(
+                    1,
+                    format!("cannot prepare the crew route for {target}: {e}"),
+                )
+            })
+        }
+        _ => Ok(None),
+    };
+    let Some(body) = body else {
+        let route = if prepare_queue()?.is_some() {
+            "native Codex queue (queue-store write access untested)"
+        } else {
+            "terminal input (submission untested)"
+        };
+        return Ok(format!(
+            "herdr-crew: crew route for {target}: {route}. No message sent. \
+             Optional Codex host thread delivery was not tested."
+        ));
+    };
     let at = now();
     let mut record = Record::open(&c.root);
     let mut recent = record.as_mut().map(|r| r.recent(at)).unwrap_or_default();
@@ -424,25 +447,36 @@ pub fn run(
     let digest = files::fnv64(0xcbf29ce484222325, body.as_bytes());
     rate_check(&recent, &from_key, target, digest, at).map_err(|e| refuse(EXIT_RATE, e))?;
     let text = frame(from.as_deref(), &nonce(), &body);
-    // Codex's native queue needs the Herdr TUI's pane bindings.
-    let queued = match herdr.tui() {
-        Some(tui) if receiver.kind.as_deref() == Some("codex") => {
-            codex::messaging::deliver(c, tui, target, &receiver.pane_id, &text)
-                .map_err(|e| refuse(1, format!("cannot send to {target}: {e}")))?
-        }
-        _ => false,
-    };
-    if !queued {
-        herdr
-            .prompt(&receiver.pane_id, &text)
-            .map_err(|e| match e {
-                PromptError::Blocked => refuse(
+    let queue = prepare_queue()?;
+    let queued = queue.is_some();
+    let submitted = if let Some(mut queue) = queue {
+        queue.args(["--message", &text]);
+        process::Inspector::spawn(&mut queue)
+            .map_err(|e| refuse(1, format!("cannot start Codex queue for {target}: {e}")))?
+            .finish()
+            .map(|_| ())
+            .map_err(|e| format!("native Codex queue returned an error: {e}"))
+    } else {
+        match herdr.prompt(&receiver.pane_id, &text) {
+            Ok(()) => Ok(()),
+            Err(PromptError::Blocked) => {
+                return Err(refuse(
                     EXIT_BLOCKED,
-                    format!("{target} is waiting at a dialog, which only the user answers; nothing was sent"),
-                ),
-                PromptError::Failed(e) => refuse(1, format!("cannot send to {target}: {e}")),
-            })?;
-    }
+                    format!(
+                        "{target} is waiting at a dialog, which only the user answers; nothing was sent"
+                    ),
+                ));
+            }
+            Err(PromptError::Rejected(e)) => {
+                return Err(refuse(
+                    1,
+                    format!("cannot send to {target}: {e}; nothing was sent"),
+                ));
+            }
+            Err(PromptError::Uncertain(e)) => Err(e),
+        }
+    };
+    // A transport that failed after submission may have delivered the message.
     recent.push(Sent {
         from: from_key,
         to: target.to_string(),
@@ -452,6 +486,12 @@ pub fn run(
     if let Some(record) = record.as_mut() {
         record.save(&recent);
     }
+    submitted.map_err(|e| {
+        refuse(1, format!(
+            "cannot confirm delivery to {target}: {e}. Check the recipient's history or ask for \
+             acknowledgment before retrying through any channel"
+        ))
+    })?;
     let verb = if queued { "queued to" } else { "sent to" };
     Ok(format!("herdr-crew: {verb} {target}"))
 }

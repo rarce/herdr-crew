@@ -55,6 +55,7 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   add <role>                     add an extra instance of a role with extra = true
   close <name>                   close the tab of an extra instance (keeps its worktree)
   send <session>                 send the message on stdin to another crew session
+  send --check <session>         check the crew delivery route without sending
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
   codex-install                  install the crew hook; review it in Codex /hooks
@@ -106,6 +107,7 @@ struct Args {
     positional: Vec<String>,
     no_attach: bool,
     dry_run: bool,
+    send_check: bool,
     once: bool,
     file: Option<PathBuf>,
     interval: Option<Duration>,
@@ -169,6 +171,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "--yes" => a.init.yes = true,
             "--no-ignore" => a.init.no_ignore = true,
             "--dry-run" => a.dry_run = true,
+            "--check" => a.send_check = true,
             "--once" => a.once = true,
             s if s.starts_with('-') => return Err(Fail::usage(format!("unknown option {s}"))),
             _ if a.command.is_empty() => a.command = arg,
@@ -202,10 +205,11 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "no_ignore",
             "yes",
         ],
-        "add" | "close" | "send" | "check" | "config" | "startup" | "codex-install"
-        | "codex-uninstall" | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list"
-        | "codex-peers" | "pi-install" | "pi-uninstall" | "agy-install" | "agy-uninstall"
-        | "agy-hook" | "app-install" | "app-uninstall" => &[],
+        "send" => &["check"],
+        "add" | "close" | "check" | "config" | "startup" | "codex-install" | "codex-uninstall"
+        | "codex-hook" | "codex-resume" | "codex-protocol" | "codex-list" | "codex-peers"
+        | "pi-install" | "pi-uninstall" | "agy-install" | "agy-uninstall" | "agy-hook"
+        | "app-install" | "app-uninstall" => &[],
         "board" => &["file", "once", "interval"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
@@ -213,6 +217,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
     let used = [
         ("no_attach", a.no_attach),
         ("dry_run", a.dry_run),
+        ("check", a.send_check),
         ("once", a.once),
         ("file", a.file.is_some()),
         ("interval", a.interval.is_some()),
@@ -244,7 +249,11 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
     if a.command == "send" && a.positional.len() != arity {
         return Err(Fail {
             code: 2,
-            lines: vec![SEND_USAGE.into()],
+            lines: vec![if a.send_check {
+                "herdr-crew: usage: herdr-crew [--root DIR] send --check <session>".into()
+            } else {
+                SEND_USAGE.into()
+            }],
         });
     }
     if a.positional.len() != arity {
@@ -1108,17 +1117,28 @@ fn check(c: &Config) -> Result<(), Fail> {
             }
         }
     }
-    if host == backend::Host::Herdr && Herdr::from_env().call(&["workspace", "list"]).is_ok() {
-        if let Some(kind) = native
-            && let Err(error) = Herdr::from_env().require_server_version(kind)
-        {
-            missing.push(format!("herdr-crew: {error}"));
-        }
+    if host == backend::Host::Herdr {
+        let herdr = Herdr::from_env();
         let path = plan::shell_program(&binary().to_string_lossy(), cfg!(windows));
-        println!(
-            "herdr-crew: a herdr server is already running; `herdr` only attaches and does not \
-             run plugin startup. From this project, run `{path} up --no-attach`"
-        );
+        match herdr.call(&["workspace", "list"]) {
+            Ok(_) => {
+                if let Some(kind) = native
+                    && let Err(error) = herdr.require_server_version(kind)
+                {
+                    missing.push(format!("herdr-crew: {error}"));
+                }
+                println!(
+                    "herdr-crew: a herdr server is already running; `herdr` only attaches and does not \
+                     run plugin startup. From this project, run `{path} up --no-attach`"
+                );
+            }
+            Err(e) if e.socket_denied() => println!(
+                "herdr-crew: crew messaging unavailable from this process: Herdr access denied ({e}). \
+                 Use `{path} send --check <session>` from this project in an operator terminal \
+                 that already has access, or relay the message in the recipient's pane."
+            ),
+            Err(_) => {}
+        }
     }
     let remote = c
         .worktrees
@@ -1153,18 +1173,22 @@ fn check_core(missing: &mut Vec<String>) {
 
 /// `send`: the message from stdin into another session (docs/messaging.md §4). Its refusals use
 /// their own exit codes and no usage text, because the caller is usually a model.
-fn send(c: &Config, target: &str) -> Result<(), Fail> {
-    let raw = send::read_input(std::io::stdin().lock()).map_err(|e| Fail {
-        code: 2,
-        lines: vec![format!("herdr-crew: {e}")],
-    })?;
+fn send(c: &Config, target: &str, check: bool) -> Result<(), Fail> {
+    let raw = if check {
+        None
+    } else {
+        Some(send::read_input(std::io::stdin().lock()).map_err(|e| Fail {
+            code: 2,
+            lines: vec![format!("herdr-crew: {e}")],
+        })?)
+    };
     let herdr = host()?;
     // The sender's own pane: a herdr pane, or a herdr-core terminal address.
     let pane = match backend::Host::from_env() {
         Ok(backend::Host::Core) => std::env::var("HC_TERMINAL_ID").ok(),
         _ => std::env::var("HERDR_PANE_ID").ok(),
     };
-    match send::run(c, herdr.as_ref(), target, &raw, pane.as_deref()) {
+    match send::run(c, herdr.as_ref(), target, raw.as_deref(), pane.as_deref()) {
         Ok(line) => {
             println!("{line}");
             Ok(())
@@ -1269,7 +1293,7 @@ fn run() -> Result<(), Fail> {
         "up" => up(&c, &a, a.agent),
         "add" => add(&c, &a.positional[0]),
         "close" => close(&c, &a.positional[0]),
-        "send" => send(&c, &a.positional[0]),
+        "send" => send(&c, &a.positional[0], a.send_check),
         "board" => board(&c, &a),
         "codex-peers" => {
             println!("{}", codex::peers(&c).map_err(Fail::run)?);

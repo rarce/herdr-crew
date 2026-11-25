@@ -23,22 +23,20 @@ pub(super) fn uuid(id: &str) -> bool {
         })
 }
 
-/// Returns false before delivery when the CLI predates the tested queue protocol or the
-/// live pane has no crew binding. Errors after choosing native delivery never fall back to
-/// terminal input: the message might already have reached the queue.
-pub fn deliver(
+/// Selects and validates the native queue target without writing a message. Returns None
+/// when the CLI predates the tested queue protocol or the live pane has no crew binding.
+pub fn queue_command(
     c: &Config,
     herdr: &Herdr,
     name: &str,
     pane: &str,
-    message: &str,
-) -> Result<bool, String> {
+) -> Result<Option<Command>, String> {
     let bindings = c.root.join(RUNTIME).join("bindings");
     files::validate(&c.root, &bindings, files::Kind::Directory)?;
     if !bindings.exists()
         || !process::detect("codex").is_ok_and(|version| version >= MIN_QUEUE_VERSION)
     {
-        return Ok(false);
+        return Ok(None);
     }
     let status = herdr
         .call(&["status", "server", "--json"])
@@ -50,7 +48,7 @@ pub fn deliver(
     let binding_path = path(&c.root, "bindings", &context_key(&context));
     files::validate(&c.root, &binding_path, files::Kind::File)?;
     if !binding_path.exists() {
-        return Ok(false);
+        return Ok(None);
     }
     let lock = Lock::acquire(&c.root)?;
     let binding: Binding = read(&c.root, &binding_path)?;
@@ -58,7 +56,7 @@ pub fn deliver(
         .codex_version
         .is_none_or(|version| version < MIN_QUEUE_VERSION)
     {
-        return Ok(false);
+        return Ok(None);
     }
     let snapshot = snapshot(&c.root, &binding.token)?;
     let session: Session = read(&c.root, &path(&c.root, "sessions", &binding.token))?;
@@ -91,7 +89,7 @@ pub fn deliver(
     drop(lock);
     let mut command = Command::new("codex");
     command
-        .args(["queue", "--thread", &session.id, "--message", message])
+        .args(["queue", "--thread", &session.id])
         .current_dir(&snapshot.cwd)
         .env("CODEX_HOME", &snapshot.codex_home)
         .env_remove("CODEX_THREAD_ID")
@@ -99,12 +97,7 @@ pub fn deliver(
     if let Some(profile) = &snapshot.options.profile {
         command.args(["--profile", profile]);
     }
-    process::Inspector::spawn(&mut command)?
-        .finish()
-        .map_err(|e| {
-            format!("native Codex delivery failed and was not retried through the terminal: {e}")
-        })?;
-    Ok(true)
+    Ok(Some(command))
 }
 
 #[cfg(test)]
