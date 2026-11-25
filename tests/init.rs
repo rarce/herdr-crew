@@ -248,6 +248,84 @@ fn invalid_topology_combinations_exit_2_without_writing() {
     assert_eq!(tabs_no_remote.status.code(), Some(2));
     local.unchanged();
 
+    // Without --yes, --agent agy --preset review --base fails immediately before asking.
+    let agy_base_no_yes = repo.interactive(
+        &[
+            "--agent",
+            "agy",
+            "--preset",
+            "review",
+            "--base",
+            "upstream/trunk",
+            "--no-tui",
+        ],
+        "",
+    );
+    assert_eq!(agy_base_no_yes.status.code(), Some(2));
+    assert!(
+        !String::from_utf8_lossy(&agy_base_no_yes.stdout).contains("Project name"),
+        "{}",
+        String::from_utf8_lossy(&agy_base_no_yes.stdout)
+    );
+    assert!(String::from_utf8_lossy(&agy_base_no_yes.stderr).contains("--topology tabs"));
+    repo.unchanged();
+
+    // Without a remote, --base fails fast before asking or opening a wizard.
+    for args in [
+        vec![
+            "--agent",
+            "agy",
+            "--preset",
+            "parallel",
+            "--base",
+            "upstream/trunk",
+            "--no-tui",
+        ],
+        vec![
+            "--agent",
+            "agy",
+            "--preset",
+            "parallel",
+            "--topology",
+            "tabs",
+            "--base",
+            "upstream/trunk",
+            "--no-tui",
+        ],
+        vec!["--base", "upstream/trunk", "--no-tui"],
+    ] {
+        let out = local.interactive(&args, "");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("Project name"),
+            "{:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stdout)
+        );
+        local.unchanged();
+    }
+
+    // With a remote and --base (without --agent/--preset), interactive review + agy defaults to tabs.
+    let interactive_base = repo.interactive(
+        &["--base", "upstream/trunk", "--no-tui"],
+        "sample\nreview\nagy\n\n\n\n\ny\n",
+    );
+    success(interactive_base);
+    let base_config = repo.config();
+    assert_eq!(base_config["kind"].as_str(), Some("agy"));
+    assert!(base_config.get("agy_tree").is_none());
+    assert_eq!(
+        base_config["worktrees"]["base"].as_str(),
+        Some("upstream/trunk")
+    );
+    assert_eq!(base_config["roles"].as_array().unwrap().len(), 3);
+
     // `up --topology` on an existing configuration exits 2.
     success(local.init(&["--agent", "agy", "--preset", "review", "--yes"]));
     let existing = local

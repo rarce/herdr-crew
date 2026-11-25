@@ -98,6 +98,7 @@ pub struct Wizard {
     popup: Option<Popup>,
     isolated_tabs: bool,
     isolated_tree: bool,
+    explicit_tree: bool,
     explicit_base: bool,
     base: TextInput,
     ignore: bool,
@@ -117,6 +118,22 @@ impl Wizard {
     pub fn new(root: &Path, options: &Options) -> Self {
         let suggested_base = git::default_base(root);
         let has_remote = git::has_remote(root).unwrap_or(false);
+        let explicit_tree = options.topology == Some(Topology::Tree);
+        let default_preset = if explicit_tree {
+            Preset::Review
+        } else {
+            Preset::Solo
+        };
+        let default_agent = if explicit_tree {
+            Kind::Agy
+        } else {
+            Kind::default()
+        };
+        let default_topology = if options.base.is_some() {
+            Topology::Tabs
+        } else {
+            Topology::Tree
+        };
         Wizard {
             root: root.to_path_buf(),
             step: Step::Name,
@@ -126,9 +143,9 @@ impl Wizard {
                     .clone()
                     .unwrap_or_else(|| init::suggested_name(root)),
             ),
-            preset: index_of(&Preset::ALL, options.preset, Preset::Solo),
-            agent: index_of(&Kind::ALL, options.agent, Kind::default()),
-            topology: index_of(&Topology::ALL, options.topology, Topology::Tree),
+            preset: index_of(&Preset::ALL, options.preset, default_preset),
+            agent: index_of(&Kind::ALL, options.agent, default_agent),
+            topology: index_of(&Topology::ALL, options.topology, default_topology),
             profile: index_of(&Profile::ALL, options.models, Profile::default()),
             overrides: BTreeMap::new(),
             models_focus: ModelsFocus::Profile,
@@ -138,6 +155,7 @@ impl Wizard {
             isolated_tabs: !options.shared_checkout
                 && (options.base.is_some() || suggested_base.is_some()),
             isolated_tree: !options.shared_checkout,
+            explicit_tree,
             explicit_base: options.base.is_some(),
             base: TextInput::new(
                 options
@@ -377,6 +395,19 @@ impl Wizard {
             Step::Name if !init::valid_name(&self.name.value) => Err(format!(
                 "Use 1-{MAX_PREFIX} characters: start with a-z, then a-z, 0-9, _ or -."
             )),
+            Step::Workflow if self.explicit_tree && self.preset() == Preset::Solo => Err(
+                "--topology tree applies only to multi-role presets (review, parallel, research)"
+                    .into(),
+            ),
+            Step::Workflow
+                if self.explicit_base
+                    && !matches!(self.preset(), Preset::Review | Preset::Parallel) =>
+            {
+                Err("--base requires a review or parallel preset using worktrees".into())
+            }
+            Step::Agent if self.explicit_tree && self.agent() != Kind::Agy => {
+                Err("--topology tree applies only with --agent agy".into())
+            }
             Step::Agent
                 if self.preset() == Preset::Parallel
                     && self.agent() != Kind::Agy
@@ -391,6 +422,9 @@ impl Wizard {
                 if self.preset() == Preset::Parallel && !self.is_tree() && !self.has_remote =>
             {
                 Err(init::no_remote().lines[0].clone())
+            }
+            Step::Worktrees if self.explicit_base && !self.is_tree() && !self.isolated_tabs => {
+                Err("--base requires separate worktrees; choose separate or omit --base".into())
             }
             Step::Worktrees if !self.is_tree() && self.isolated_tabs && !self.has_remote => {
                 Err(init::no_remote().lines[0].clone())
@@ -660,7 +694,17 @@ impl Wizard {
                 let mut lines = vec![question("How should agy roles run?"), Line::from("")];
                 lines.extend(Self::choices(&items, self.topology));
                 lines.push(Line::from(""));
-                if self.preset() == Preset::Parallel && !self.is_tree() && !self.has_remote {
+                if self.explicit_base && self.is_tree() {
+                    lines.push(Line::styled(
+                        "--base requires tabs topology; choose tabs or omit --base.",
+                        warn(),
+                    ));
+                } else if self.explicit_base {
+                    lines.push(Line::styled(
+                        "--base was given, so tabs topology is preselected to keep worktrees.",
+                        warn(),
+                    ));
+                } else if self.preset() == Preset::Parallel && !self.is_tree() && !self.has_remote {
                     lines.push(Line::styled(
                         "Parallel tabs need worktrees, which need a configured Git remote.",
                         warn(),
@@ -1375,6 +1419,133 @@ mod tests {
         );
         assert_eq!(wizard.step, Step::Models);
         assert!(!wizard.is_customized());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn explicit_topology_tree_preserves_defaults_and_rejects_incompatible_steps() {
+        let root = git::test_repo("tui-explicit-tree");
+        for options in [
+            Options {
+                name: Some("acme".into()),
+                topology: Some(Topology::Tree),
+                ..Options::default()
+            },
+            Options {
+                name: Some("acme".into()),
+                topology: Some(Topology::Tree),
+                preset: Some(Preset::Review),
+                ..Options::default()
+            },
+            Options {
+                name: Some("acme".into()),
+                topology: Some(Topology::Tree),
+                agent: Some(Kind::Agy),
+                ..Options::default()
+            },
+        ] {
+            let mut wizard = Wizard::new(&root, &options);
+            // Name -> Workflow (review) -> Agent (agy) -> Topology (tree) -> Models -> Worktrees -> Ignore -> Review
+            let (selection, text) = finish(
+                &mut wizard,
+                "{enter}{enter}{enter}{enter}{enter}{enter}{enter}{enter}",
+            );
+            assert_eq!(selection.topology, Topology::Tree);
+            assert_eq!(selection.preset, Preset::Review);
+            assert_eq!(selection.agent, Kind::Agy);
+            let config = Config::parse(&text, &root).unwrap();
+            assert!(config.agy_tree);
+        }
+
+        // Choosing Solo at Workflow or Claude at Agent is rejected when --topology tree was passed.
+        let mut wizard = Wizard::new(
+            &root,
+            &Options {
+                name: Some("acme".into()),
+                topology: Some(Topology::Tree),
+                ..Options::default()
+            },
+        );
+        send(&mut wizard, "{enter}1{enter}");
+        assert_eq!(wizard.step, Step::Workflow);
+        assert!(
+            wizard
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("multi-role presets")
+        );
+        send(&mut wizard, "2{enter}1{enter}");
+        assert_eq!(wizard.step, Step::Agent);
+        assert!(
+            wizard
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("only with --agent agy")
+        );
+        let (selection, text) = finish(&mut wizard, "4{enter}{enter}{enter}{enter}{enter}{enter}");
+        assert_eq!(selection.topology, Topology::Tree);
+        assert!(Config::parse(&text, &root).unwrap().agy_tree);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn explicit_base_preselects_tabs_and_refuses_tree_or_shared_checkout() {
+        let root = git::test_repo("tui-explicit-base");
+        git::test_remote_branch(&root, "origin/main");
+        let options = Options {
+            name: Some("shop".into()),
+            base: Some("origin/main".into()),
+            ..Options::default()
+        };
+        let mut wizard = Wizard::new(&root, &options);
+        // Solo is refused with --base.
+        send(&mut wizard, "{enter}{enter}");
+        assert_eq!(wizard.step, Step::Workflow);
+        assert!(
+            wizard
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("--base requires a review or parallel preset")
+        );
+        // Review -> Agy -> Topology (preselected to tabs).
+        send(&mut wizard, "2{enter}4{enter}");
+        assert_eq!(wizard.step, Step::Topology);
+        assert_eq!(wizard.topology(), Topology::Tabs);
+        let screen = draw(&mut wizard, 110, 28);
+        assert!(screen.contains("tabs topology is preselected"), "{screen}");
+        // Choosing tree (1) is refused.
+        send(&mut wizard, "1{enter}");
+        assert_eq!(wizard.step, Step::Topology);
+        assert!(
+            wizard
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("--base does not apply with --topology tree")
+        );
+        // Pick tabs (2) -> Models -> Worktrees.
+        send(&mut wizard, "2{enter}{enter}");
+        assert_eq!(wizard.step, Step::Worktrees);
+        // Choosing shared (2) is refused so --base is not silently discarded.
+        send(&mut wizard, "2{enter}");
+        assert_eq!(wizard.step, Step::Worktrees);
+        assert!(
+            wizard
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("--base requires separate worktrees")
+        );
+        // Pick separate (1) -> Base (origin/main) -> Ignore -> Review -> Finish.
+        let (selection, text) = finish(&mut wizard, "1{enter}{enter}{enter}{enter}");
+        assert_eq!(selection.topology, Topology::Tabs);
+        assert_eq!(selection.base.as_deref(), Some("origin/main"));
+        let config = Config::parse(&text, &root).unwrap();
+        assert!(!config.agy_tree);
+        assert_eq!(config.worktrees.as_ref().unwrap().branch, "main");
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

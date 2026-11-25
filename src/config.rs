@@ -282,7 +282,7 @@ impl Config {
         let agy_tree = match (raw.agy_tree, raw.experimental_agy_tree) {
             (Some(a), Some(b)) if a != b => {
                 err("agy_tree and experimental_agy_tree cannot have contradictory values".into());
-                a || b
+                false
             }
             (Some(v), _) | (_, Some(v)) => v,
             (None, None) => false,
@@ -1273,6 +1273,21 @@ prompt = '''You are {{NAME}}.'''
                 "{conflict}"
             );
         }
+        let multi_role_conflict = format!(
+            "agy_tree = true\nexperimental_agy_tree = false\n{MIN}[[roles]]\nname = \"p-dev\"\nprompt = \"Dev\"\n"
+        );
+        let conflict_errors = errors(&multi_role_conflict);
+        assert_eq!(conflict_errors.len(), 1, "{conflict_errors:?}");
+        assert!(
+            conflict_errors[0].contains("contradictory"),
+            "{conflict_errors:?}"
+        );
+        assert!(
+            !conflict_errors
+                .iter()
+                .any(|error| error.contains("exactly one agy coordinator")),
+            "{conflict_errors:?}"
+        );
         assert!(!Config::parse(MIN, root).unwrap().agy_tree);
         let fixture = include_str!("../tests/fixtures/crew-agy-tree.toml");
         let parsed = Config::parse(fixture, root).unwrap();

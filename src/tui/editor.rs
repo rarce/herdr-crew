@@ -105,6 +105,9 @@ impl Editor {
     }
 
     fn duty(&self, i: usize) -> Duty {
+        if self.config.agy_tree || self.config.experimental_codex_tree {
+            return Duty::Lead;
+        }
         let role = &self.config.roles[i];
         Duty::guess(
             &role.name,
@@ -685,5 +688,31 @@ mod tests {
         assert!(e.dirty());
         assert!(matches!(send(&mut e, "q"), Some(Flow::Stay)));
         assert!(matches!(send(&mut e, "q"), Some(Flow::Done(()))));
+    }
+
+    #[test]
+    fn tree_mode_coordinator_shows_lead_duty_instead_of_solo() {
+        let agy_tree = include_str!("../../tests/fixtures/crew-agy-tree.toml");
+        let mut e = Editor::new(Path::new("/r/agy-tree"), agy_tree).unwrap();
+        assert_eq!(e.duty(0), Duty::Lead);
+        let screen = draw(&mut e, 120, 30);
+        assert!(screen.contains("agy-lead"), "{screen}");
+        assert!(screen.contains("lead"), "{screen}");
+        assert!(!screen.contains("solo"), "{screen}");
+
+        let codex_tree = r#"version = 1
+kind = "codex"
+experimental_codex_tree = true
+[workspace]
+label = "cx"
+[board]
+tab = "cx-status"
+writer = "cx-lead"
+[[roles]]
+name = "cx-lead"
+prompt = "Lead."
+"#;
+        let e = Editor::new(Path::new("/r/cx"), codex_tree).unwrap();
+        assert_eq!(e.duty(0), Duty::Lead);
     }
 }

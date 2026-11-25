@@ -6,7 +6,7 @@
 //! the project root from `cwd`, atomically consumes the pending binding for its pane (the TUI's
 //! `HERDR_PANE_ID`, or herdr-core's terminal, where it also records the conversation), and
 //! injects the rendered role prompt as a persistent `systemMessage`. Because each binding is
-//! consumed once, subagents spawned by a coordinator (`experimental_agy_tree`) and resumed
+//! consumed once, subagents spawned by a coordinator (`agy_tree = true`) and resumed
 //! conversations never receive duplicate or leaked role prompts, and non-crew sessions get `{}`.
 
 use std::collections::HashSet;
