@@ -2755,6 +2755,34 @@ fn send_refusals_have_distinct_exit_codes_and_type_nothing() {
 }
 
 #[test]
+fn terminal_send_retry_distinguishes_rejection_from_uncertain_delivery() {
+    let f = Fixture::new();
+    f.up();
+    let dev = f.tab("dev");
+    let message = "Retry after the recipient returns";
+
+    f.fail_once("agent prompt", "agent_not_found");
+    refused(
+        &f.send(None, "dev", message),
+        1,
+        "agent_not_found: injected failure; nothing was sent",
+    );
+    assert!(prompts(&dev).is_empty());
+    success(f.send(None, "dev", message));
+    assert_eq!(prompts(&dev).len(), 1);
+
+    let uncertain = "Check receipt before retrying";
+    f.fail_once("agent prompt", "transport");
+    refused(
+        &f.send(None, "dev", uncertain),
+        1,
+        "cannot confirm delivery",
+    );
+    refused(&f.send(None, "dev", uncertain), 75, "don't repeat it");
+    assert_eq!(prompts(&dev).len(), 1);
+}
+
+#[test]
 fn concurrent_identical_sends_pass_the_repeat_check_once() {
     let f = Fixture::new();
     f.up();

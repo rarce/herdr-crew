@@ -66,7 +66,10 @@ pub enum AgentState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptError {
     Blocked,
-    Failed(String),
+    /// The backend or host refused the request before submitting any input.
+    Rejected(String),
+    /// Input may have been submitted before the error was returned.
+    Uncertain(String),
 }
 
 /// What [`Backend::load`] does when no host server answers.

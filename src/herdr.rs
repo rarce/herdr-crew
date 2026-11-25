@@ -428,12 +428,12 @@ impl Backend for Herdr {
     fn prompt(&self, pane: &str, text: &str) -> Result<(), PromptError> {
         self.call(&["agent", "prompt", pane, text])
             .map(drop)
-            .map_err(|e| {
-                if e.code == "agent_blocked" {
-                    PromptError::Blocked
-                } else {
-                    PromptError::Failed(e.to_string())
+            .map_err(|e| match e.code.as_str() {
+                "agent_blocked" => PromptError::Blocked,
+                "agent_not_found" | "agent_not_ready" | "no_herdr" => {
+                    PromptError::Rejected(e.to_string())
                 }
+                _ => PromptError::Uncertain(e.to_string()),
             })
     }
 

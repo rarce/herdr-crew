@@ -467,7 +467,13 @@ pub fn run(
                     ),
                 ));
             }
-            Err(PromptError::Failed(e)) => Err(e),
+            Err(PromptError::Rejected(e)) => {
+                return Err(refuse(
+                    1,
+                    format!("cannot send to {target}: {e}; nothing was sent"),
+                ));
+            }
+            Err(PromptError::Uncertain(e)) => Err(e),
         }
     };
     // A transport that failed after submission may have delivered the message.
