@@ -1,13 +1,14 @@
 //! Initial crew setup: choose a software workflow, preview it, then create a validated config.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
 use serde::Serialize;
 
-use crate::agent::{AgentOptions, AgyOptions, ClaudeOptions, CodexOptions, PiOptions};
-use crate::models::{Duty, Profile};
+use crate::agent::{AgentOptions, AgyOptions, ClaudeOptions, CodexOptions, Kind, PiOptions};
+use crate::models::{self, Duty, Profile};
 use crate::{Fail, config, git};
 
 pub(crate) const MAX_PREFIX: usize = 21; // Leave room for "-research-a" within a 32-byte agent name.
@@ -115,13 +116,111 @@ pub struct Options {
     pub no_tui: bool,
 }
 
+/// Explicit model and/or effort override for one role during setup.
+/// `Some(None)` forces the agent's own default (`inherit`), `Some(Some(value))` sets an explicit
+/// value, and `None` keeps what the selected `Profile` picks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoleModelOverride {
+    pub model: Option<Option<String>>,
+    pub effort: Option<Option<String>>,
+}
+
 pub struct Selection {
     pub agent: crate::agent::Kind,
     pub name: String,
     pub preset: Preset,
     pub profile: Profile,
+    pub overrides: BTreeMap<String, RoleModelOverride>,
     pub base: Option<String>,
     pub ignore: bool,
+}
+
+impl Selection {
+    /// Whether any role's effective model or effort differs from the selected profile.
+    pub fn is_customized(&self) -> bool {
+        self.preset.roles().iter().any(|(suffix, duty)| {
+            role_options(self.agent, self.profile, *duty, self.overrides.get(*suffix))
+                != self.profile.options(self.agent, *duty)
+        })
+    }
+}
+
+/// Extracts `(model, effort)` from an `AgentOptions`.
+pub(crate) fn options_model_effort(options: &AgentOptions) -> (Option<String>, Option<String>) {
+    match options {
+        AgentOptions::Claude(o) => (o.model.clone(), o.effort.clone()),
+        AgentOptions::Codex(o) => (o.model.clone(), o.reasoning_effort.clone()),
+        AgentOptions::Pi(o) => (o.model.clone(), o.thinking.clone()),
+        AgentOptions::Agy(o) => (o.model.clone(), o.effort.clone()),
+    }
+}
+
+/// Computes the effective `AgentOptions` for one role given the selected agent, profile, duty,
+/// and any explicit per-role override.
+pub(crate) fn role_options(
+    agent: Kind,
+    profile: Profile,
+    duty: Duty,
+    override_: Option<&RoleModelOverride>,
+) -> AgentOptions {
+    let (base_model, base_effort) = options_model_effort(&profile.options(agent, duty));
+    let model = match override_.and_then(|o| o.model.as_ref()) {
+        Some(explicit) => explicit.clone(),
+        None => base_model,
+    };
+    let effort = match override_.and_then(|o| o.effort.as_ref()) {
+        Some(explicit) => explicit.clone(),
+        None => base_effort,
+    };
+    match agent {
+        Kind::Claude => AgentOptions::Claude(ClaudeOptions {
+            model,
+            effort,
+            ..Default::default()
+        }),
+        Kind::Codex => AgentOptions::Codex(CodexOptions {
+            model,
+            reasoning_effort: effort,
+            ..Default::default()
+        }),
+        Kind::Pi => AgentOptions::Pi(PiOptions {
+            model,
+            thinking: effort,
+            ..Default::default()
+        }),
+        Kind::Agy => AgentOptions::Agy(AgyOptions {
+            model,
+            effort,
+            ..Default::default()
+        }),
+    }
+}
+
+/// Validates a role's `AgentOptions` against the agent's own rules and launch constraints.
+pub(crate) fn validate_role_options(options: &AgentOptions) -> Result<(), String> {
+    let mut problems = match options {
+        AgentOptions::Claude(o) => o.problems(),
+        AgentOptions::Codex(o) => o.problems(),
+        AgentOptions::Pi(o) => {
+            let mut p = o.problems();
+            if let Some(lp) = o.launch_problem() {
+                p.push(lp.into());
+            }
+            p
+        }
+        AgentOptions::Agy(o) => {
+            let mut p = o.problems();
+            if let Some(lp) = o.launch_problem() {
+                p.push(lp.into());
+            }
+            p
+        }
+    };
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.remove(0))
+    }
 }
 
 #[derive(Serialize)]
@@ -385,6 +484,66 @@ fn choose(
                 .map_err(io_fail)?;
         }
     };
+    let mut overrides = BTreeMap::new();
+    if !options.yes
+        && options.models.is_none()
+        && yes_no(
+            input,
+            output,
+            "Customize model or effort for any role?",
+            false,
+        )?
+    {
+        let efforts_hint = models::efforts(agent).join(", ");
+        let effort_key = models::effort_key(agent);
+        for (suffix, duty) in preset.roles() {
+            let (default_model, default_effort) =
+                options_model_effort(&profile.options(agent, *duty));
+            writeln!(output, "\nRole {name}-{suffix} ({}):", duty.as_str()).map_err(io_fail)?;
+            let catalog = models::catalog(agent);
+            if !catalog.is_empty() {
+                let names: Vec<&str> = catalog.iter().map(|(m, _)| *m).collect();
+                writeln!(output, "  Suggested models: {}", names.join(", ")).map_err(io_fail)?;
+            }
+            loop {
+                let model_answer = ask(
+                    input,
+                    output,
+                    "  Model (name or 'inherit' for agent default)",
+                    Some(default_model.as_deref().unwrap_or("inherit")),
+                )?;
+                let model = (!model_answer.eq_ignore_ascii_case("inherit")
+                    && !model_answer.is_empty())
+                .then_some(model_answer);
+                let effort_label = format!("  {effort_key} ({efforts_hint}, or 'inherit')");
+                let effort_answer = ask(
+                    input,
+                    output,
+                    &effort_label,
+                    Some(default_effort.as_deref().unwrap_or("inherit")),
+                )?;
+                let effort = (!effort_answer.eq_ignore_ascii_case("inherit")
+                    && !effort_answer.is_empty())
+                .then_some(effort_answer);
+                let candidate = RoleModelOverride {
+                    model: (model != default_model).then_some(model),
+                    effort: (effort != default_effort).then_some(effort),
+                };
+                let effective = role_options(agent, profile, *duty, Some(&candidate));
+                match validate_role_options(&effective) {
+                    Ok(()) => {
+                        if candidate.model.is_some() || candidate.effort.is_some() {
+                            overrides.insert((*suffix).to_string(), candidate);
+                        }
+                        break;
+                    }
+                    Err(problem) => {
+                        writeln!(output, "  Invalid setting: {problem}").map_err(io_fail)?;
+                    }
+                }
+            }
+        }
+    }
     let suggested_base = git::default_base(root);
     let isolated = match preset {
         Preset::Parallel => true,
@@ -452,6 +611,7 @@ fn choose(
         name,
         preset,
         profile,
+        overrides,
         base,
         ignore,
     })
@@ -507,7 +667,12 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
             "You share the main checkout. Preserve the user's changes and do not switch or reset branches while other sessions use it. Only the assigned implementer edits source files; review and research are read-only. Coordinate validation commands that generate files with the implementer."
         };
         let (mut claude, mut codex, mut pi, mut agy) = (None, None, None, None);
-        match selection.profile.options(selection.agent, *kind) {
+        match role_options(
+            selection.agent,
+            selection.profile,
+            *kind,
+            selection.overrides.get(*suffix),
+        ) {
             AgentOptions::Claude(o) if o != ClaudeOptions::default() => claude = Some(o),
             AgentOptions::Codex(o) if o != CodexOptions::default() => codex = Some(o),
             AgentOptions::Pi(o) if o != PiOptions::default() => pi = Some(o),
@@ -564,10 +729,15 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
         }),
         roles,
     };
+    let models_note = if selection.is_customized() {
+        format!("{} customized", selection.profile.as_str())
+    } else {
+        selection.profile.as_str().to_string()
+    };
     let text = format!(
         "# Generated by herdr-crew init ({} workflow, {} models). Edit prompts and roles for your project.\n# Workflow guidance: https://github.com/rarce/herdr-crew/blob/main/docs/workflows.md\n# Models and effort: https://github.com/rarce/herdr-crew/blob/main/docs/models.md; change them with herdr-crew config\n{}",
         selection.preset.id(),
-        selection.profile.as_str(),
+        models_note,
         toml::to_string_pretty(&template)
             .map_err(|e| Fail::run(format!("cannot render crew configuration: {e}")))?
     );
@@ -724,13 +894,25 @@ pub enum Purpose {
 
 /// The summary shown before saving: workflow, project, agent, models and board writer.
 pub(crate) fn summary(selection: &Selection) -> String {
+    let models_summary = if selection.is_customized() {
+        format!(
+            "{} (customized; {})",
+            selection.profile.as_str(),
+            selection.profile.description()
+        )
+    } else {
+        format!(
+            "{} ({})",
+            selection.profile.as_str(),
+            selection.profile.description()
+        )
+    };
     format!(
-        "{}\nWorkspace: {}\nAgent: {}\nModels: {} ({})\nWorktree base: {}\nBoard writer: {}-{}",
+        "{}\nWorkspace: {}\nAgent: {}\nModels: {}\nWorktree base: {}\nBoard writer: {}-{}",
         selection.preset.description(),
         selection.name,
         selection.agent.as_str(),
-        selection.profile.as_str(),
-        selection.profile.description(),
+        models_summary,
         selection
             .base
             .as_deref()
@@ -938,6 +1120,7 @@ mod tests {
                 name: "a".repeat(MAX_PREFIX),
                 preset,
                 profile: Profile::Balanced,
+                overrides: BTreeMap::new(),
                 base,
                 ignore: true,
             };
@@ -995,7 +1178,7 @@ mod tests {
     #[test]
     fn the_wizard_asks_for_the_agent_and_retries_unknown_ones() {
         let root = git::test_repo("init-agent");
-        let (selection, output) = choose_with(&root, &Options::default(), "\n1\ngpt\nPi\n\n\n");
+        let (selection, output) = choose_with(&root, &Options::default(), "\n1\ngpt\nPi\n\n\n\n");
         assert_eq!(selection.agent, crate::agent::Kind::Pi);
         assert!(
             output.contains("Enter one of: claude, codex, pi, agy."),
@@ -1016,7 +1199,7 @@ mod tests {
         git::test_remote_branch(&root, "origin/main");
         // A typo is refused at the confirmation, then the suggested default is accepted.
         let (selection, output) =
-            choose_with(&root, &Options::default(), "\n3\n\n\norigin/mian\n\n\n\n");
+            choose_with(&root, &Options::default(), "\n3\n\n\n\norigin/mian\n\n\n\n");
         assert_eq!(selection.base.as_deref(), Some("origin/main"));
         assert!(
             output.contains("origin/mian is not among the fetched"),
@@ -1024,7 +1207,8 @@ mod tests {
         );
         assert!(output.contains("Use origin/mian anyway? [y/N]"), "{output}");
         // An explicit answer keeps it, since `up` fetches before creating worktrees.
-        let (selection, _) = choose_with(&root, &Options::default(), "\n3\n\n\norigin/next\ny\n\n");
+        let (selection, _) =
+            choose_with(&root, &Options::default(), "\n3\n\n\n\norigin/next\ny\n\n");
         assert_eq!(selection.base.as_deref(), Some("origin/next"));
 
         let flag = Options {
@@ -1040,7 +1224,7 @@ mod tests {
         // Without --yes, the flag's value needs the same confirmation as a typed one, and
         // declining it falls back to the prompt.
         let interactive = Options { yes: false, ..flag };
-        let (selection, output) = choose_with(&root, &interactive, "\n\n\n\n\n\n");
+        let (selection, output) = choose_with(&root, &interactive, "\n\n\n\n\n\n\n");
         assert_eq!(selection.base.as_deref(), Some("origin/main"));
         assert!(output.contains("Use origin/mian anyway? [y/N]"), "{output}");
         std::fs::remove_dir_all(&root).unwrap();
@@ -1198,5 +1382,80 @@ mod tests {
                 .unwrap_or_else(|f| panic!("{:?}", f.lines))
         );
         assert!(String::from_utf8(output).unwrap().contains("Enter y or n"));
+    }
+
+    #[test]
+    fn render_applies_role_overrides_across_agents() {
+        let root = Path::new("/repo");
+        for (agent, custom_model, custom_effort) in [
+            (Kind::Claude, "fable", "xhigh"),
+            (Kind::Codex, "gpt-6.1-terra", "ultra"),
+            (Kind::Pi, "my-provider-model", "max"),
+            (Kind::Agy, "claude-opus-5-5", "medium"),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(
+                "lead".to_string(),
+                RoleModelOverride {
+                    model: Some(Some(custom_model.into())),
+                    effort: Some(Some(custom_effort.into())),
+                },
+            );
+            overrides.insert(
+                "reviewer".to_string(),
+                RoleModelOverride {
+                    model: Some(None),
+                    effort: Some(None),
+                },
+            );
+            let selection = Selection {
+                agent,
+                name: "demo".into(),
+                preset: Preset::Review,
+                profile: Profile::Balanced,
+                overrides,
+                base: None,
+                ignore: false,
+            };
+            assert!(selection.is_customized());
+            assert!(summary(&selection).contains("balanced (customized;"));
+            let text = ok(render(&selection, root));
+            assert!(text.contains("balanced customized models"), "{text}");
+            let config = config::Config::parse(&text, root).unwrap();
+            let lead = config.role("demo-lead").unwrap();
+            let (lead_model, lead_effort) = options_model_effort(&lead.agent());
+            assert_eq!(lead_model.as_deref(), Some(custom_model));
+            assert_eq!(lead_effort.as_deref(), Some(custom_effort));
+            let reviewer = config.role("demo-reviewer").unwrap();
+            let (rev_model, rev_effort) = options_model_effort(&reviewer.agent());
+            assert_eq!(rev_model, None);
+            assert_eq!(rev_effort, None);
+        }
+    }
+
+    #[test]
+    fn line_by_line_wizard_customizes_role_models_and_retries_invalid_settings() {
+        let root = git::test_repo("init-custom-models");
+        // name=demo, workflow=2 (review), agent=agy, profile=3 (balanced), customize=y:
+        // lead: invalid suffixed model + high effort -> retry with base model + xhigh
+        // dev: keep default model, inherit effort
+        // reviewer: inherit model, keep default effort
+        // worktrees=n, ignore=n
+        let answers = "demo\n2\nagy\n3\ny\ngemini-4-neon-high\nhigh\nclaude-opus-5-5\nxhigh\n\ninherit\ninherit\n\nn\nn\n";
+        let (selection, output) = choose_with(&root, &Options::default(), answers);
+        assert!(output.contains("Invalid setting:"), "{output}");
+        assert!(selection.is_customized());
+        let text = ok(render(&selection, &root));
+        let config = config::Config::parse(&text, &root).unwrap();
+        let lead = config.role("demo-lead").unwrap();
+        assert_eq!(lead.agy.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(lead.agy.effort.as_deref(), Some("xhigh"));
+        let dev = config.role("demo-dev").unwrap();
+        assert_eq!(dev.agy.model.as_deref(), Some("gemini-4-hydrogen"));
+        assert_eq!(dev.agy.effort, None);
+        let reviewer = config.role("demo-reviewer").unwrap();
+        assert_eq!(reviewer.agy.model, None);
+        assert_eq!(reviewer.agy.effort.as_deref(), Some("high"));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -287,7 +287,7 @@ fn interactive_setup_retries_invalid_values_and_can_cancel_the_preview() {
     let repo = Repo::new(true);
     let output = success(repo.interactive(
         &[],
-        "INVALID\nsample\n9\nreview\n\n\ny\nunknown/main\nupstream/trunk\n\nn\n",
+        "INVALID\nsample\n9\nreview\n\n\n\ny\nunknown/main\nupstream/trunk\n\nn\n",
     ));
     assert!(output.contains("Use 1-21 characters"));
     assert!(output.contains("Enter 1-4"));
@@ -300,7 +300,7 @@ fn interactive_setup_retries_invalid_values_and_can_cancel_the_preview() {
 #[test]
 fn interactive_review_without_a_remote_defaults_to_shared_read_only_review() {
     let repo = Repo::new(false);
-    success(repo.interactive(&[], "sample\nreview\n\n\n\n\ny\n"));
+    success(repo.interactive(&[], "sample\nreview\n\n\n\n\n\ny\n"));
     let config = repo.config();
     assert!(config.get("worktrees").is_none());
     for role in config["roles"].as_array().unwrap() {
