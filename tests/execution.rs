@@ -2815,7 +2815,7 @@ fn agy_install_launch_hook_and_recovery() {
     let f = Fixture::new();
     let tools = f.root.join("tools");
     fs::create_dir(&tools).unwrap();
-    fs::write(tools.join("agy"), "#!/bin/sh\necho 1.5.15\n").unwrap();
+    fs::write(tools.join("agy"), "#!/bin/sh\necho 1.5.16\n").unwrap();
     fs::write(
         tools.join("herdr-crew"),
         "#!/bin/sh\nif [ \"${1-}\" = --launcher-id ]; then echo 'herdr-crew public launcher format 1 (rarce/herdr-crew)'; else exec \"$CREW_TEST_BIN\" \"$@\"; fi\n",
@@ -2861,8 +2861,49 @@ fn agy_install_launch_hook_and_recovery() {
     assert!(installed.get("herdr").is_some());
     assert!(installed.get("herdr-crew").is_some());
 
+    let settings = f.root.join(".gemini/antigravity-cli/settings.json");
+    let dev_worktree = f.repo.join(".worktrees/dev");
+    let extra_worktree = f.repo.join(".worktrees/dev-2");
+    let alias = f.root.join("repo-alias");
+    std::os::unix::fs::symlink(&f.repo, &alias).unwrap();
+    let trust = |paths: &[&Path]| {
+        fs::write(&settings, json!({"trustedWorkspaces": paths}).to_string()).unwrap();
+    };
+    failure(
+        overridden("check"),
+        "agy role lead needs a trusted checkout",
+    );
+    failure(
+        f.crew(&["up", "--no-attach"]),
+        "agy role lead needs a trusted checkout",
+    );
+    assert_eq!(f.count(&["agent", "start"]), 0);
+    assert!(!f.root.join(".herdr-crew-agy").exists());
+    f.no_generated_files();
+
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(&settings, r#"{"trustedWorkspaces":false}"#).unwrap();
+    failure(overridden("check"), "cannot read agy workspace trust");
+    trust(&[&alias]);
+    failure(overridden("check"), "git worktree add --detach");
+    failure(
+        f.crew(&["up", "--no-attach"]),
+        "agy role dev needs a trusted checkout",
+    );
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    assert!(!dev_worktree.exists());
+    f.git(&[
+        "worktree",
+        "add",
+        "--detach",
+        dev_worktree.to_str().unwrap(),
+        "origin/main",
+    ]);
+    failure(overridden("check"), "agy role dev needs a trusted checkout");
+    trust(&[&alias, &dev_worktree]);
+
     let checked = success(overridden("check"));
-    assert!(checked.contains("herdr-crew: agy 1.5.15 at "), "{checked}");
+    assert!(checked.contains("herdr-crew: agy 1.5.16 at "), "{checked}");
     assert!(
         checked.contains("the crew agy hook is installed"),
         "{checked}"
@@ -2920,19 +2961,16 @@ fn agy_install_launch_hook_and_recovery() {
         assert!(out.status.success(), "{out:?}");
         serde_json::from_slice(&out.stdout).unwrap()
     };
-    let rendered = f.read(".herdr/prompts/lead.txt");
-    fs::write(
-        f.repo.join(".herdr/prompts/lead.txt"),
-        "edited after launch",
-    )
-    .unwrap();
     assert_eq!(run_hook("", &hook_input), json!({}));
     assert_eq!(run_hook("unrelated", &hook_input), json!({}));
-    let first = run_hook(&lead_pane, &hook_input);
-    let injected = first["injectSteps"][0]["systemMessage"]["systemMessage"]
-        .as_str()
-        .unwrap_or_default();
-    assert_eq!(injected, rendered);
+    for role in ["lead", "dev"] {
+        let first: Value =
+            serde_json::from_slice(&fs::read(f.tab(role).join("agy-hook")).unwrap()).unwrap();
+        assert_eq!(
+            first["injectSteps"][0]["systemMessage"]["systemMessage"],
+            f.read(&format!(".herdr/prompts/{role}.txt"))
+        );
+    }
     let second = run_hook(
         &lead_pane,
         &format!(
@@ -2942,10 +2980,41 @@ fn agy_install_launch_hook_and_recovery() {
     );
     assert_eq!(second, serde_json::json!({}));
 
+    failure(
+        f.crew(&["add", "dev"]),
+        "agy role dev-2 needs a trusted checkout",
+    );
+    assert_eq!(f.count(&["agent", "start"]), 2);
+    f.git(&[
+        "worktree",
+        "add",
+        "--detach",
+        extra_worktree.to_str().unwrap(),
+        "origin/main",
+    ]);
+    trust(&[&alias, &dev_worktree, &extra_worktree]);
     f.fail_once("agent start dev-2", "start_failed");
     failure(f.crew(&["add", "dev"]), "could not start dev-2");
     let failed_pane = fs::read_to_string(f.tab("dev-2").join("pane")).unwrap();
     assert_eq!(run_hook(&failed_pane, &hook_input), json!({}));
+    success(f.crew(&["close", "dev-2"]));
+
+    fs::write(f.state.join("skip-agy-hook"), "").unwrap();
+    failure(
+        f.crew(&["add", "dev"]),
+        "did not consume its SessionStart role prompt",
+    );
+    let unconfirmed_pane = fs::read_to_string(f.tab("dev-2").join("pane")).unwrap();
+    assert_eq!(run_hook(&unconfirmed_pane, &hook_input), json!({}));
+    assert_eq!(
+        fs::read_dir(f.root.join(".herdr-crew-agy"))
+            .unwrap()
+            .count(),
+        0
+    );
+    success(f.crew(&["close", "dev-2"]));
+    fs::remove_file(f.state.join("skip-agy-hook")).unwrap();
+    success(f.crew(&["add", "dev"]));
 
     // Empty-tab recovery advises `agy --conversation <id>`.
     fs::remove_file(f.tab("lead").join("agent")).unwrap();
