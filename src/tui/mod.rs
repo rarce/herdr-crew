@@ -11,6 +11,10 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+
+use crate::agent::Kind;
+use crate::models;
 
 /// Whether a person can answer full-screen questions here.
 pub fn interactive() -> bool {
@@ -184,6 +188,117 @@ pub fn move_in_list(key: KeyEvent, index: &mut usize, len: usize) -> bool {
         _ => return false,
     }
     true
+}
+
+/// One choice in a picker popup: the value to apply (`None` = inherit/agent default) and its label.
+#[derive(Clone, Debug)]
+pub struct Choice {
+    pub value: Option<String>,
+    pub label: String,
+    pub note: String,
+    /// Opens a text field instead of applying a fixed value.
+    pub custom: bool,
+}
+
+impl Choice {
+    pub fn inherit(note: &str) -> Self {
+        Self {
+            value: None,
+            label: "inherit".into(),
+            note: note.into(),
+            custom: false,
+        }
+    }
+
+    pub fn plain(value: &str, note: &str) -> Self {
+        Self {
+            value: Some(value.to_string()),
+            label: value.to_string(),
+            note: note.to_string(),
+            custom: false,
+        }
+    }
+}
+
+/// Model choices for `agent`: `inherit`, the agent's catalog, and `custom…`.
+pub fn model_choices(agent: Kind, inherit_note: &str) -> Vec<Choice> {
+    let mut choices = vec![Choice::inherit(inherit_note)];
+    for (model, note) in models::catalog(agent) {
+        choices.push(Choice::plain(model, note));
+    }
+    choices.push(Choice {
+        value: None,
+        label: "custom…".into(),
+        note: "type a model name".into(),
+        custom: true,
+    });
+    choices
+}
+
+/// Effort choices for `agent`: `inherit` and the levels the agent accepts.
+pub fn effort_choices(agent: Kind, inherit_note: &str) -> Vec<Choice> {
+    let mut choices = vec![Choice::inherit(inherit_note)];
+    for effort in models::efforts(agent) {
+        choices.push(Choice::plain(effort, ""));
+    }
+    choices
+}
+
+/// Renders a centered list-picker popup.
+pub fn draw_pick_popup(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    choices: &[Choice],
+    index: usize,
+) {
+    let lines: Vec<Line> = choices
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let label = format!(" {:<16}", c.label);
+            if i == index {
+                Line::from(vec![
+                    Span::styled(label, selected()),
+                    Span::styled(format!(" {}", c.note), bold()),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw(label),
+                    Span::styled(format!(" {}", c.note), dim()),
+                ])
+            }
+        })
+        .collect();
+    let rect = centered(area, 72, lines.len() as u16 + 2);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .title(Span::styled(format!(" {title} "), accent())),
+        ),
+        rect,
+    );
+}
+
+/// Renders a centered custom-value text-input popup.
+pub fn draw_custom_popup(frame: &mut Frame, area: Rect, title: &str, input: &TextInput) {
+    let lines = vec![
+        input.line(),
+        Line::from(""),
+        Line::styled("Enter saves, an empty name inherits, Esc cancels.", dim()),
+    ];
+    let rect = centered(area, 60, lines.len() as u16 + 2);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .title(Span::styled(format!(" {title} "), accent())),
+        ),
+        rect,
+    );
 }
 
 #[cfg(test)]

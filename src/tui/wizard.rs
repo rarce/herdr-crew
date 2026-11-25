@@ -1,6 +1,7 @@
 //! `init` in a terminal: the setup questions as steps, with live previews of the roles, their
 //! models and the generated configuration. Flags given on the command line prefill answers.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -8,15 +9,16 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, BorderType, Cell, Paragraph, Row, Table, TableState, Wrap};
 
 use super::{
-    Flow, Screen, TextInput, accent, bold, dim, error, hints, move_in_list, selected, warn,
+    Choice, Flow, Screen, TextInput, accent, bold, dim, draw_custom_popup, draw_pick_popup,
+    effort_choices, error, hints, model_choices, move_in_list, selected, warn,
 };
-use crate::agent::{AgentOptions, Kind};
+use crate::agent::Kind;
 use crate::git;
-use crate::init::{self, MAX_PREFIX, Options, Preset, Selection};
-use crate::models::Profile;
+use crate::init::{self, MAX_PREFIX, Options, Preset, RoleModelOverride, Selection};
+use crate::models::{self, Profile};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -45,6 +47,32 @@ impl Step {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModelsFocus {
+    Profile,
+    Roles,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoleColumn {
+    Model,
+    Effort,
+}
+
+const ROLE_COLUMNS: [RoleColumn; 2] = [RoleColumn::Model, RoleColumn::Effort];
+
+enum Popup {
+    Pick {
+        title: String,
+        choices: Vec<Choice>,
+        index: usize,
+    },
+    Custom {
+        title: String,
+        input: TextInput,
+    },
+}
+
 /// The generated configuration, shown before saving.
 struct Review {
     text: String,
@@ -60,6 +88,11 @@ pub struct Wizard {
     preset: usize,
     agent: usize,
     profile: usize,
+    overrides: BTreeMap<String, RoleModelOverride>,
+    models_focus: ModelsFocus,
+    role_row: usize,
+    role_col: usize,
+    popup: Option<Popup>,
     isolated: bool,
     base: TextInput,
     ignore: bool,
@@ -91,6 +124,11 @@ impl Wizard {
             preset: index_of(&Preset::ALL, options.preset, Preset::Solo),
             agent: index_of(&Kind::ALL, options.agent, Kind::default()),
             profile: index_of(&Profile::ALL, options.models, Profile::default()),
+            overrides: BTreeMap::new(),
+            models_focus: ModelsFocus::Profile,
+            role_row: 0,
+            role_col: 0,
+            popup: None,
             isolated: !options.shared_checkout
                 && (options.base.is_some() || suggested_base.is_some()),
             base: TextInput::new(
@@ -147,10 +185,145 @@ impl Wizard {
             name: self.name.value.clone(),
             preset: self.preset(),
             profile: self.profile(),
+            overrides: self.overrides.clone(),
             base: self
                 .uses_worktrees()
                 .then(|| self.base.value.trim().to_string()),
             ignore: self.ignore,
+        }
+    }
+
+    fn clear_overrides(&mut self) {
+        self.overrides.clear();
+        self.models_focus = ModelsFocus::Profile;
+        self.role_row = 0;
+        self.role_col = 0;
+        self.popup = None;
+    }
+
+    fn is_customized(&self) -> bool {
+        let agent = self.agent();
+        let profile = self.profile();
+        self.preset().roles().iter().any(|(suffix, duty)| {
+            init::role_options(agent, profile, *duty, self.overrides.get(*suffix))
+                != profile.options(agent, *duty)
+        })
+    }
+
+    fn role_effective(&self, row: usize) -> (Option<String>, Option<String>) {
+        let (suffix, duty) = self.preset().roles()[row];
+        let options = init::role_options(
+            self.agent(),
+            self.profile(),
+            duty,
+            self.overrides.get(suffix),
+        );
+        init::options_model_effort(&options)
+    }
+
+    fn open_role_picker(&mut self) {
+        let agent = self.agent();
+        let (current_model, current_effort) = self.role_effective(self.role_row);
+        let inherit_note = "the agent's own default";
+        let (title, choices, current) = match ROLE_COLUMNS[self.role_col] {
+            RoleColumn::Model => (
+                format!("{} model", agent.as_str()),
+                model_choices(agent, inherit_note),
+                current_model,
+            ),
+            RoleColumn::Effort => (
+                format!("{} {}", agent.as_str(), models::effort_key(agent)),
+                effort_choices(agent, inherit_note),
+                current_effort,
+            ),
+        };
+        let index = choices
+            .iter()
+            .position(|c| !c.custom && c.value == current)
+            .or_else(|| current.is_some().then(|| choices.len() - 1))
+            .unwrap_or(0);
+        self.popup = Some(Popup::Pick {
+            title,
+            choices,
+            index,
+        });
+    }
+
+    fn apply_role_value(&mut self, value: Option<String>) {
+        let agent = self.agent();
+        let profile = self.profile();
+        let (suffix, duty) = self.preset().roles()[self.role_row];
+        let (base_model, base_effort) = init::options_model_effort(&profile.options(agent, duty));
+        let mut candidate = self.overrides.get(suffix).cloned().unwrap_or_default();
+        match ROLE_COLUMNS[self.role_col] {
+            RoleColumn::Model => {
+                candidate.model = (value != base_model).then_some(value);
+            }
+            RoleColumn::Effort => {
+                candidate.effort = (value != base_effort).then_some(value);
+            }
+        }
+        let effective = init::role_options(agent, profile, duty, Some(&candidate));
+        match init::validate_role_options(&effective) {
+            Ok(()) => {
+                if candidate.model.is_none() && candidate.effort.is_none() {
+                    self.overrides.remove(suffix);
+                } else {
+                    self.overrides.insert(suffix.to_string(), candidate);
+                }
+                self.message = None;
+            }
+            Err(problem) => {
+                self.message = Some(format!("not applied: {problem}"));
+            }
+        }
+    }
+
+    fn popup_key(&mut self, key: KeyEvent) {
+        let Some(popup) = &mut self.popup else { return };
+        match popup {
+            Popup::Pick { choices, index, .. } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    let choice = choices[*index].clone();
+                    if choice.custom {
+                        let (current_model, _) = self.role_effective(self.role_row);
+                        self.popup = Some(Popup::Custom {
+                            title: "Model name".into(),
+                            input: TextInput::new(current_model.as_deref().unwrap_or("")),
+                        });
+                    } else {
+                        self.popup = None;
+                        self.apply_role_value(choice.value);
+                    }
+                }
+                _ => {
+                    move_in_list(key, index, choices.len());
+                }
+            },
+            Popup::Custom { input, .. } => match key.code {
+                KeyCode::Esc => self.popup = None,
+                KeyCode::Enter => {
+                    let value = input.value.trim().to_string();
+                    self.popup = None;
+                    self.apply_role_value((!value.is_empty()).then_some(value));
+                }
+                _ => {
+                    input.key(key);
+                }
+            },
+        }
+    }
+
+    fn draw_popup(&self, frame: &mut Frame, area: Rect) {
+        let Some(popup) = &self.popup else { return };
+        match popup {
+            Popup::Pick {
+                title,
+                choices,
+                index,
+            } => draw_pick_popup(frame, area, title, choices, *index),
+            Popup::Custom { title, input } => draw_custom_popup(frame, area, title, input),
         }
     }
 
@@ -224,7 +397,13 @@ impl Wizard {
                 Step::Name => self.name.value.clone(),
                 Step::Workflow => self.preset().id().into(),
                 Step::Agent => self.agent().as_str().into(),
-                Step::Models => self.profile().as_str().into(),
+                Step::Models => {
+                    if self.is_customized() {
+                        format!("{}*", self.profile().as_str())
+                    } else {
+                        self.profile().as_str().into()
+                    }
+                }
                 Step::Worktrees => if self.isolated { "separate" } else { "shared" }.into(),
                 Step::Base => self.base.value.clone(),
                 Step::Ignore => if self.ignore { "yes" } else { "no" }.into(),
@@ -283,26 +462,34 @@ impl Wizard {
             .collect()
     }
 
-    /// The roles of the chosen preset with the model and effort the profile gives them.
+    /// The roles of the chosen preset with the model and effort the profile (plus overrides) gives them.
     fn roles_table(&self) -> Table<'static> {
         let agent = self.agent();
+        let profile = self.profile();
         let rows: Vec<Row> = self
             .preset()
             .roles()
             .iter()
             .map(|(suffix, duty)| {
-                let (model, effort) = match self.profile().options(agent, *duty) {
-                    AgentOptions::Claude(o) => (o.model, o.effort),
-                    AgentOptions::Codex(o) => (o.model, o.reasoning_effort),
-                    AgentOptions::Pi(o) => (o.model, o.thinking),
-                    AgentOptions::Agy(o) => (o.model, o.effort),
+                let (base_model, base_effort) =
+                    init::options_model_effort(&profile.options(agent, *duty));
+                let options =
+                    init::role_options(agent, profile, *duty, self.overrides.get(*suffix));
+                let (model, effort) = init::options_model_effort(&options);
+                let cell = |value: Option<String>, base: Option<String>| {
+                    let changed = value != base;
+                    match value {
+                        Some(v) if changed => Cell::from(Span::styled(v, accent())),
+                        Some(v) => Cell::from(v),
+                        None if changed => Cell::from(Span::styled("agent default", accent())),
+                        None => Cell::from(Span::styled("agent default", dim())),
+                    }
                 };
-                let or_default = |v: Option<String>| v.unwrap_or_else(|| "agent default".into());
                 Row::new(vec![
                     Cell::from(format!("{}-{suffix}", self.name.value)),
                     Cell::from(duty.as_str()),
-                    Cell::from(or_default(model)),
-                    Cell::from(or_default(effort)),
+                    cell(model, base_model),
+                    cell(effort, base_effort),
                 ])
             })
             .collect();
@@ -317,6 +504,8 @@ impl Wizard {
         )
         .header(Row::new(["Role", "Duty", "Model", "Effort"]).style(bold()))
         .column_spacing(1)
+        .row_highlight_style(bold())
+        .cell_highlight_style(selected())
     }
 
     fn draw_main(&mut self, frame: &mut Frame, area: Rect) {
@@ -405,11 +594,20 @@ impl Wizard {
                 ])
                 .areas(inner);
                 frame.render_widget(Paragraph::new(lines), top);
-                frame.render_widget(self.roles_table(), table);
-                let foot_text = if self.agent() == Kind::Pi && self.profile() != Profile::Inherit {
-                    "pi keeps your provider's model; the profile sets only the thinking level."
+                if self.models_focus == ModelsFocus::Roles {
+                    let mut state = TableState::default()
+                        .with_selected(Some(self.role_row))
+                        .with_selected_column(Some(self.role_col + 2));
+                    frame.render_stateful_widget(self.roles_table(), table, &mut state);
                 } else {
-                    "Change any role later with herdr-crew config. See docs/models.md."
+                    frame.render_widget(self.roles_table(), table);
+                }
+                let foot_text = if self.models_focus == ModelsFocus::Roles {
+                    "Editing roles: Enter changes a cell, Del uses agent default, r resets to profile, Esc/Tab finishes."
+                } else if self.agent() == Kind::Pi && self.profile() != Profile::Inherit {
+                    "pi keeps your provider's model; press e or Tab to customize roles."
+                } else {
+                    "Press e or Tab to customize any role's model or effort, or Enter to continue."
                 };
                 frame.render_widget(
                     Paragraph::new(Line::styled(foot_text, dim())).wrap(Wrap { trim: false }),
@@ -553,25 +751,80 @@ impl Screen for Wizard {
                 message,
             );
         }
-        let keys: &[(&str, &str)] = match self.step {
-            Step::Name | Step::Base => &[("Enter", "next"), ("Esc", "back"), ("Ctrl-C", "cancel")],
-            Step::Review => &[
-                ("Enter", "create"),
-                ("↑↓ PgUp PgDn", "scroll"),
-                ("Esc", "back"),
-                ("q", "cancel"),
-            ],
-            _ => &[
-                ("↑↓ 1-9", "choose"),
-                ("Enter", "next"),
-                ("Esc", "back"),
-                ("q", "cancel"),
-            ],
+        let keys: &[(&str, &str)] = match &self.popup {
+            Some(Popup::Custom { .. }) => &[("Enter", "apply"), ("Esc", "cancel")],
+            Some(Popup::Pick { .. }) => {
+                &[("↑↓ 1-9", "choose"), ("Enter", "apply"), ("Esc", "cancel")]
+            }
+            None => match self.step {
+                Step::Name | Step::Base => {
+                    &[("Enter", "next"), ("Esc", "back"), ("Ctrl-C", "cancel")]
+                }
+                Step::Models if self.models_focus == ModelsFocus::Roles => &[
+                    ("↑↓←→", "move"),
+                    ("Enter", "change"),
+                    ("Del", "inherit"),
+                    ("r", "reset"),
+                    ("Esc", "done"),
+                ],
+                Step::Models => &[
+                    ("↑↓ 1-4", "profile"),
+                    ("e / Tab", "customize"),
+                    ("Enter", "next"),
+                    ("Esc", "back"),
+                    ("q", "cancel"),
+                ],
+                Step::Review => &[
+                    ("Enter", "create"),
+                    ("↑↓ PgUp PgDn", "scroll"),
+                    ("Esc", "back"),
+                    ("q", "cancel"),
+                ],
+                _ => &[
+                    ("↑↓ 1-9", "choose"),
+                    ("Enter", "next"),
+                    ("Esc", "back"),
+                    ("q", "cancel"),
+                ],
+            },
         };
         frame.render_widget(Paragraph::new(hints(keys)), footer);
+        self.draw_popup(frame, frame.area());
     }
 
     fn key(&mut self, key: KeyEvent) -> Flow<Self::Output> {
+        if self.popup.is_some() {
+            self.popup_key(key);
+            return Flow::Stay;
+        }
+        if self.step == Step::Models && self.models_focus == ModelsFocus::Roles {
+            let roles = self.preset().roles().len();
+            match key.code {
+                KeyCode::Esc | KeyCode::Tab => {
+                    self.models_focus = ModelsFocus::Profile;
+                    self.message = None;
+                }
+                KeyCode::Char('q') => return Flow::Cancel,
+                KeyCode::Enter | KeyCode::Char(' ') => self.open_role_picker(),
+                KeyCode::Delete | KeyCode::Backspace => self.apply_role_value(None),
+                KeyCode::Char('r') => {
+                    self.overrides.clear();
+                    self.message = None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.role_row = self.role_row.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.role_row = (self.role_row + 1).min(roles.saturating_sub(1));
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.role_col = self.role_col.saturating_sub(1);
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    self.role_col = (self.role_col + 1).min(ROLE_COLUMNS.len() - 1);
+                }
+                _ => {}
+            }
+            return Flow::Stay;
+        }
         let typing = matches!(self.step, Step::Name | Step::Base);
         if key.code != KeyCode::Enter {
             self.message = None;
@@ -614,14 +867,33 @@ impl Screen for Wizard {
                 }
             }
             Step::Workflow => {
-                move_in_list(key, &mut self.preset, Preset::ALL.len());
+                let prev = self.preset;
+                if move_in_list(key, &mut self.preset, Preset::ALL.len()) && self.preset != prev {
+                    self.clear_overrides();
+                }
             }
             Step::Agent => {
-                move_in_list(key, &mut self.agent, Kind::ALL.len());
+                let prev = self.agent;
+                if move_in_list(key, &mut self.agent, Kind::ALL.len()) && self.agent != prev {
+                    self.clear_overrides();
+                }
             }
-            Step::Models => {
-                move_in_list(key, &mut self.profile, Profile::ALL.len());
-            }
+            Step::Models => match key.code {
+                KeyCode::Char('e') | KeyCode::Char('c') | KeyCode::Tab => {
+                    self.models_focus = ModelsFocus::Roles;
+                    self.role_row = self
+                        .role_row
+                        .min(self.preset().roles().len().saturating_sub(1));
+                }
+                _ => {
+                    let prev = self.profile;
+                    if move_in_list(key, &mut self.profile, Profile::ALL.len())
+                        && self.profile != prev
+                    {
+                        self.overrides.clear();
+                    }
+                }
+            },
             Step::Worktrees => {
                 let mut i = usize::from(!self.isolated);
                 if move_in_list(key, &mut i, 2) {
@@ -783,6 +1055,120 @@ mod tests {
                 .contains("configured Git remote")
         );
         assert!(matches!(send(&mut wizard, "q"), Some(Flow::Cancel)));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn customizing_role_model_and_effort_updates_preview_and_config() {
+        let root = git::test_repo("tui-custom-models");
+        let options = Options {
+            name: Some("shop".into()),
+            preset: Some(Preset::Review),
+            shared_checkout: true,
+            ..Options::default()
+        };
+        let mut wizard = Wizard::new(&root, &options);
+        // Name -> Workflow -> Agent (claude) -> Models (balanced)
+        send(&mut wizard, "{enter}{enter}{enter}");
+        assert_eq!(wizard.step, Step::Models);
+        // Enter role customization on lead (row 0, col 0 = Model):
+        // Picker choices for Claude model: 0=inherit, 1=fable, 2=opus, 3=sonnet, 4=haiku, 5=custom…
+        // Select fable (key '2' -> index 1), then move right to Effort and select xhigh ('5' -> index 4).
+        send(&mut wizard, "e{enter}2{enter}{right}{enter}5{enter}");
+        // Move down to dev (row 1), left to Model, open custom… ('6' -> index 5), type custom model.
+        send(
+            &mut wizard,
+            "{down}{left}{enter}6{enter}{bs}{bs}{bs}{bs}{bs}{bs}claude-custom-1{enter}",
+        );
+        // Move down to reviewer (row 2), set Model to inherit with Backspace.
+        send(&mut wizard, "{down}{bs}");
+        let screen = draw(&mut wizard, 110, 28);
+        assert!(screen.contains("fable"), "{screen}");
+        assert!(screen.contains("xhigh"), "{screen}");
+        assert!(screen.contains("claude-custom-1"), "{screen}");
+        assert!(screen.contains("agent default"), "{screen}");
+        // Exit roles table, advance past Models -> Worktrees (shared) -> Ignore -> Review -> Create.
+        send(&mut wizard, "{esc}{enter}");
+        assert_eq!(wizard.step, Step::Worktrees);
+        let sidebar = draw(&mut wizard, 110, 28);
+        assert!(sidebar.contains("balanced*"), "{sidebar}");
+        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}");
+        assert!(selection.is_customized());
+        assert!(text.contains("balanced customized models"), "{text}");
+        let config = Config::parse(&text, &root).unwrap();
+        let lead = config.role("shop-lead").unwrap();
+        assert_eq!(lead.claude.model.as_deref(), Some("fable"));
+        assert_eq!(lead.claude.effort.as_deref(), Some("xhigh"));
+        let dev = config.role("shop-dev").unwrap();
+        assert_eq!(dev.claude.model.as_deref(), Some("claude-custom-1"));
+        assert_eq!(dev.claude.effort.as_deref(), Some("high"));
+        let reviewer = config.role("shop-reviewer").unwrap();
+        assert_eq!(reviewer.claude.model, None);
+        assert_eq!(reviewer.claude.effort.as_deref(), Some("high"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn invalid_agy_model_effort_combination_is_refused_inline() {
+        let root = git::test_repo("tui-agy-validate");
+        let options = Options {
+            name: Some("app".into()),
+            agent: Some(Kind::Agy),
+            ..Options::default()
+        };
+        let mut wizard = Wizard::new(&root, &options);
+        send(&mut wizard, "{enter}{enter}{enter}");
+        assert_eq!(wizard.step, Step::Models);
+        // Enter roles table on solo dev (gemini-4-neon + high).
+        // Agy model choices: 0=inherit, 1..6=catalog (6 items), 7=custom… (key '8').
+        send(&mut wizard, "e{enter}8{enter}-high{enter}");
+        assert!(
+            wizard
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("conflicts with a model slug"),
+            "{:?}",
+            wizard.message
+        );
+        assert!(!wizard.is_customized());
+        // Clear effort to inherit first, then suffixed slug is allowed.
+        send(&mut wizard, "{right}{bs}{left}{enter}8{enter}-high{enter}");
+        assert!(wizard.message.is_none(), "{:?}", wizard.message);
+        let (selection, text) = finish(&mut wizard, "{esc}{enter}{enter}{enter}");
+        assert!(selection.is_customized());
+        let config = Config::parse(&text, &root).unwrap();
+        assert_eq!(
+            config.roles[0].agy.model.as_deref(),
+            Some("gemini-4-neon-high")
+        );
+        assert_eq!(config.roles[0].agy.effort, None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn changing_profile_agent_or_workflow_clears_stale_overrides() {
+        let root = git::test_repo("tui-reset-overrides");
+        let mut wizard = Wizard::new(&root, &Options::default());
+        send(&mut wizard, "{enter}{enter}{enter}");
+        assert_eq!(wizard.step, Step::Models);
+        // Customize solo model to haiku (Claude choice 5 -> index 4).
+        send(&mut wizard, "e{enter}5{enter}{esc}");
+        assert!(wizard.is_customized());
+        // Switching profile clears overrides.
+        send(&mut wizard, "4");
+        assert!(!wizard.is_customized());
+        // Customize again, then go back to Agent and switch to Codex.
+        send(&mut wizard, "e{enter}5{enter}{esc}{esc}2{enter}");
+        assert_eq!(wizard.step, Step::Models);
+        assert!(!wizard.is_customized());
+        // Customize again, then go back to Workflow and switch to Research.
+        send(
+            &mut wizard,
+            "e{enter}1{enter}{esc}{esc}{esc}4{enter}{enter}",
+        );
+        assert_eq!(wizard.step, Step::Models);
+        assert!(!wizard.is_customized());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -13,8 +13,8 @@ use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, Ta
 use toml_edit::DocumentMut;
 
 use super::{
-    Flow, Screen, TextInput, accent, bold, centered, dim, error, hints, move_in_list, selected,
-    warn,
+    Choice, Flow, Screen, TextInput, accent, bold, centered, dim, draw_custom_popup,
+    draw_pick_popup, effort_choices, error, hints, model_choices, move_in_list, selected, warn,
 };
 use crate::agent::{AgentOptions, Kind};
 use crate::config::{self, Config};
@@ -29,16 +29,6 @@ enum Column {
 }
 
 const COLUMNS: [Column; 3] = [Column::Agent, Column::Model, Column::Effort];
-
-/// One choice in a picker: the value to write (`None` removes the key) and its label.
-#[derive(Clone, Debug)]
-struct Choice {
-    value: Option<String>,
-    label: String,
-    note: String,
-    /// Opens a text field instead of writing.
-    custom: bool,
-}
 
 enum Popup {
     Pick {
@@ -213,63 +203,33 @@ impl Editor {
     fn open_picker(&mut self) {
         let target = self.target();
         let agent = self.agent_of(target);
-        let inherit = |what: &str| Choice {
-            value: None,
-            label: "inherit".into(),
-            note: what.into(),
-            custom: false,
-        };
-        let plain = |value: &str, note: &str| Choice {
-            value: Some(value.to_string()),
-            label: value.to_string(),
-            note: note.to_string(),
-            custom: false,
+        let inherit_note = if target == Target::Defaults {
+            "the agent's own default"
+        } else {
+            "the project default"
         };
         let (title, choices) = match COLUMNS[self.column] {
             Column::Agent => {
                 let mut choices = Vec::new();
                 if target != Target::Defaults {
-                    choices.push(inherit(&format!(
+                    choices.push(Choice::inherit(&format!(
                         "project default ({})",
                         self.config.kind.as_str()
                     )));
                 }
                 for kind in Kind::ALL {
-                    choices.push(plain(kind.as_str(), ""));
+                    choices.push(Choice::plain(kind.as_str(), ""));
                 }
                 ("Agent".to_string(), choices)
             }
-            Column::Model => {
-                let mut choices = vec![inherit(if target == Target::Defaults {
-                    "the agent's own default"
-                } else {
-                    "the project default"
-                })];
-                for (model, note) in models::catalog(agent) {
-                    choices.push(plain(model, note));
-                }
-                choices.push(Choice {
-                    value: None,
-                    label: "custom…".into(),
-                    note: "type a model name".into(),
-                    custom: true,
-                });
-                (format!("{} model", agent.as_str()), choices)
-            }
-            Column::Effort => {
-                let mut choices = vec![inherit(if target == Target::Defaults {
-                    "the agent's own default"
-                } else {
-                    "the project default"
-                })];
-                for effort in models::efforts(agent) {
-                    choices.push(plain(effort, ""));
-                }
-                (
-                    format!("{} {}", agent.as_str(), models::effort_key(agent)),
-                    choices,
-                )
-            }
+            Column::Model => (
+                format!("{} model", agent.as_str()),
+                model_choices(agent, inherit_note),
+            ),
+            Column::Effort => (
+                format!("{} {}", agent.as_str(), models::effort_key(agent)),
+                effort_choices(agent, inherit_note),
+            ),
         };
         // The value written on this row, so that the picker starts there.
         let current = match COLUMNS[self.column] {
@@ -425,41 +385,13 @@ impl Editor {
 
     fn draw_popup(&self, frame: &mut Frame, area: Rect) {
         let Some(popup) = &self.popup else { return };
-        let (title, lines, width) = match popup {
+        match popup {
             Popup::Pick {
                 title,
                 choices,
                 index,
-            } => {
-                let lines: Vec<Line> = choices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| {
-                        let label = format!(" {:<16}", c.label);
-                        if i == *index {
-                            Line::from(vec![
-                                Span::styled(label, selected()),
-                                Span::styled(format!(" {}", c.note), bold()),
-                            ])
-                        } else {
-                            Line::from(vec![
-                                Span::raw(label),
-                                Span::styled(format!(" {}", c.note), dim()),
-                            ])
-                        }
-                    })
-                    .collect();
-                (title.clone(), lines, 72)
-            }
-            Popup::Custom { title, input } => (
-                title.clone(),
-                vec![
-                    input.line(),
-                    Line::from(""),
-                    Line::styled("Enter saves, an empty name inherits, Esc cancels.", dim()),
-                ],
-                60,
-            ),
+            } => draw_pick_popup(frame, area, title, choices, *index),
+            Popup::Custom { title, input } => draw_custom_popup(frame, area, title, input),
             Popup::Profile { index } => {
                 let mut lines: Vec<Line> = Profile::ALL
                     .iter()
@@ -484,19 +416,18 @@ impl Editor {
                     "Sets every role's model and effort for its agent, by its duty.",
                     dim(),
                 ));
-                ("Apply a model profile".into(), lines, 92)
+                let rect = centered(area, 92, lines.len() as u16 + 2);
+                frame.render_widget(Clear, rect);
+                frame.render_widget(
+                    Paragraph::new(lines).block(
+                        Block::bordered()
+                            .border_type(BorderType::Rounded)
+                            .title(Span::styled(" Apply a model profile ", accent())),
+                    ),
+                    rect,
+                );
             }
-        };
-        let rect = centered(area, width, lines.len() as u16 + 2);
-        frame.render_widget(Clear, rect);
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .title(Span::styled(format!(" {title} "), accent())),
-            ),
-            rect,
-        );
+        }
     }
 }
 

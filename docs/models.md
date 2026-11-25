@@ -33,8 +33,11 @@ profiles:
 
 ## Profiles
 
-`herdr-crew init --models PROFILE` (or the wizard's *Models* step) writes each role's model and
-effort into `[roles.<agent>]`. `balanced` is the default.
+`herdr-crew init --models PROFILE` (or the wizard's *Models* step, including first-run `herdr-crew up`) writes each role's model and
+effort into `[roles.<agent>]`. `balanced` is the default. After picking a profile in the setup
+wizard, press `e` or `Tab` to customize any role's model (from the agent's catalog, `custom…`,
+or `inherit`) and effort before saving; in line-by-line mode (`--no-tui`), answer `y` when asked
+whether to customize roles.
 
 | Duty | `economy` | `balanced` | `quality` |
 | --- | --- | --- | --- |
