@@ -10,6 +10,27 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-25
+
+### Added
+
+- Per-role model and effort customization during initial setup (`herdr-crew up` on first run
+  and `herdr-crew init`):
+  - On the TUI setup wizard's *Models* step, press `e`, `c`, or `Tab` to focus the roles table
+    and customize any role's model (from the agent's catalog, `custom…`, or `inherit`) and
+    effort, with inline validation (`Del`/`Backspace` for agent default, `r` to reset to the
+    profile). The fast default path (`Enter` through all steps) is unchanged.
+  - Line-by-line setup (`--no-tui`) offers an optional `"Customize model or effort for any role?"`
+    prompt after selecting a profile (defaulting to `no`).
+
+### Fixed
+
+- `agy`: preflight requires workspace trust before starting roles so `SessionStart` hooks run
+  and inject role prompts, and pending role prompts are preserved across startup dialogs until
+  `SessionStart` consumes them.
+- Codex: peer handoff failures are diagnosed clearly, and rejected prompts are kept out of the
+  repeat guard so retries are not suppressed.
+
 ## [0.9.0] - 2026-11-24
 
 ### Added
@@ -304,7 +325,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/rarce/herdr-crew/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/rarce/herdr-crew/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/rarce/herdr-crew/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/rarce/herdr-crew/compare/v0.7.0...v0.7.1
