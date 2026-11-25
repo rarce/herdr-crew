@@ -69,7 +69,7 @@ fn agy_setup_selects_agent_without_installing_the_hook() {
 }
 
 #[test]
-fn agy_multi_role_presets_default_to_tree_mode_without_remote() {
+fn agy_multi_role_presets_use_tree_mode_without_remote() {
     for (preset, extra_args, expected_manifest) in [
         (
             "review",
@@ -136,76 +136,20 @@ fn agy_multi_role_presets_default_to_tree_mode_without_remote() {
 }
 
 #[test]
-fn agy_topology_tabs_preserves_multi_tab_generation() {
-    let repo = Repo::new(true);
-    success(repo.init(&[
-        "--agent",
-        "agy",
-        "--preset",
-        "review",
-        "--topology",
-        "tabs",
-        "--name",
-        "acme",
-        "--yes",
-    ]));
-    let config = repo.config();
-    assert_eq!(config["kind"].as_str(), Some("agy"));
-    assert!(config.get("agy_tree").is_none());
-    assert_eq!(config["worktrees"]["base"].as_str(), Some("upstream/trunk"));
-    let roles = config["roles"].as_array().unwrap();
-    assert_eq!(roles.len(), 3);
-    assert_eq!(roles[0]["name"].as_str(), Some("acme-lead"));
-    assert_eq!(roles[1]["name"].as_str(), Some("acme-dev"));
-    assert_eq!(roles[2]["name"].as_str(), Some("acme-reviewer"));
-    assert_eq!(roles[1]["worktree"].as_bool(), Some(true));
-    assert_eq!(roles[2]["worktree"].as_bool(), Some(true));
-}
-
-#[test]
-fn invalid_topology_combinations_exit_2_without_writing() {
+fn agy_tree_rejects_topology_flag_and_base_without_writing() {
     let repo = Repo::new(true);
     for options in [
         vec!["--topology", "tree", "--yes"],
         vec![
             "--topology",
-            "tree",
+            "tabs",
             "--agent",
-            "claude",
+            "agy",
             "--preset",
             "review",
             "--yes",
         ],
         vec![
-            "--topology",
-            "tree",
-            "--agent",
-            "codex",
-            "--preset",
-            "parallel",
-            "--yes",
-        ],
-        vec![
-            "--topology",
-            "tree",
-            "--agent",
-            "pi",
-            "--preset",
-            "research",
-            "--yes",
-        ],
-        vec![
-            "--topology",
-            "tree",
-            "--agent",
-            "agy",
-            "--preset",
-            "solo",
-            "--yes",
-        ],
-        vec![
-            "--topology",
-            "tree",
             "--agent",
             "agy",
             "--preset",
@@ -218,7 +162,7 @@ fn invalid_topology_combinations_exit_2_without_writing() {
             "--agent",
             "agy",
             "--preset",
-            "review",
+            "parallel",
             "--base",
             "upstream/trunk",
             "--yes",
@@ -235,22 +179,22 @@ fn invalid_topology_combinations_exit_2_without_writing() {
         repo.unchanged();
     }
 
-    let local = Repo::new(false);
-    let tabs_no_remote = local.init(&[
-        "--agent",
-        "agy",
-        "--preset",
-        "parallel",
-        "--topology",
-        "tabs",
-        "--yes",
-    ]);
-    assert_eq!(tabs_no_remote.status.code(), Some(2));
-    local.unchanged();
+    // `--topology` is rejected as an unknown option on both `init` and `up`.
+    let unknown_init = repo.init(&["--topology", "tree"]);
+    assert_eq!(unknown_init.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unknown_init.stderr).contains("unknown option --topology"));
+    let unknown_up = repo
+        .command()
+        .args(["up", "--topology", "tree", "--dry-run"])
+        .output()
+        .unwrap();
+    assert_eq!(unknown_up.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unknown_up.stderr).contains("unknown option --topology"));
+    repo.unchanged();
 
-    // Without --yes, --agent agy --preset review --base fails immediately before asking.
-    let agy_base_no_yes = repo.interactive(
-        &[
+    // Without --yes, --agent agy --base fails immediately before asking.
+    for args in [
+        vec![
             "--agent",
             "agy",
             "--preset",
@@ -259,19 +203,6 @@ fn invalid_topology_combinations_exit_2_without_writing() {
             "upstream/trunk",
             "--no-tui",
         ],
-        "",
-    );
-    assert_eq!(agy_base_no_yes.status.code(), Some(2));
-    assert!(
-        !String::from_utf8_lossy(&agy_base_no_yes.stdout).contains("Project name"),
-        "{}",
-        String::from_utf8_lossy(&agy_base_no_yes.stdout)
-    );
-    assert!(String::from_utf8_lossy(&agy_base_no_yes.stderr).contains("--topology tabs"));
-    repo.unchanged();
-
-    // Without a remote, --base fails fast before asking or opening a wizard.
-    for args in [
         vec![
             "--agent",
             "agy",
@@ -281,13 +212,31 @@ fn invalid_topology_combinations_exit_2_without_writing() {
             "upstream/trunk",
             "--no-tui",
         ],
+        vec!["--agent", "agy", "--base", "upstream/trunk", "--no-tui"],
+    ] {
+        let out = repo.interactive(&args, "");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("Project name"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("native tree mode without [worktrees]"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        repo.unchanged();
+    }
+
+    // Without a remote, --base fails fast before asking or opening a wizard.
+    let local = Repo::new(false);
+    for args in [
         vec![
             "--agent",
             "agy",
             "--preset",
             "parallel",
-            "--topology",
-            "tabs",
             "--base",
             "upstream/trunk",
             "--no-tui",
@@ -311,30 +260,24 @@ fn invalid_topology_combinations_exit_2_without_writing() {
         local.unchanged();
     }
 
-    // With a remote and --base (without --agent/--preset), interactive review + agy defaults to tabs.
+    // With a remote and --base (without --agent), interactive review rejects agy and accepts claude.
     let interactive_base = repo.interactive(
         &["--base", "upstream/trunk", "--no-tui"],
-        "sample\nreview\nagy\n\n\n\n\ny\n",
+        "sample\nreview\nagy\nclaude\n\n\n\ny\n",
     );
-    success(interactive_base);
+    let out = success(interactive_base);
+    assert!(
+        out.contains("native tree mode without [worktrees]"),
+        "{out}"
+    );
     let base_config = repo.config();
-    assert_eq!(base_config["kind"].as_str(), Some("agy"));
+    assert!(base_config.get("kind").is_none());
     assert!(base_config.get("agy_tree").is_none());
     assert_eq!(
         base_config["worktrees"]["base"].as_str(),
         Some("upstream/trunk")
     );
     assert_eq!(base_config["roles"].as_array().unwrap().len(), 3);
-
-    // `up --topology` on an existing configuration exits 2.
-    success(local.init(&["--agent", "agy", "--preset", "review", "--yes"]));
-    let existing = local
-        .command()
-        .args(["up", "--topology", "tree", "--dry-run"])
-        .output()
-        .unwrap();
-    assert_eq!(existing.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&existing.stderr).contains("--topology"));
 }
 
 #[test]

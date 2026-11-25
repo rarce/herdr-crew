@@ -140,18 +140,18 @@ specifying both keys with contradictory values is rejected):
 - Configuration validation requires **exactly one `agy` coordinator role** without `worktree`
   or `extra` (and cannot be combined with `experimental_codex_tree`). `herdr-crew config`
   also refuses changing the coordinator's agent away from `agy` while `agy_tree` is active.
-- `herdr-crew init` and first-time `herdr-crew up` support `--topology tree|tabs`:
-  - For multi-role `agy` presets (`review`, `parallel`, `research`), `--yes` defaults to
-    `tree` and the interactive wizard (TUI and `--no-tui`) offers a `Topology` step
-    defaulting to `tree`.
-  - `--topology tree` is valid only with `--agent agy` and a multi-role preset (rejected
-    with other agents, `--preset solo`, or `--base`).
-  - Tree mode requires no Git remote and emits no `[worktrees]` section; the `Models` step
-    configures only `<name>-lead`.
+- `herdr-crew init` and first-time `herdr-crew up` always configure multi-role `agy`
+  presets (`review`, `parallel`, `research`) in native tree mode (`agy_tree = true`),
+  with no `Topology` step or `--topology` flag:
+  - `solo` `agy` still creates a single `dev` role without `agy_tree`.
+  - `--base` is rejected with multi-role `agy` because native tree mode does not use
+    `[worktrees]` (and requires no Git remote).
+  - The `Models` step configures only `<name>-lead`.
   - In `review`, isolation chooses between isolated native worktrees (`Workspace: "share"`,
     default) and shared checkout (`Workspace: "inherit"`, via `--shared-checkout`). In
     `parallel`, `dev-a` and `dev-b` default to `Workspace: "share"`.
-  - `--topology tabs` preserves the independent multi-tab configuration.
+  - Existing or manually authored multi-tab `agy` configurations (without `agy_tree = true`,
+    e.g., for mixed-agent crews) remain fully supported at runtime.
 - `prompt::render` emits the `Crew runtime communication (agy native tree):` block: the
   coordinator delegates manifest workers via `invoke_subagent` (`TypeName: "self"` for
   implementers, `"research"` for read-only reviewers/researchers; `Workspace: "share"` or
@@ -219,9 +219,11 @@ Both modes were tested in an isolated Herdr server and temporary repository with
     `send_message` → receive `MODE2_SECOND_ACK` → coordinator summary) succeeded in `22.0 s`
     with zero approval friction, zero sandbox socket blocks, and automatic reactive wakeup.
 
-**Recommendation:** Use `agy_tree = true` (default for multi-role `agy` in `init`, or `--topology tree`) for `agy`-only crews when you want
-Claude-like native messaging fluidity; use independent tabs (`--topology tabs`) when you need separate Herdr
-tabs per role or mixed-agent crews (`agy` + `claude`/`codex`/`pi`).
+**Recommendation:** `herdr-crew init` and first-time `herdr-crew up` always configure
+multi-role `agy` crews with `agy_tree = true` for Claude-like native messaging fluidity
+without sandbox socket friction. Existing or manually authored multi-tab `agy` configs
+(omitting `agy_tree`) remain supported at runtime when you need separate Herdr tabs per
+role or mixed-agent crews (`agy` + `claude`/`codex`/`pi`).
 
 ## Launch options and models
 

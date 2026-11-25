@@ -69,7 +69,7 @@ Launcher removal also works after the plugin has been uninstalled. Use `--bin-di
 
 ## Quick start
 
-The shortest path is to run `herdr-crew up` inside your Git repository. If the project has no `.herdr/crew.toml` yet, `up` runs the [setup wizard](#configure-a-crew) first: choose a workflow and an agent, review the preview, and once it is saved `up` creates the workspace and starts the sessions. `up --yes` takes the defaults (a solo crew) without asking, and accepts `init`'s options (`--preset`, `--name`, `--agent`, `--topology`, `--base`, `--shared-checkout`, `--no-ignore`). Without a terminal to ask in, and as the `herdr-crew.up` action, `up` does not guess: it explains how to set the crew up and changes nothing. Codex, pi and agy crews still need their one-time setup (`codex-install`, `pi-install`, `agy-install`) before their roles can start; `up` says so if it is missing.
+The shortest path is to run `herdr-crew up` inside your Git repository. If the project has no `.herdr/crew.toml` yet, `up` runs the [setup wizard](#configure-a-crew) first: choose a workflow and an agent, review the preview, and once it is saved `up` creates the workspace and starts the sessions. `up --yes` takes the defaults (a solo crew) without asking, and accepts `init`'s options (`--preset`, `--name`, `--agent`, `--base`, `--shared-checkout`, `--no-ignore`). Without a terminal to ask in, and as the `herdr-crew.up` action, `up` does not guess: it explains how to set the crew up and changes nothing. Codex, pi and agy crews still need their one-time setup (`codex-install`, `pi-install`, `agy-install`) before their roles can start; `up` says so if it is missing.
 
 To review the configuration before anything starts:
 
@@ -112,7 +112,7 @@ Preview with `up --agent codex --dry-run`; it does not modify the configuration.
 - **Every role is a running agent.** Each session has its own context and usage, and a crew multiplies both. Start with the smallest preset that can produce a verifiable result.
 - **pi roles need setup.** Run `herdr-crew pi-install` once; the extension keeps each role's prompt in its pi session so that a herdr restore brings the role back.
 - **Codex roles need setup.** Install and trust the crew hook (`herdr-crew codex-install`, then `/hooks` in Codex). Codex's sandbox and approvals stay in effect, and a Codex board writer in a worktree needs the main checkout's `.herdr` in `additional_dirs`.
-- **agy roles need setup.** Run `herdr-crew agy-install` and `herdr integration install antigravity-cli`, and trust each checkout in plain `agy` before launching. For `agy`-only multi-role crews, tree mode (`agy_tree = true`, default in `init`) uses native subagents without Herdr socket access.
+- **agy roles need setup.** Run `herdr-crew agy-install` and `herdr integration install antigravity-cli`, and trust each checkout in plain `agy` before launching. For multi-role `agy` crews, `init` configures native tree mode (`agy_tree = true`), using native subagents without Herdr socket access.
 - **One command at a time per project.** `up`, `add` and `close` on the same project wait for each other instead of racing.
 
 ## Codex and mixed crews
@@ -271,9 +271,9 @@ herdr integration install antigravity-cli
 
 Before starting roles for the first time in a checkout, open plain `agy` in that directory and approve folder trust (`trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`), then exit and run `herdr-crew check`. In untrusted checkouts, `agy` can send `--prompt-interactive` before running global `SessionStart` hooks; `check`, `up` and `add` verify folder trust before launching. `agy-install` registers a `"herdr-crew"` entry in `~/.gemini/config/hooks.json` without touching other hooks; `agy-uninstall` removes only that entry.
 
-### Tree mode (recommended for `agy`-only crews)
+### Tree mode (multi-role `agy` crews)
 
-For multi-role `agy` presets (`review`, `parallel`, `research`), `init` defaults to **tree mode** (`--topology tree`, writing `agy_tree = true`). Herdr opens one coordinator tab (`<name>-lead`) and the status board tab, without `[worktrees]` or a Git remote requirement.
+For multi-role `agy` presets (`review`, `parallel`, `research`), `init` and first-time `up` always configure **tree mode** (`agy_tree = true`). Herdr opens one coordinator tab (`<name>-lead`) and the status board tab, without `[worktrees]` or a Git remote requirement (`solo` still creates a single `dev` role without `agy_tree`).
 
 The coordinator delegates manifest workers via Antigravity's native subagent tools (`invoke_subagent`, `send_message`, `manage_subagents`):
 
@@ -282,9 +282,9 @@ The coordinator delegates manifest workers via Antigravity's native subagent too
 - Worker communication stays inside `agy` with zero Herdr socket access, so `agy`'s default `auto` mode and terminal sandbox work without friction.
 - Only the coordinator writes `.herdr/status.json`; subagent messages never grant user approval.
 
-### Independent tabs (`--topology tabs`)
+### Independent tabs (existing or mixed-agent configs)
 
-Pass `--topology tabs` (or select `tabs` in the wizard) when you want separate Herdr tabs per role or mixed-agent crews (`agy` + `claude`/`codex`/`pi`). Independent `agy` tabs communicate via `herdr-crew send`; note that `agy`'s terminal sandbox (`--sandbox` / `--mode auto`) normally blocks access to the local Herdr socket outside the workspace unless allowed.
+Existing or manually authored multi-tab `agy` configurations (without `agy_tree = true`, for example mixed-agent crews combining `agy` with `claude`/`codex`/`pi`, or separate Herdr tabs per role) remain supported at runtime. Independent `agy` tabs communicate via `herdr-crew send`; note that `agy`'s terminal sandbox (`--sandbox` / `--mode auto`) normally blocks access to the local Herdr socket outside the workspace unless allowed.
 
 ```toml
 version = 1
@@ -377,7 +377,7 @@ in [docs/herdr-core.md](docs/herdr-core.md).
 herdr-crew init
 ```
 
-The wizard asks for a project name, a workflow, the agent (`claude`, `codex`, `pi` or `agy`), a topology (`tree` or `tabs` for multi-role `agy` crews), a model profile, worktree/isolation settings and generated-file ignore rules. It previews the complete configuration before saving. In a terminal it opens a full-screen wizard (arrow keys or numbers to choose, Enter to continue, Esc to go back) that shows each role's model and effort as you pick a profile; command-line flags prefill its answers. `--no-tui` keeps the line-by-line questions, which also run whenever input is not a terminal. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
+The wizard asks for a project name, a workflow, the agent (`claude`, `codex`, `pi` or `agy`), a model profile, worktree/isolation settings and generated-file ignore rules. It previews the complete configuration before saving. In a terminal it opens a full-screen wizard (arrow keys or numbers to choose, Enter to continue, Esc to go back) that shows each role's model and effort as you pick a profile; command-line flags prefill its answers. `--no-tui` keeps the line-by-line questions, which also run whenever input is not a terminal. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
 
 | Preset | Agent sessions | Use it for |
 | --- | --- | --- |
@@ -424,13 +424,13 @@ Generated board files, prompts and optional `.worktrees/` entries are appended t
 ```text
 herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi|agy]
-       [--topology tree|tabs] [--models inherit|economy|balanced|quality]
+       [--models inherit|economy|balanced|quality]
        [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
        [--dry-run]
                                  configure a crew with the setup wizard
   config                         edit each role's agent, model and effort in a terminal UI
   up [--agent claude|codex|pi|agy] [--no-attach] [--dry-run]
-     [--preset ...] [--topology tree|tabs] [--models ...] [--name NAME]
+     [--preset ...] [--models ...] [--name NAME]
      [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
                                  (setup options as for init); --agent on an existing
