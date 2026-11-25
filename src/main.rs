@@ -1101,7 +1101,19 @@ fn check(c: &Config) -> Result<(), Fail> {
             Ok(()) => println!("herdr-crew: the crew agy hook is installed"),
             Err(error) => missing.push(format!("herdr-crew: {error}")),
         }
+        let trust = match agy::TrustedWorkspaces::read() {
+            Ok(trust) => Some(trust),
+            Err(error) => {
+                missing.push(format!("herdr-crew: {error}"));
+                None
+            }
+        };
         for role in c.roles.iter().filter(|r| r.kind == agent::Kind::Agy) {
+            if let Some(trust) = &trust
+                && let Err(error) = trust.require(c, &role.name)
+            {
+                missing.push(format!("herdr-crew: {error}"));
+            }
             let mut effective = role.agy.clone();
             if let Err(error) = effective.resolve_dirs(&c.root) {
                 missing.push(format!("herdr-crew: {}: {error}", role.name));

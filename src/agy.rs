@@ -9,16 +9,20 @@
 //! consumed once, subagents spawned by a coordinator (`experimental_agy_tree`) and resumed
 //! conversations never receive duplicate or leaked role prompts, and non-crew sessions get `{}`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::backend::Started;
 use crate::codex::integration::LAUNCHER_MARKER;
+use crate::config::Config;
 use crate::{files, git, process};
 
 /// Top-level hook key owned by herdr-crew inside `hooks.json`.
@@ -29,6 +33,7 @@ pub const HOOK_COMMAND: &str = "herdr-crew agy-hook";
 pub const MAX_PROMPT: usize = 64 * 1024;
 /// Minimum `agy` version: 1.5.0+ supports base `--model` names with `--effort` and `SessionStart`.
 pub const MIN_AGY: (u32, u32, u32) = (1, 5, 0);
+const HOOK_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -192,6 +197,87 @@ fn preflight_path(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Antigravity persists explicit folder approvals in its user settings. Compare exact
+/// canonical directories so a trusted main checkout does not authorize its worktrees.
+pub struct TrustedWorkspaces(HashSet<PathBuf>);
+
+impl TrustedWorkspaces {
+    pub fn read() -> Result<Self, String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Settings {
+            #[serde(default)]
+            trusted_workspaces: Vec<PathBuf>,
+        }
+
+        let path = home()?.join(".gemini/antigravity-cli/settings.json");
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self(HashSet::new())),
+            Err(e) => {
+                return Err(format!(
+                    "cannot read agy workspace trust from {}: {e}",
+                    path.display()
+                ));
+            }
+        };
+        let settings: Settings = serde_json::from_str(&text).map_err(|e| {
+            format!(
+                "cannot read agy workspace trust from {}: {e}",
+                path.display()
+            )
+        })?;
+        Ok(Self(
+            settings
+                .trusted_workspaces
+                .into_iter()
+                .filter(|path| path.is_absolute())
+                .filter_map(|path| path.canonicalize().ok())
+                .collect(),
+        ))
+    }
+
+    pub fn require(&self, c: &Config, name: &str) -> Result<(), String> {
+        let role = c.session_role(name).expect("a session of a known role");
+        let path = if role.worktree {
+            c.worktree_path(name)
+                .expect("worktree settings for this role")
+        } else {
+            c.root.clone()
+        };
+        match path.canonicalize() {
+            Ok(path) if self.0.contains(&path) => return Ok(()),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound && role.worktree => {
+                let base = c
+                    .worktrees
+                    .as_ref()
+                    .expect("worktree settings for this role");
+                let quote = |text| crate::plan::shell_word(text, false);
+                return Err(format!(
+                    "agy role {name} needs a trusted checkout at {}. From the main checkout, \
+                     create it with `git worktree add --detach {} {}`, then open `agy` in \
+                     that worktree, approve folder trust and exit before retrying",
+                    path.display(),
+                    quote(&path.to_string_lossy()),
+                    quote(&format!("{}/{}", base.remote, base.branch)),
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "cannot resolve the agy checkout for {name} at {}: {e}",
+                    path.display()
+                ));
+            }
+        }
+        Err(format!(
+            "agy role {name} needs a trusted checkout at {}. Open `agy` in that directory \
+             without a prompt, approve folder trust and exit before retrying",
+            path.display()
+        ))
+    }
+}
+
 /// `program`, the `agy` executable that herdr starts, must meet `MIN_AGY`.
 pub fn require_version(program: impl AsRef<std::ffi::OsStr>) -> Result<(u32, u32, u32), String> {
     let found = process::detect(program).map_err(|e| format!("agy --version: {e}"))?;
@@ -288,6 +374,24 @@ impl Slot {
         Ok(())
     }
 
+    /// On timeout, remove only this launch's pending binding under the consumption lock.
+    fn wait_for_hook(&self, token: &str) -> Result<bool, String> {
+        let deadline = Instant::now() + HOOK_WAIT;
+        loop {
+            {
+                let _lock = self.lock()?;
+                if !self.read()?.is_some_and(|pending| pending.token == token) {
+                    return Ok(true);
+                }
+                if Instant::now() >= deadline {
+                    self.remove()?;
+                    return Ok(false);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn remove(&self) -> Result<(), String> {
         fs::remove_file(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))
     }
@@ -295,10 +399,12 @@ impl Slot {
 
 pub fn launch(
     root: &Path,
+    name: &str,
     pane: &str,
     prompt: &str,
-    start: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+    has_start_message: bool,
+    start: impl FnOnce() -> Result<Started, String>,
+) -> Result<Started, String> {
     let slot = Slot::new(&home()?, root, pane, true)?;
     let record = Pending {
         pane: pane.into(),
@@ -310,7 +416,8 @@ pub fn launch(
         let _lock = slot.lock()?;
         if slot.read()?.is_some() {
             return Err(format!(
-                "an agy launch is already pending for {pane} ({})",
+                "an agy launch is already pending for {pane}. If the previous agent has exited \
+                 and its launch was abandoned, remove only {} and retry",
                 slot.path.display()
             ));
         }
@@ -320,12 +427,26 @@ pub fn launch(
             &serde_json::to_string(&record).map_err(|e| e.to_string())?,
         )?;
     }
-    if let Err(error) = start() {
-        slot.cancel(&record.token)
-            .map_err(|e| format!("{error}; could not clear pending launch: {e}"))?;
-        return Err(error);
+    let started = match start() {
+        Ok(started) => started,
+        Err(error) => {
+            slot.cancel(&record.token)
+                .map_err(|e| format!("{error}; could not clear pending launch: {e}"))?;
+            return Err(error);
+        }
+    };
+    // Without an initial message, agy may wait for the first user input to start a conversation.
+    if has_start_message
+        && !slot
+            .wait_for_hook(&record.token)
+            .map_err(|e| format!("cannot verify the agy role prompt for {name} in {pane}: {e}"))?
+    {
+        return Err(format!(
+            "agy role {name} in {pane} did not consume its SessionStart role prompt. \
+             Close that tab, verify folder trust and the crew hook, then retry"
+        ));
     }
-    Ok(())
+    Ok(started)
 }
 
 /// `agy-hook`: invoked by `agy` on `SessionStart`. Reads camelCase JSON on stdin and prints the

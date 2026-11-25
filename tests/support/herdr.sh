@@ -167,6 +167,10 @@ case "${1-} ${2-}" in
         printf 'session-%s' "$pane" > "$t/session"
         touch "$t/running"
         if [ "$injection" = agent_not_ready ]; then error agent_not_ready; fi
+        if [ "$kind" = agy ] && [ ! -f skip-agy-hook ]; then
+            printf '{"cwd":%s,"conversationId":"session-%s"}' "$(cat "$t/cwd")" "$pane" |
+                HERDR_PANE_ID="$pane" "$CREW_TEST_BIN" agy-hook > "$t/agy-hook"
+        fi
         echo '{"result":{}}'
         ;;
     'agent get')

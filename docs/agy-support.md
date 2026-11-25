@@ -26,6 +26,21 @@ Two CLI differences from Claude Code, Codex and pi shape how crew starts `agy`:
    `SessionStart` lifecycle hook (`herdr-crew agy-install` / `herdr-crew agy-hook`) rather
    than a launch flag or custom agent file.
 
+### Approve each checkout before starting a role
+
+In the reported `agy 1.5.16` startup sequence, an untrusted checkout could send
+`--prompt-interactive` before loading even the global `SessionStart` hooks. Approving
+trust after the first turn did not replay that event. [Issue #29](https://github.com/rarce/herdr-crew/issues/29)
+
+Crew checks the canonical path of each new `agy` role against `trustedWorkspaces` in
+`~/.gemini/antigravity-cli/settings.json`. For each checkout listed by `herdr-crew check`,
+`up` or `add`, open plain `agy` in that directory, review and approve the folder in the
+CLI, then exit and retry. The main checkout and each role worktree need separate
+approval. If a role worktree is missing, run the `git worktree add --detach`
+command printed by Crew from the main checkout. Fetch the configured base first
+if its local remote-tracking ref is missing. Only the Antigravity CLI writes the
+trust approval during this workflow. [Antigravity CLI settings](https://antigravity.google/docs/cli/reference/)
+
 ## Role prompt delivery and restoration
 
 `herdr-crew agy-install` requires the public `herdr-crew` launcher on `PATH` and registers a
@@ -50,6 +65,13 @@ user hooks. Installation and preflight use this path even when
 Right before launching an `agy` role (whether via `CreateWorkspace`, `AdoptWorkspace`,
 `CreateTab`, or `add`), crew saves the rendered prompt for that repository and pane in
 the private directory `~/.herdr-crew-agy/`. A failed launch clears its pending prompt.
+When a role has a `start_message`, Crew waits for the hook to consume the binding
+before reporting the role as started. If the binding is still pending five seconds
+after Herdr reports startup, Crew clears it and reports an error. Close the named
+tab, verify checkout trust and hook installation, then retry. If an older
+abandoned launch blocks a reused pane, the error identifies the exact file to
+remove after the old agent has exited. A role without a `start_message` keeps its
+binding available for the first conversation to begin.
 On `SessionStart`, `herdr-crew agy-hook` resolves
 the repository root from `cwd`, atomically consumes the pending binding for `HERDR_PANE_ID` (on herdr-core, for the terminal's `crew.core` label, where it also records the `conversationId` in the terminal's `crew.session` label so that `up` can resume it with `agy --conversation <id>`),
 and returns:
@@ -158,9 +180,10 @@ Both modes were tested in an isolated Herdr server and temporary repository with
     received `MODE1_DEV_ACK` in `4.0 s`.
   - **Hook discovery findings:** `agy 1.5.15` reads global hooks from `~/.gemini/config/hooks.json`
     (ignoring `ANTIGRAVITY_CLI_CONFIG_DIR` for hook loading) and workspace hooks from
-    `.agents/hooks.json` (which are skipped until the folder is trusted). `SessionStart`
-    receives `CREW_AGY_PROMPT_FILE` from the pane environment and injects `systemMessage`
-    cleanly. Ensure `herdr-crew` is on `PATH` so `sh -c "herdr-crew agy-hook"` resolves it.
+    `.agents/hooks.json` (which are skipped until the folder is trusted). The crew's
+    `SessionStart` hook consumes a one-shot binding in `~/.herdr-crew-agy/` and injects
+    the role prompt as a `systemMessage`. Ensure `herdr-crew` is on `PATH` so the hook
+    can invoke it.
   - **Sandbox friction:** `agy`'s default `auto` mode enables the terminal sandbox, blocking
     an `agy` role from calling `herdr-crew send` over the local Herdr socket unless allowed
     outside the sandbox.

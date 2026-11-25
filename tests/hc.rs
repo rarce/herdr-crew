@@ -694,23 +694,27 @@ fn app_install_writes_only_its_own_mod() {
 
 #[test]
 fn agy_roles_get_their_prompt_and_resume_their_conversation() {
-    let f = Fixture::new(&CONFIG.replace("version = 1", "version = 1\nkind = \"agy\""));
+    let f =
+        Fixture::new(&CONFIG.replace("start_message = \"Confirm your role\"", "kind = \"agy\""));
     // agy's preflight needs agy 1.5+, the public launcher on PATH and the crew hook.
     let tools = f.root.join("tools");
     fs::create_dir_all(&tools).unwrap();
     fs::write(tools.join("agy"), "#!/bin/sh\necho 1.5.15\n").unwrap();
     fs::set_permissions(tools.join("agy"), fs::Permissions::from_mode(0o755)).unwrap();
+    let settings = f.root.join(".gemini/antigravity-cli/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(
+        settings,
+        serde_json::json!({"trustedWorkspaces": [f.repo]}).to_string(),
+    )
+    .unwrap();
     launcher(&f);
     ok(&f.run(&["agy-install"]));
     ok(&f.run(&["check"]));
     ok(&f.run(&["up"]));
     let lead = f.tab("lead");
     let start = lead["typed"][0].as_str().unwrap().to_string();
-    assert!(start.starts_with("agy "), "{start}");
-    assert!(
-        start.contains("--prompt-interactive 'Confirm your role'"),
-        "{start}"
-    );
+    assert_eq!(start, "agy");
     assert!(lead["labels"].get("crew.session").is_none(), "{lead:#?}");
 
     // agy's SessionStart hook, run in lead's terminal, takes the role prompt once and records

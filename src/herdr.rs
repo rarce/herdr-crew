@@ -640,6 +640,20 @@ pub fn execute(
         crate::agy::preflight()?;
         crate::agy::require_version("agy")?;
     }
+    let mut agy_starts = plan.steps.iter().filter_map(|step| match step {
+        Step::StartAgent {
+            name,
+            agent: AgentOptions::Agy(_),
+            ..
+        } => Some(name.as_str()),
+        _ => None,
+    });
+    if let Some(first) = agy_starts.next() {
+        let trust = crate::agy::TrustedWorkspaces::read()?;
+        for name in std::iter::once(first).chain(agy_starts) {
+            trust.require(c, name)?;
+        }
+    }
     if !codex_roles.is_empty() {
         codex::validate_runtime(&c.root)?;
     }
@@ -798,25 +812,29 @@ pub fn execute(
                     message: message.as_deref(),
                     resume: None,
                 };
-                let mut start = || {
-                    match herdr.start_agent(&request)? {
-                        Started::Ready => out.step(&format!("{name} in {pane}")),
-                        Started::Waiting
-                        | Started::NewConversation { .. }
-                        | Started::NotResumed => out.warn(
+                let started = if matches!(agent, AgentOptions::Agy(_)) {
+                    let key = herdr.pane_key(&pane)?;
+                    crate::agy::launch(
+                        &c.root,
+                        name,
+                        &key,
+                        prompt_of(name)?,
+                        message.is_some(),
+                        || herdr.start_agent(&request),
+                    )?
+                } else {
+                    herdr.start_agent(&request)?
+                };
+                match started {
+                    Started::Ready => out.step(&format!("{name} in {pane}")),
+                    Started::Waiting | Started::NewConversation { .. } | Started::NotResumed => {
+                        out.warn(
                             herdr,
                             &format!(
                                 "{name} in {pane} is waiting for an answer at startup; check that tab"
                             ),
-                        ),
+                        )
                     }
-                    Ok(())
-                };
-                if matches!(agent, AgentOptions::Agy(_)) {
-                    let key = herdr.pane_key(&pane)?;
-                    crate::agy::launch(&c.root, &key, prompt_of(name)?, start)?;
-                } else {
-                    start()?;
                 }
             }
             Step::ResumeAgent {
