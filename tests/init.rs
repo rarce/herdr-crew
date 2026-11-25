@@ -62,9 +62,222 @@ fn agy_setup_selects_agent_without_installing_the_hook() {
     let text = fs::read_to_string(repo.root.join(".herdr/crew.toml")).unwrap();
     let config: toml::Value = toml::from_str(&text).unwrap();
     assert_eq!(config["kind"].as_str(), Some("agy"));
+    assert!(config.get("agy_tree").is_none());
     assert!(!repo.root.join(".gemini").exists());
     assert!(!repo.root.join(".agents").exists());
     assert!(!repo.root.join("unexpected-agent-call").exists());
+}
+
+#[test]
+fn agy_multi_role_presets_use_tree_mode_without_remote() {
+    for (preset, extra_args, expected_manifest) in [
+        (
+            "review",
+            vec![],
+            vec![
+                "- dev (TypeName: \"self\", Workspace: \"share\")",
+                "- reviewer (TypeName: \"research\", Workspace: \"inherit\")",
+            ],
+        ),
+        (
+            "review",
+            vec!["--shared-checkout"],
+            vec![
+                "- dev (TypeName: \"self\", Workspace: \"inherit\")",
+                "- reviewer (TypeName: \"research\", Workspace: \"inherit\")",
+            ],
+        ),
+        (
+            "parallel",
+            vec![],
+            vec![
+                "- dev-a (TypeName: \"self\", Workspace: \"share\")",
+                "- dev-b (TypeName: \"self\", Workspace: \"share\")",
+                "- reviewer (TypeName: \"research\", Workspace: \"inherit\")",
+            ],
+        ),
+        (
+            "research",
+            vec![],
+            vec![
+                "- research-a (TypeName: \"research\", Workspace: \"inherit\")",
+                "- research-b (TypeName: \"research\", Workspace: \"inherit\")",
+            ],
+        ),
+    ] {
+        let repo = Repo::new(false);
+        let mut args = vec![
+            "--agent", "agy", "--preset", preset, "--name", "acme", "--yes",
+        ];
+        args.extend(extra_args);
+        success(repo.init(&args));
+        let config = repo.config();
+        assert_eq!(config["kind"].as_str(), Some("agy"));
+        assert_eq!(config["agy_tree"].as_bool(), Some(true));
+        assert!(config.get("worktrees").is_none());
+        let roles = config["roles"].as_array().unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0]["name"].as_str(), Some("acme-lead"));
+        assert_eq!(roles[0]["worktree"].as_bool(), Some(false));
+        assert_eq!(roles[0]["extra"].as_bool(), Some(false));
+        assert_eq!(config["board"]["writer"].as_str(), Some("acme-lead"));
+        let prompt = roles[0]["prompt"].as_str().unwrap();
+        for needle in expected_manifest {
+            assert!(prompt.contains(needle), "missing {needle} in:\n{prompt}");
+        }
+        assert!(
+            !fs::read_to_string(repo.root.join(".gitignore"))
+                .unwrap()
+                .contains("/.worktrees/")
+        );
+        let plan = success(repo.command().args(["up", "--dry-run"]).output().unwrap());
+        assert!(plan.contains("acme-lead"), "{plan}");
+    }
+}
+
+#[test]
+fn agy_tree_rejects_topology_flag_and_base_without_writing() {
+    let repo = Repo::new(true);
+    for options in [
+        vec!["--topology", "tree", "--yes"],
+        vec![
+            "--topology",
+            "tabs",
+            "--agent",
+            "agy",
+            "--preset",
+            "review",
+            "--yes",
+        ],
+        vec![
+            "--agent",
+            "agy",
+            "--preset",
+            "review",
+            "--base",
+            "upstream/trunk",
+            "--yes",
+        ],
+        vec![
+            "--agent",
+            "agy",
+            "--preset",
+            "parallel",
+            "--base",
+            "upstream/trunk",
+            "--yes",
+        ],
+    ] {
+        let output = repo.init(&options);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{:?}: {}",
+            options,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        repo.unchanged();
+    }
+
+    // `--topology` is rejected as an unknown option on both `init` and `up`.
+    let unknown_init = repo.init(&["--topology", "tree"]);
+    assert_eq!(unknown_init.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unknown_init.stderr).contains("unknown option --topology"));
+    let unknown_up = repo
+        .command()
+        .args(["up", "--topology", "tree", "--dry-run"])
+        .output()
+        .unwrap();
+    assert_eq!(unknown_up.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unknown_up.stderr).contains("unknown option --topology"));
+    repo.unchanged();
+
+    // Without --yes, --agent agy --base fails immediately before asking.
+    for args in [
+        vec![
+            "--agent",
+            "agy",
+            "--preset",
+            "review",
+            "--base",
+            "upstream/trunk",
+            "--no-tui",
+        ],
+        vec![
+            "--agent",
+            "agy",
+            "--preset",
+            "parallel",
+            "--base",
+            "upstream/trunk",
+            "--no-tui",
+        ],
+        vec!["--agent", "agy", "--base", "upstream/trunk", "--no-tui"],
+    ] {
+        let out = repo.interactive(&args, "");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("Project name"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("native tree mode without [worktrees]"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        repo.unchanged();
+    }
+
+    // Without a remote, --base fails fast before asking or opening a wizard.
+    let local = Repo::new(false);
+    for args in [
+        vec![
+            "--agent",
+            "agy",
+            "--preset",
+            "parallel",
+            "--base",
+            "upstream/trunk",
+            "--no-tui",
+        ],
+        vec!["--base", "upstream/trunk", "--no-tui"],
+    ] {
+        let out = local.interactive(&args, "");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("Project name"),
+            "{:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stdout)
+        );
+        local.unchanged();
+    }
+
+    // With a remote and --base (without --agent), interactive review rejects agy and accepts claude.
+    let interactive_base = repo.interactive(
+        &["--base", "upstream/trunk", "--no-tui"],
+        "sample\nreview\nagy\nclaude\n\n\n\ny\n",
+    );
+    let out = success(interactive_base);
+    assert!(
+        out.contains("native tree mode without [worktrees]"),
+        "{out}"
+    );
+    let base_config = repo.config();
+    assert!(base_config.get("kind").is_none());
+    assert!(base_config.get("agy_tree").is_none());
+    assert_eq!(
+        base_config["worktrees"]["base"].as_str(),
+        Some("upstream/trunk")
+    );
+    assert_eq!(base_config["roles"].as_array().unwrap().len(), 3);
 }
 
 #[test]

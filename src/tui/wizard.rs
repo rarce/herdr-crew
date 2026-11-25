@@ -18,7 +18,7 @@ use super::{
 use crate::agent::Kind;
 use crate::git;
 use crate::init::{self, MAX_PREFIX, Options, Preset, RoleModelOverride, Selection};
-use crate::models::{self, Profile};
+use crate::models::{self, Duty, Profile};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -93,7 +93,9 @@ pub struct Wizard {
     role_row: usize,
     role_col: usize,
     popup: Option<Popup>,
-    isolated: bool,
+    isolated_tabs: bool,
+    isolated_tree: bool,
+    explicit_base: bool,
     base: TextInput,
     ignore: bool,
     has_remote: bool,
@@ -129,8 +131,10 @@ impl Wizard {
             role_row: 0,
             role_col: 0,
             popup: None,
-            isolated: !options.shared_checkout
+            isolated_tabs: !options.shared_checkout
                 && (options.base.is_some() || suggested_base.is_some()),
+            isolated_tree: !options.shared_checkout,
+            explicit_base: options.base.is_some(),
             base: TextInput::new(
                 options
                     .base
@@ -154,14 +158,25 @@ impl Wizard {
         Kind::ALL[self.agent]
     }
 
+    fn is_tree(&self) -> bool {
+        init::uses_agy_tree(self.agent(), self.preset())
+    }
+
     fn profile(&self) -> Profile {
         Profile::ALL[self.profile]
     }
 
+    fn configured_roles(&self) -> &'static [(&'static str, Duty)] {
+        init::configured_roles(self.agent(), self.preset())
+    }
+
     fn uses_worktrees(&self) -> bool {
+        if self.is_tree() {
+            return false;
+        }
         match self.preset() {
             Preset::Parallel => true,
-            Preset::Review => self.isolated,
+            Preset::Review => self.isolated_tabs,
             _ => false,
         }
     }
@@ -180,6 +195,12 @@ impl Wizard {
     }
 
     fn selection(&self) -> Selection {
+        let tree_isolated = self.is_tree()
+            && match self.preset() {
+                Preset::Parallel => true,
+                Preset::Review => self.isolated_tree,
+                _ => false,
+            };
         Selection {
             agent: self.agent(),
             name: self.name.value.clone(),
@@ -189,6 +210,7 @@ impl Wizard {
             base: self
                 .uses_worktrees()
                 .then(|| self.base.value.trim().to_string()),
+            tree_isolated,
             ignore: self.ignore,
         }
     }
@@ -204,14 +226,14 @@ impl Wizard {
     fn is_customized(&self) -> bool {
         let agent = self.agent();
         let profile = self.profile();
-        self.preset().roles().iter().any(|(suffix, duty)| {
+        self.configured_roles().iter().any(|(suffix, duty)| {
             init::role_options(agent, profile, *duty, self.overrides.get(*suffix))
                 != profile.options(agent, *duty)
         })
     }
 
     fn role_effective(&self, row: usize) -> (Option<String>, Option<String>) {
-        let (suffix, duty) = self.preset().roles()[row];
+        let (suffix, duty) = self.configured_roles()[row];
         let options = init::role_options(
             self.agent(),
             self.profile(),
@@ -252,7 +274,7 @@ impl Wizard {
     fn apply_role_value(&mut self, value: Option<String>) {
         let agent = self.agent();
         let profile = self.profile();
-        let (suffix, duty) = self.preset().roles()[self.role_row];
+        let (suffix, duty) = self.configured_roles()[self.role_row];
         let (base_model, base_effort) = init::options_model_effort(&profile.options(agent, duty));
         let mut candidate = self.overrides.get(suffix).cloned().unwrap_or_default();
         match ROLE_COLUMNS[self.role_col] {
@@ -333,10 +355,26 @@ impl Wizard {
             Step::Name if !init::valid_name(&self.name.value) => Err(format!(
                 "Use 1-{MAX_PREFIX} characters: start with a-z, then a-z, 0-9, _ or -."
             )),
-            Step::Workflow if self.preset() == Preset::Parallel && !self.has_remote => {
+            Step::Workflow
+                if self.explicit_base
+                    && !matches!(self.preset(), Preset::Review | Preset::Parallel) =>
+            {
+                Err("--base requires a review or parallel preset using worktrees".into())
+            }
+            Step::Agent if self.explicit_base && self.is_tree() => {
+                Err(init::AGY_TREE_BASE_ERROR.into())
+            }
+            Step::Agent
+                if self.preset() == Preset::Parallel
+                    && self.agent() != Kind::Agy
+                    && !self.has_remote =>
+            {
                 Err(init::no_remote().lines[0].clone())
             }
-            Step::Worktrees if self.isolated && !self.has_remote => {
+            Step::Worktrees if self.explicit_base && !self.is_tree() && !self.isolated_tabs => {
+                Err("--base requires separate worktrees; choose separate or omit --base".into())
+            }
+            Step::Worktrees if !self.is_tree() && self.isolated_tabs && !self.has_remote => {
                 Err(init::no_remote().lines[0].clone())
             }
             Step::Base => {
@@ -404,7 +442,14 @@ impl Wizard {
                         self.profile().as_str().into()
                     }
                 }
-                Step::Worktrees => if self.isolated { "separate" } else { "shared" }.into(),
+                Step::Worktrees => {
+                    let isolated = if self.is_tree() {
+                        self.isolated_tree
+                    } else {
+                        self.isolated_tabs
+                    };
+                    if isolated { "separate" } else { "shared" }.into()
+                }
                 Step::Base => self.base.value.clone(),
                 Step::Ignore => if self.ignore { "yes" } else { "no" }.into(),
                 Step::Review => String::new(),
@@ -462,13 +507,12 @@ impl Wizard {
             .collect()
     }
 
-    /// The roles of the chosen preset with the model and effort the profile (plus overrides) gives them.
+    /// The configured roles with the model and effort the profile (plus overrides) gives them.
     fn roles_table(&self) -> Table<'static> {
         let agent = self.agent();
         let profile = self.profile();
         let rows: Vec<Row> = self
-            .preset()
-            .roles()
+            .configured_roles()
             .iter()
             .map(|(suffix, duty)| {
                 let (base_model, base_effort) =
@@ -550,7 +594,7 @@ impl Wizard {
                 lines.push(Line::from(self.preset().description()));
                 if self.preset() == Preset::Parallel && !self.has_remote {
                     lines.push(Line::styled(
-                        "Needs worktrees, which need a configured Git remote.",
+                        "Separate tabs need a configured Git remote; agy tree mode works without one.",
                         warn(),
                     ));
                 }
@@ -573,10 +617,27 @@ impl Wizard {
                 ];
                 lines.extend(Self::choices(&items, self.agent));
                 lines.push(Line::from(""));
-                lines.push(Line::styled(
-                    "Roles can use different agents later: herdr-crew config.",
-                    dim(),
-                ));
+                if self.explicit_base && self.is_tree() {
+                    lines.push(Line::styled(init::AGY_TREE_BASE_ERROR, warn()));
+                } else if self.preset() == Preset::Parallel
+                    && self.agent() != Kind::Agy
+                    && !self.has_remote
+                {
+                    lines.push(Line::styled(
+                        "Parallel tabs need a configured Git remote (or choose agy for native tree mode).",
+                        warn(),
+                    ));
+                } else if self.is_tree() {
+                    lines.push(Line::styled(
+                        "Multi-role agy uses native tree mode (1 coordinator tab + subagents, no remote needed).",
+                        dim(),
+                    ));
+                } else {
+                    lines.push(Line::styled(
+                        "Roles can use different agents later: herdr-crew config.",
+                        dim(),
+                    ));
+                }
                 frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
             }
             Step::Models => {
@@ -584,7 +645,12 @@ impl Wizard {
                     .iter()
                     .map(|p| (p.as_str().to_string(), p.description().to_string()))
                     .collect();
-                let mut lines = vec![question("Models and effort for each role"), Line::from("")];
+                let prompt_text = if self.is_tree() {
+                    "Model and effort for the coordinator role"
+                } else {
+                    "Models and effort for each role"
+                };
+                let mut lines = vec![question(prompt_text), Line::from("")];
                 lines.extend(Self::choices(&items, self.profile));
                 let height = lines.len() as u16 + 1;
                 let [top, table, foot] = Layout::vertical([
@@ -606,6 +672,8 @@ impl Wizard {
                     "Editing roles: Enter changes a cell, Del uses agent default, r resets to profile, Esc/Tab finishes."
                 } else if self.agent() == Kind::Pi && self.profile() != Profile::Inherit {
                     "pi keeps your provider's model; press e or Tab to customize roles."
+                } else if self.is_tree() {
+                    "Press e or Tab to customize the coordinator's model or effort, or Enter to continue."
                 } else {
                     "Press e or Tab to customize any role's model or effort, or Enter to continue."
                 };
@@ -615,21 +683,41 @@ impl Wizard {
                 );
             }
             Step::Worktrees => {
-                let items = vec![
+                let (title, items, chosen) = if self.is_tree() {
                     (
-                        "separate".to_string(),
-                        "developer and reviewer get their own worktrees (recommended)".to_string(),
-                    ),
+                        "Isolate implementation workers in native worktrees?",
+                        vec![
+                            (
+                                "separate".to_string(),
+                                "isolated native worktrees (Workspace: \"share\", recommended)"
+                                    .to_string(),
+                            ),
+                            (
+                                "shared".to_string(),
+                                "shared main checkout (Workspace: \"inherit\")".to_string(),
+                            ),
+                        ],
+                        usize::from(!self.isolated_tree),
+                    )
+                } else {
                     (
-                        "shared".to_string(),
-                        "everyone works in the main checkout; no remote needed".to_string(),
-                    ),
-                ];
-                let mut lines = vec![
-                    question("Use separate worktrees for development and review?"),
-                    Line::from(""),
-                ];
-                lines.extend(Self::choices(&items, usize::from(!self.isolated)));
+                        "Use separate worktrees for development and review?",
+                        vec![
+                            (
+                                "separate".to_string(),
+                                "developer and reviewer get their own worktrees (recommended)"
+                                    .to_string(),
+                            ),
+                            (
+                                "shared".to_string(),
+                                "everyone works in the main checkout; no remote needed".to_string(),
+                            ),
+                        ],
+                        usize::from(!self.isolated_tabs),
+                    )
+                };
+                let mut lines = vec![question(title), Line::from("")];
+                lines.extend(Self::choices(&items, chosen));
                 frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
             }
             Step::Base => {
@@ -798,7 +886,7 @@ impl Screen for Wizard {
             return Flow::Stay;
         }
         if self.step == Step::Models && self.models_focus == ModelsFocus::Roles {
-            let roles = self.preset().roles().len();
+            let roles = self.configured_roles().len();
             match key.code {
                 KeyCode::Esc | KeyCode::Tab => {
                     self.models_focus = ModelsFocus::Profile;
@@ -883,7 +971,7 @@ impl Screen for Wizard {
                     self.models_focus = ModelsFocus::Roles;
                     self.role_row = self
                         .role_row
-                        .min(self.preset().roles().len().saturating_sub(1));
+                        .min(self.configured_roles().len().saturating_sub(1));
                 }
                 _ => {
                     let prev = self.profile;
@@ -895,9 +983,14 @@ impl Screen for Wizard {
                 }
             },
             Step::Worktrees => {
-                let mut i = usize::from(!self.isolated);
+                let isolated = if self.is_tree() {
+                    &mut self.isolated_tree
+                } else {
+                    &mut self.isolated_tabs
+                };
+                let mut i = usize::from(!*isolated);
                 if move_in_list(key, &mut i, 2) {
-                    self.isolated = i == 0;
+                    *isolated = i == 0;
                 }
             }
             Step::Ignore => {
@@ -1035,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn parallel_without_a_remote_is_refused_at_the_workflow_step() {
+    fn parallel_without_a_remote_refuses_tabs_but_allows_agy_tree() {
         let root = git::test_repo("tui-no-remote");
         let status = std::process::Command::new("git")
             .arg("-C")
@@ -1045,8 +1138,9 @@ mod tests {
             .unwrap();
         assert!(status.success());
         let mut wizard = Wizard::new(&root, &Options::default());
-        send(&mut wizard, "{enter}3{enter}");
-        assert_eq!(wizard.step, Step::Workflow);
+        // Name -> Workflow (3 = parallel) -> Agent (1 = claude, refused without remote)
+        send(&mut wizard, "{enter}3{enter}{enter}");
+        assert_eq!(wizard.step, Step::Agent);
         assert!(
             wizard
                 .message
@@ -1054,7 +1148,63 @@ mod tests {
                 .unwrap()
                 .contains("configured Git remote")
         );
-        assert!(matches!(send(&mut wizard, "q"), Some(Flow::Cancel)));
+        // Switching to agy (4) goes straight to Models (no Topology step) without needing a remote.
+        send(&mut wizard, "4{enter}");
+        assert_eq!(wizard.step, Step::Models);
+        let screen = draw(&mut wizard, 110, 28);
+        assert!(screen.contains("-lead"), "{screen}");
+        assert!(!screen.contains("-dev-a"), "{screen}");
+        assert!(!screen.contains("-reviewer"), "{screen}");
+        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}");
+        assert!(selection.is_tree());
+        assert!(selection.tree_isolated);
+        assert!(selection.base.is_none());
+        let config = Config::parse(&text, &root).unwrap();
+        assert!(config.agy_tree);
+        assert!(config.worktrees.is_none());
+        assert_eq!(config.roles.len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn agy_review_tree_wizard_skips_topology_and_asks_native_isolation_without_base() {
+        let root = git::test_repo("tui-agy-review-tree");
+        let options = Options {
+            name: Some("shop".into()),
+            preset: Some(Preset::Review),
+            agent: Some(Kind::Agy),
+            ..Options::default()
+        };
+        let mut wizard = Wizard::new(&root, &options);
+        // Name -> Workflow -> Agent -> Models (no Topology step; shows only shop-lead)
+        send(&mut wizard, "{enter}{enter}{enter}");
+        assert_eq!(wizard.step, Step::Models);
+        let models_screen = draw(&mut wizard, 110, 28);
+        assert!(!models_screen.contains("Topology"), "{models_screen}");
+        assert!(models_screen.contains("shop-lead"), "{models_screen}");
+        assert!(!models_screen.contains("shop-dev"), "{models_screen}");
+        assert!(!models_screen.contains("shop-reviewer"), "{models_screen}");
+        // Models -> Worktrees (native isolation, defaults to separate / Workspace: "share")
+        send(&mut wizard, "{enter}");
+        assert_eq!(wizard.step, Step::Worktrees);
+        let wt_screen = draw(&mut wizard, 110, 28);
+        assert!(wt_screen.contains("Workspace: \"share\""), "{wt_screen}");
+        assert!(wt_screen.contains("Workspace: \"inherit\""), "{wt_screen}");
+        // Pick shared (2) -> skips Base straight to Ignore -> Review -> Finish
+        send(&mut wizard, "2{enter}");
+        assert_eq!(wizard.step, Step::Ignore);
+        let (selection, text) = finish(&mut wizard, "{enter}{enter}");
+        assert!(selection.is_tree());
+        assert!(!selection.tree_isolated);
+        assert!(selection.base.is_none());
+        let config = Config::parse(&text, &root).unwrap();
+        assert!(config.agy_tree);
+        assert_eq!(config.roles.len(), 1);
+        assert!(
+            config.roles[0]
+                .prompt
+                .contains("- dev (TypeName: \"self\", Workspace: \"inherit\")")
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1169,6 +1319,58 @@ mod tests {
         );
         assert_eq!(wizard.step, Step::Models);
         assert!(!wizard.is_customized());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn explicit_base_refuses_multi_role_agy_and_shared_checkout() {
+        let root = git::test_repo("tui-explicit-base");
+        git::test_remote_branch(&root, "origin/main");
+        let options = Options {
+            name: Some("shop".into()),
+            base: Some("origin/main".into()),
+            ..Options::default()
+        };
+        let mut wizard = Wizard::new(&root, &options);
+        // Solo is refused with --base.
+        send(&mut wizard, "{enter}{enter}");
+        assert_eq!(wizard.step, Step::Workflow);
+        assert!(
+            wizard
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("--base requires a review or parallel preset")
+        );
+        // Review -> Agy is refused at Agent because multi-role agy uses native tree mode.
+        send(&mut wizard, "2{enter}4{enter}");
+        assert_eq!(wizard.step, Step::Agent);
+        assert_eq!(wizard.message.as_deref(), Some(init::AGY_TREE_BASE_ERROR));
+        // Switching back to Workflow and selecting Parallel still refuses Agy at Agent.
+        send(&mut wizard, "{esc}3{enter}{enter}");
+        assert_eq!(wizard.step, Step::Agent);
+        assert_eq!(wizard.message.as_deref(), Some(init::AGY_TREE_BASE_ERROR));
+        // Go back to Review, choose Claude (1) -> Models -> Worktrees.
+        send(&mut wizard, "{esc}2{enter}1{enter}{enter}");
+        assert_eq!(wizard.step, Step::Worktrees);
+        // Choosing shared (2) is refused so --base is not silently discarded.
+        send(&mut wizard, "2{enter}");
+        assert_eq!(wizard.step, Step::Worktrees);
+        assert!(
+            wizard
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("--base requires separate worktrees")
+        );
+        // Pick separate (1) -> Base (origin/main) -> Ignore -> Review -> Finish.
+        let (selection, text) = finish(&mut wizard, "1{enter}{enter}{enter}{enter}");
+        assert!(!selection.is_tree());
+        assert_eq!(selection.agent, Kind::Claude);
+        assert_eq!(selection.base.as_deref(), Some("origin/main"));
+        let config = Config::parse(&text, &root).unwrap();
+        assert!(!config.agy_tree);
+        assert_eq!(config.worktrees.as_ref().unwrap().branch, "main");
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -1,6 +1,6 @@
 # herdr-crew
 
-**Bring up a team of Claude Code, Codex and pi sessions, one per role, from a file you keep in the repository.**
+**Bring up a team of Claude Code, Codex, pi and agy sessions, one per role, from a file you keep in the repository.**
 
 herdr-crew is a [herdr](https://herdr.dev/) plugin. You describe the project's roles once in `.herdr/crew.toml`: their prompts, whether each works in its own git worktree, and which one coordinates. After that, `cd repo && herdr` opens the project's workspace with a tab per role running its selected coding agent, plus a tab with a live status board.
 
@@ -18,9 +18,10 @@ See [the end-to-end demo](docs/demo.md) for one task going from assignment to re
 
 - herdr 0.9.1 or later, on macOS or Linux
 - Rust (stable) with `cargo`: herdr builds the plugin from source when it installs it
-- `git` and the selected agents (`claude`, `codex`, `pi`, or a mix) on the `PATH`
+- `git` and the selected agents (`claude`, `codex`, `pi`, `agy`, or a mix) on the `PATH`
 - Codex roles require herdr 0.9.3+, Codex CLI 0.160.1+ (0.163.0+ for native message queues), the public crew launcher, and the trusted crew hook described below
 - pi roles require herdr 0.9.3+, the crew pi extension (`herdr-crew pi-install`) and herdr's pi integration; they need pi 1.1.0 or newer (`@earendil-works/pi-coding-agent`), whose extension context herdr's pi integration needs to track and resume sessions, and are tested with herdr 0.9.3 and pi 1.1.0
+- Antigravity CLI (`agy`) roles require herdr 0.9.5+, the crew `agy` hook (`herdr-crew agy-install`), herdr's `antigravity-cli` integration (`herdr integration install antigravity-cli`) for session restore, and trusting each checkout in plain `agy` before starting roles
 
 ## Install
 
@@ -68,7 +69,7 @@ Launcher removal also works after the plugin has been uninstalled. Use `--bin-di
 
 ## Quick start
 
-The shortest path is to run `herdr-crew up` inside your Git repository. If the project has no `.herdr/crew.toml` yet, `up` runs the [setup wizard](#configure-a-crew) first: choose a workflow and an agent, review the preview, and once it is saved `up` creates the workspace and starts the sessions. `up --yes` takes the defaults (a solo crew) without asking, and accepts `init`'s options (`--preset`, `--name`, `--agent`, `--base`, `--shared-checkout`, `--no-ignore`). Without a terminal to ask in, and as the `herdr-crew.up` action, `up` does not guess: it explains how to set the crew up and changes nothing. Codex and pi crews still need their one-time setup (`codex-install`, `pi-install`) before their roles can start; `up` says so if it is missing.
+The shortest path is to run `herdr-crew up` inside your Git repository. If the project has no `.herdr/crew.toml` yet, `up` runs the [setup wizard](#configure-a-crew) first: choose a workflow and an agent, review the preview, and once it is saved `up` creates the workspace and starts the sessions. `up --yes` takes the defaults (a solo crew) without asking, and accepts `init`'s options (`--preset`, `--name`, `--agent`, `--base`, `--shared-checkout`, `--no-ignore`). Without a terminal to ask in, and as the `herdr-crew.up` action, `up` does not guess: it explains how to set the crew up and changes nothing. Codex, pi and agy crews still need their one-time setup (`codex-install`, `pi-install`, `agy-install`) before their roles can start; `up` says so if it is missing.
 
 To review the configuration before anything starts:
 
@@ -98,7 +99,7 @@ herdr-crew up --agent codex --no-attach
 
 This saves `kind = "codex"` in `.herdr/crew.toml` and starts missing roles with that default. Existing agents keep running, and an explicit `kind` on a role keeps its priority. Names, prompts, worktrees, comments and agent options remain saved. Later `up`, `add` and startup use the new default; recorded conversations still recover with their original agent and settings.
 
-Every new conversation gets a generated runtime block identifying its crew role, effective coding agent and communication channels, including with old configurations that omit `{{PEERS}}`. It replaces obsolete messaging instructions in custom prompts (for example, Claude-only `SendMessage` after switching to Codex) without rewriting your project instructions. In the standard mode, Codex crew sessions are independent conversations: their role names are not `collaboration` agent paths. Sandboxed Codex still needs a final report when it cannot reach herdr; switching agents does not grant permissions. When a live role still runs another agent, `up` warns that its instructions have not changed. See the [Codex](docs/codex-support.md), [Claude](docs/claude-support.md) and [pi](docs/pi-support.md) investigations, or the separate [experimental native tree mode](docs/codex-tree-experiment.md).
+Every new conversation gets a generated runtime block identifying its crew role, effective coding agent and communication channels, including with old configurations that omit `{{PEERS}}`. It replaces obsolete messaging instructions in custom prompts (for example, Claude-only `SendMessage` after switching to Codex) without rewriting your project instructions. In the standard mode, Codex crew sessions are independent conversations: their role names are not `collaboration` agent paths. Sandboxed Codex still needs a final report when it cannot reach herdr; switching agents does not grant permissions. When a live role still runs another agent, `up` warns that its instructions have not changed. See the [Codex](docs/codex-support.md), [Claude](docs/claude-support.md), [pi](docs/pi-support.md) and [Antigravity CLI (`agy`)](docs/agy-support.md) guides, or the separate [experimental native Codex tree mode](docs/codex-tree-experiment.md).
 
 Preview with `up --agent codex --dry-run`; it does not modify the configuration. Requirements for newly started agents, including Codex hook trust or the pi extension, are checked before saving. If a role's tab remains after its agent exits, `up` continues to offer recovery of that conversation; close the tab before `up` to create a new conversation with the selected agent.
 
@@ -111,6 +112,7 @@ Preview with `up --agent codex --dry-run`; it does not modify the configuration.
 - **Every role is a running agent.** Each session has its own context and usage, and a crew multiplies both. Start with the smallest preset that can produce a verifiable result.
 - **pi roles need setup.** Run `herdr-crew pi-install` once; the extension keeps each role's prompt in its pi session so that a herdr restore brings the role back.
 - **Codex roles need setup.** Install and trust the crew hook (`herdr-crew codex-install`, then `/hooks` in Codex). Codex's sandbox and approvals stay in effect, and a Codex board writer in a worktree needs the main checkout's `.herdr` in `additional_dirs`.
+- **agy roles need setup.** Run `herdr-crew agy-install` and `herdr integration install antigravity-cli`, and trust each checkout in plain `agy` before launching. For multi-role `agy` crews, `init` configures native tree mode (`agy_tree = true`), using native subagents without Herdr socket access.
 - **One command at a time per project.** `up`, `add` and `close` on the same project wait for each other instead of racing.
 
 ## Codex and mixed crews
@@ -257,6 +259,68 @@ Crew validates the effective provider/model combination after applying defaults 
 
 `[pi]` sets defaults and `[roles.pi]` overrides individual options; extras inherit their base role's. Options for an inactive agent remain saved for a later switch and are not passed to the selected agent. If a pi tab loses its agent, `up` suggests `pi --session <file>` with the session herdr recorded; the extension restores the role from it. A role whose conversation never sent a request has no session file to resume: close its tab and run `herdr-crew up`. Pi's project trust controls resource loading, rather than approving each tool call; a pi role can run commands with the permissions of its process. See [pi's trust and isolation model](https://pi.dev/docs/latest/security).
 
+## Antigravity CLI (`agy`)
+
+[Antigravity CLI (`agy`)](https://antigravity.google/docs/cli/reference/) roles start through herdr's native `agent start --kind agy` and deliver role prompts via a `SessionStart` lifecycle hook. Set up an `agy` crew with:
+
+```sh
+herdr-crew init --agent agy --preset review --yes
+herdr-crew agy-install
+herdr integration install antigravity-cli
+```
+
+Before starting roles for the first time in a checkout, open plain `agy` in that directory and approve folder trust (`trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`), then exit and run `herdr-crew check`. In untrusted checkouts, `agy` can send `--prompt-interactive` before running global `SessionStart` hooks; `check`, `up` and `add` verify folder trust before launching. `agy-install` registers a `"herdr-crew"` entry in `~/.gemini/config/hooks.json` without touching other hooks; `agy-uninstall` removes only that entry.
+
+### Tree mode (multi-role `agy` crews)
+
+For multi-role `agy` presets (`review`, `parallel`, `research`), `init` and first-time `up` always configure **tree mode** (`agy_tree = true`). Herdr opens one coordinator tab (`<name>-lead`) and the status board tab, without `[worktrees]` or a Git remote requirement (`solo` still creates a single `dev` role without `agy_tree`).
+
+The coordinator delegates manifest workers via Antigravity's native subagent tools (`invoke_subagent`, `send_message`, `manage_subagents`):
+
+- Implementers use `TypeName: "self"` with `Workspace: "share"` for isolated native git worktrees (or `Workspace: "inherit"` in `review --shared-checkout`).
+- Reviewers and researchers use `TypeName: "research"` with `Workspace: "inherit"` (read-only).
+- Worker communication stays inside `agy` with zero Herdr socket access, so `agy`'s default `auto` mode and terminal sandbox work without friction.
+- Only the coordinator writes `.herdr/status.json`; subagent messages never grant user approval.
+
+### Independent tabs (existing or mixed-agent configs)
+
+Existing or manually authored multi-tab `agy` configurations (without `agy_tree = true`, for example mixed-agent crews combining `agy` with `claude`/`codex`/`pi`, or separate Herdr tabs per role) remain supported at runtime. Independent `agy` tabs communicate via `herdr-crew send`; note that `agy`'s terminal sandbox (`--sandbox` / `--mode auto`) normally blocks access to the local Herdr socket outside the workspace unless allowed.
+
+```toml
+version = 1
+kind = "agy"
+agy_tree = true
+
+[agy]
+model = "gemini-4-neon"
+effort = "high"
+
+[workspace]
+label = "payments"
+
+[board]
+tab = "payments-status"
+writer = "payments-lead"
+
+[[roles]]
+name = "payments-lead"
+prompt = '''You are {{NAME}} in {{REPO}}. Coordinate the manifest workers via invoke_subagent.'''
+```
+
+| `agy` option | Values |
+| --- | --- |
+| `model` | A base model ID (e.g. `gemini-4-argon`, `gemini-4-neon`, `gemini-4-hydrogen`, `gemini-3.8-flash`); passed as `--model` |
+| `effort` | `low`, `medium`, `high`, `xhigh`, `max`; passed as `--effort` (cannot combine with effort-suffixed model slugs or `orchestrator`) |
+| `mode` | `accept-edits`, `auto`, `plan`; passed as `--mode` |
+| `sandbox` | `true` to pass `--sandbox` |
+| `additional_dirs` | Existing directories, absolute or relative to the main checkout; repeatable `--add-dir` |
+
+`[agy]` sets defaults and `[roles.agy]` overrides individual options. `experimental_agy_tree = true` remains accepted as a backward-compatible alias for `agy_tree = true`.
+
+### Recovery
+
+Herdr restores `agy` sessions with `agy --conversation <id>`. Because the `SessionStart` hook injects the role prompt as a persisted `systemMessage` and atomically consumes its one-shot binding, restored sessions retain their role instructions without leaking them to subagents. In tree mode, after a restore the coordinator checks `manage_subagents (Action: "list")` first to reuse any surviving worker `conversationId` via `send_message`, and reports recovery failures rather than spawning duplicate workers. See [Antigravity CLI (`agy`) support](docs/agy-support.md) for details.
+
 ## Herdr app (herdr-core), experimental
 
 Herdr TUI is being replaced by [herdr-core](https://herdr.dev/core/) (`hc`) and the Herdr app.
@@ -313,7 +377,7 @@ in [docs/herdr-core.md](docs/herdr-core.md).
 herdr-crew init
 ```
 
-The wizard asks for a project name, a workflow, the agent (`claude`, `codex` or `pi`), a model profile, worktree settings and generated-file ignore rules. It previews the complete configuration before saving. In a terminal it opens a full-screen wizard (arrow keys or numbers to choose, Enter to continue, Esc to go back) that shows each role's model and effort as you pick a profile; command-line flags prefill its answers. `--no-tui` keeps the line-by-line questions, which also run whenever input is not a terminal. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
+The wizard asks for a project name, a workflow, the agent (`claude`, `codex`, `pi` or `agy`), a model profile, worktree/isolation settings and generated-file ignore rules. It previews the complete configuration before saving. In a terminal it opens a full-screen wizard (arrow keys or numbers to choose, Enter to continue, Esc to go back) that shows each role's model and effort as you pick a profile; command-line flags prefill its answers. `--no-tui` keeps the line-by-line questions, which also run whenever input is not a terminal. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
 
 | Preset | Agent sessions | Use it for |
 | --- | --- | --- |
@@ -335,7 +399,7 @@ Each role can run its own model and effort. `init` writes them from a profile, b
 | `balanced` (default) | opus · high | sonnet · high | opus · high | sonnet · medium |
 | `quality` | fable · high | opus · xhigh | fable · high | opus · high |
 
-Claude Code names are shown; Codex roles get `gpt-6.2-astra`, `gpt-6.2-sol` or `gpt-6-luna`, and pi roles keep their provider's model and get only the thinking level. The reasoning behind these choices and when a change takes effect are in [models and effort](docs/models.md).
+Claude Code names are shown; Codex roles get `gpt-6.2-astra`, `gpt-6.2-sol` or `gpt-6-luna`, `agy` roles get `gemini-4-argon`, `gemini-4-neon`, `gemini-4-hydrogen` or `gemini-3.8-flash`, and pi roles keep their provider's model and get only the thinking level. The reasoning behind these choices and when a change takes effect are in [models and effort](docs/models.md).
 
 Change them later with `herdr-crew config`, a terminal editor for the agent, model and effort of the defaults and of each role. `p` applies a profile to every role, `Del` returns a value to its default, `s` saves. Edits are validated before they apply, and saving keeps the file's comments and formatting.
 
@@ -359,14 +423,15 @@ Generated board files, prompts and optional `.worktrees/` entries are appended t
 
 ```text
 herdr-crew [--root DIR] <command>
-  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi]
-       [--models inherit|economy|balanced|quality] [--base REMOTE/BRANCH]
-       [--shared-checkout] [--no-ignore] [--no-tui] [--yes] [--dry-run]
+  init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi|agy]
+       [--models inherit|economy|balanced|quality]
+       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
+       [--dry-run]
                                  configure a crew with the setup wizard
   config                         edit each role's agent, model and effort in a terminal UI
-  up [--agent claude|codex|pi] [--no-attach] [--dry-run]
-     [--preset ...] [--models ...] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout]
-     [--no-ignore] [--no-tui] [--yes]
+  up [--agent claude|codex|pi|agy] [--no-attach] [--dry-run]
+     [--preset ...] [--models ...] [--name NAME]
+     [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
                                  (setup options as for init); --agent on an existing
                                  crew saves a new default agent
@@ -383,6 +448,10 @@ herdr-crew [--root DIR] <command>
   codex-resume <binding>          recover a saved Codex session in its role tab
   pi-install                     install the crew pi extension that keeps role prompts
   pi-uninstall                   remove only the crew pi extension
+  agy-install                    install the crew agy SessionStart hook that delivers role prompts
+  agy-uninstall                  remove only the crew agy hook
+  app-install                    install the Herdr app mod Crew (herdr-core, experimental)
+  app-uninstall                  remove only the crew's Herdr app mod
   check                          validate the configuration and the dependencies
   startup                        herdr's startup hook: bring up or repair the projects in herdr
 ```
@@ -445,12 +514,17 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
 
 | Key                | Required         | Meaning                                                                                                                                                                                             |
 | ------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `kind`             | no               | Project agent default: `claude`, `codex` or `pi`; absent means Claude. |
+| `kind`             | no               | Project agent default: `claude`, `codex`, `pi` or `agy`; absent means Claude. |
+| `agy_tree`         | no               | `true` for single-coordinator `agy` native subagent tree mode (requires 1 `agy` role without `worktree` or `extra`). `experimental_agy_tree` is accepted as a legacy alias. |
+| `claude`           | no               | Typed defaults for Claude Code roles, described above. |
 | `codex`            | no               | Typed defaults for Codex roles, described above. |
 | `pi`               | no               | Typed defaults for pi roles, described above. |
+| `agy`              | no               | Typed defaults for `agy` roles, described above. |
 | `roles[].kind`     | no               | Overrides the project agent default. |
+| `roles[].claude`   | no               | Overrides individual Claude defaults; used when the role runs Claude. |
 | `roles[].codex`    | no               | Overrides individual Codex defaults; used when the role runs Codex. |
 | `roles[].pi`       | no               | Overrides individual pi defaults; used when the role runs pi. |
+| `roles[].agy`      | no               | Overrides individual `agy` defaults; used when the role runs `agy`. |
 | `version`          | yes              | Always `1`.                                                                                                                                                                                         |
 | `common_prompt`    | no               | Text appended to every role's prompt.                                                                                                                                                               |
 | `start_message`    | no               | The first message of each new conversation, one line of at most 200 bytes. Sent only when a tab is created (`up`, the startup hook's first bring-up, `add`), never on a resume or a repair. It costs one request per role on every fresh start, so it should not ask for changes to the tree. |
@@ -479,7 +553,7 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
   | `{{LAUNCHER}}` | the binary's absolute path              |
   | `{{PEERS}}`    | how this session reaches each other role, from its own kind and sandbox (see [messaging](docs/messaging.md)) |
 
-- The result is written to `.herdr/prompts/<name>.txt`. Claude receives it with `--append-system-prompt-file`; Codex receives a saved copy through the crew hook as additional developer context; pi receives it through the crew pi extension, which appends it to the system prompt.
+- The result is written to `.herdr/prompts/<name>.txt`. Claude receives it with `--append-system-prompt-file`; Codex receives a saved copy through the crew hook as additional developer context; pi receives it through the crew pi extension, which appends it to the system prompt; `agy` receives it through the crew `SessionStart` hook as a persisted `systemMessage`.
 - Use literal strings (`'''…'''`): they keep backslashes as written. Basic strings (`"""…"""`) are accepted too.
 
 **Validation.** Unknown keys and unknown placeholders are errors, and every error is reported at once with its line and column:

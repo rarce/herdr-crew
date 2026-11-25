@@ -42,13 +42,14 @@ use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, Worksp
 
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi|agy]
-       [--models inherit|economy|balanced|quality] [--base REMOTE/BRANCH]
-       [--shared-checkout] [--no-ignore] [--no-tui] [--yes] [--dry-run]
+       [--models inherit|economy|balanced|quality]
+       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
+       [--dry-run]
                                  configure a crew with the setup wizard
   config                         edit each role's agent, model and effort in a terminal UI
   up [--agent claude|codex|pi|agy] [--no-attach] [--dry-run]
-     [--preset ...] [--models ...] [--name NAME] [--base REMOTE/BRANCH] [--shared-checkout]
-     [--no-ignore] [--no-tui] [--yes]
+     [--preset ...] [--models ...] [--name NAME]
+     [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
                                  (setup options as for init); --agent on an existing
                                  crew saves a new default agent
@@ -1294,8 +1295,9 @@ fn run() -> Result<(), Fail> {
             || i.no_ignore
         {
             return Err(Fail::usage(format!(
-                "--preset, --models, --name, --base, --shared-checkout, --no-ignore and --no-tui \
-                 only apply when up sets up a new crew; {} already exists, so edit it instead",
+                "--preset, --models, --name, --base, --shared-checkout, --no-ignore \
+                 and --no-tui only apply when up sets up a new crew; {} already exists, so edit \
+                 it instead",
                 path.display()
             )));
         }
@@ -1373,9 +1375,9 @@ mod tests {
         let a = args("board --file /f --once --interval 2").unwrap();
         assert!(a.once && a.interval == Some(Duration::from_secs(2)));
         // Without a configuration, up sets one up first and takes init's options for it.
-        let up = args("up --preset review --name acme --agent codex --yes --no-attach").unwrap();
+        let up = args("up --preset review --name acme --agent agy --yes --no-attach").unwrap();
         assert_eq!(up.init.preset, Some(init::Preset::Review));
-        assert_eq!(up.init.agent, Some(agent::Kind::Codex));
+        assert_eq!(up.init.agent, Some(agent::Kind::Agy));
         assert!(up.init.yes && up.no_attach);
     }
 
@@ -1476,6 +1478,12 @@ mod tests {
             "startup now",
             "startup --dry-run",
             "init --preset unknown",
+            "init --topology",
+            "init --topology tree",
+            "init --topology tabs",
+            "up --topology tree",
+            "check --topology tree",
+            "board --topology tabs",
             "init --base",
             "up --preset unknown",
             "check --name acme",

@@ -43,7 +43,7 @@ pub struct Config {
     /// Prompt topology for the separate single-coordinator Codex experiment; no worker lifecycle.
     pub experimental_codex_tree: bool,
     /// Prompt topology for the single-coordinator Antigravity native-subagent mode.
-    pub experimental_agy_tree: bool,
+    pub agy_tree: bool,
     pub kind: Kind,
     pub claude: ClaudeOptions,
     pub codex: CodexOptions,
@@ -108,7 +108,9 @@ struct RawConfig {
     #[serde(default)]
     experimental_codex_tree: bool,
     #[serde(default)]
-    experimental_agy_tree: bool,
+    agy_tree: Option<bool>,
+    #[serde(default)]
+    experimental_agy_tree: Option<bool>,
     #[serde(default)]
     kind: Kind,
     #[serde(default)]
@@ -170,6 +172,7 @@ struct RawRole {
 /// Known keys per table; checked before `serde` so that all of them are reported at once.
 const ROOT_KEYS: &[&str] = &[
     "experimental_codex_tree",
+    "agy_tree",
     "experimental_agy_tree",
     "version",
     "kind",
@@ -276,8 +279,16 @@ impl Config {
         if raw.roles.is_empty() {
             err("roles[] is empty: at least one role is needed".to_string());
         }
-        if raw.experimental_codex_tree && raw.experimental_agy_tree {
-            err("experimental_codex_tree and experimental_agy_tree cannot both be enabled".into());
+        let agy_tree = match (raw.agy_tree, raw.experimental_agy_tree) {
+            (Some(a), Some(b)) if a != b => {
+                err("agy_tree and experimental_agy_tree cannot have contradictory values".into());
+                false
+            }
+            (Some(v), _) | (_, Some(v)) => v,
+            (None, None) => false,
+        };
+        if raw.experimental_codex_tree && agy_tree {
+            err("experimental_codex_tree and agy_tree cannot both be enabled".into());
         }
         if raw.experimental_codex_tree
             && (raw.roles.len() != 1
@@ -288,14 +299,14 @@ impl Config {
         {
             err("experimental_codex_tree requires exactly one Codex coordinator without worktree or extra".into());
         }
-        if raw.experimental_agy_tree
+        if agy_tree
             && (raw.roles.len() != 1
                 || raw
                     .roles
                     .iter()
                     .any(|r| r.kind.unwrap_or(raw.kind) != Kind::Agy || r.worktree || r.extra))
         {
-            err("experimental_agy_tree requires exactly one agy coordinator without worktree or extra".into());
+            err("agy_tree requires exactly one agy coordinator without worktree or extra".into());
         }
         for problem in raw.claude.problems() {
             err(format!("claude.{problem}"));
@@ -449,7 +460,7 @@ impl Config {
         Ok(Config {
             root: root.to_path_buf(),
             experimental_codex_tree: raw.experimental_codex_tree,
-            experimental_agy_tree: raw.experimental_agy_tree,
+            agy_tree,
             kind: raw.kind,
             claude: raw.claude.clone(),
             codex: raw.codex.clone(),
@@ -484,6 +495,11 @@ impl Config {
                 })
                 .collect(),
         })
+    }
+
+    /// Whether this crew runs in single-coordinator native tree mode.
+    pub fn is_tree(&self) -> bool {
+        self.agy_tree || self.experimental_codex_tree
     }
 
     pub fn role(&self, name: &str) -> Option<&Role> {
@@ -1202,7 +1218,11 @@ prompt = '''You are {{NAME}}.'''
     fn experimental_tree_requires_one_shared_codex_coordinator() {
         let text = format!("experimental_codex_tree = true\nkind = \"codex\"\n{MIN}");
         let root = Path::new("/r/p");
-        assert!(Config::parse(&text, root).unwrap().experimental_codex_tree);
+        let parsed_codex = Config::parse(&text, root).unwrap();
+        assert!(parsed_codex.experimental_codex_tree);
+        assert!(parsed_codex.is_tree());
+        assert_eq!(parsed_codex.session_order("dev"), None);
+        assert!(!parsed_codex.is_known_tab("dev"));
         assert!(Config::select_agent(&text, root, Kind::Pi).is_err());
         for suffix in [
             "extra = true\n",
@@ -1215,37 +1235,113 @@ prompt = '''You are {{NAME}}.'''
                     .any(|error| error.contains("exactly one Codex coordinator"))
             );
         }
-        assert!(!Config::parse(MIN, root).unwrap().experimental_codex_tree);
+        let plain = Config::parse(MIN, root).unwrap();
+        assert!(!plain.experimental_codex_tree);
+        assert!(!plain.is_tree());
     }
 
     #[test]
-    fn experimental_agy_tree_requires_one_shared_agy_coordinator() {
-        let text = format!("experimental_agy_tree = true\nkind = \"agy\"\n{MIN}");
+    fn agy_tree_and_legacy_alias_require_one_shared_agy_coordinator() {
         let root = Path::new("/r/p");
-        assert!(Config::parse(&text, root).unwrap().experimental_agy_tree);
-        assert!(Config::select_agent(&text, root, Kind::Claude).is_err());
-        for suffix in [
-            "extra = true\n",
-            "worktree = true\n",
-            "[[roles]]\nname = \"second\"\nprompt = \"Worker\"\n",
-        ] {
+        for key in ["agy_tree", "experimental_agy_tree"] {
+            let text = format!("{key} = true\nkind = \"agy\"\n{MIN}");
+            assert!(Config::parse(&text, root).unwrap().agy_tree, "{key}");
+            assert!(Config::select_agent(&text, root, Kind::Claude).is_err());
+            for suffix in [
+                "extra = true\n",
+                "worktree = true\n",
+                "[[roles]]\nname = \"second\"\nprompt = \"Worker\"\n",
+            ] {
+                assert!(
+                    errors(&format!("{text}{suffix}"))
+                        .iter()
+                        .any(|error| error.contains("exactly one agy coordinator")),
+                    "{key} + {suffix}"
+                );
+            }
+            let both = format!("experimental_codex_tree = true\n{text}");
             assert!(
-                errors(&format!("{text}{suffix}"))
+                errors(&both)
                     .iter()
-                    .any(|error| error.contains("exactly one agy coordinator"))
+                    .any(|error| error.contains("cannot both be enabled")),
+                "{key}"
             );
         }
-        let both = format!("experimental_codex_tree = true\n{text}");
-        assert!(
-            errors(&both)
-                .iter()
-                .any(|error| error.contains("cannot both be enabled"))
+        // Agreeing values are accepted; contradictory values fail validation.
+        let both_true =
+            format!("agy_tree = true\nexperimental_agy_tree = true\nkind = \"agy\"\n{MIN}");
+        assert!(Config::parse(&both_true, root).unwrap().agy_tree);
+        let both_false = format!("agy_tree = false\nexperimental_agy_tree = false\n{MIN}");
+        assert!(!Config::parse(&both_false, root).unwrap().agy_tree);
+        for conflict in [
+            format!("agy_tree = true\nexperimental_agy_tree = false\nkind = \"agy\"\n{MIN}"),
+            format!("agy_tree = false\nexperimental_agy_tree = true\nkind = \"agy\"\n{MIN}"),
+        ] {
+            assert!(
+                errors(&conflict)
+                    .iter()
+                    .any(|error| error.contains("contradictory")),
+                "{conflict}"
+            );
+        }
+        let multi_role_conflict = format!(
+            "agy_tree = true\nexperimental_agy_tree = false\n{MIN}[[roles]]\nname = \"p-dev\"\nprompt = \"Dev\"\n"
         );
-        assert!(!Config::parse(MIN, root).unwrap().experimental_agy_tree);
+        let conflict_errors = errors(&multi_role_conflict);
+        assert_eq!(conflict_errors.len(), 1, "{conflict_errors:?}");
+        assert!(
+            conflict_errors[0].contains("contradictory"),
+            "{conflict_errors:?}"
+        );
+        assert!(
+            !conflict_errors
+                .iter()
+                .any(|error| error.contains("exactly one agy coordinator")),
+            "{conflict_errors:?}"
+        );
+        assert!(!Config::parse(MIN, root).unwrap().agy_tree);
         let fixture = include_str!("../tests/fixtures/crew-agy-tree.toml");
         let parsed = Config::parse(fixture, root).unwrap();
-        assert!(parsed.experimental_agy_tree);
+        assert!(parsed.agy_tree);
+        assert!(parsed.is_tree());
         assert_eq!(parsed.kind, Kind::Agy);
         assert_eq!(parsed.roles.len(), 1);
+        assert_eq!(parsed.session_order("agy-lead"), Some((0, 1)));
+        assert_eq!(parsed.session_order("dev"), None);
+        assert!(!parsed.is_known_tab("dev"));
+    }
+
+    #[test]
+    fn config_editor_rejects_changing_agent_while_agy_tree_is_active() {
+        use crate::tui::editor::Editor;
+        use crate::tui::testing::{draw, send};
+
+        let root = Path::new("/r/p");
+        for text in [
+            format!("agy_tree = true\nkind = \"agy\"\n{MIN}"),
+            include_str!("../tests/fixtures/crew-agy-tree.toml").to_string(),
+        ] {
+            let mut editor = Editor::new(root, &text).unwrap();
+            // Defaults row (row 0, col 0 = Agent): try switching from agy to claude (index 0).
+            send(&mut editor, "{enter}1{enter}");
+            let screen = draw(&mut editor, 120, 30);
+            assert!(
+                screen.contains("not applied: agy_tree requires exactly one agy coordinator"),
+                "{screen}"
+            );
+            assert!(!screen.contains("unsaved"), "{screen}");
+            // Coordinator row (row 1, col 0 = Agent): try overriding role agent to codex (index 2).
+            send(&mut editor, "{down}{enter}3{enter}");
+            let screen = draw(&mut editor, 120, 30);
+            assert!(
+                screen.contains("not applied: agy_tree requires exactly one agy coordinator"),
+                "{screen}"
+            );
+            assert!(!screen.contains("unsaved"), "{screen}");
+            // Changing the coordinator's effort still works normally.
+            send(&mut editor, "{right}{right}{enter}2{enter}");
+            let screen = draw(&mut editor, 120, 30);
+            assert!(screen.contains("unsaved"), "{screen}");
+        }
     }
 }

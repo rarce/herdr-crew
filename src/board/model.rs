@@ -30,7 +30,8 @@ impl State {
 pub struct Status {
     pub updated_at: Timestamp,
     pub updated_by: String,
-    /// In `roles[]` order, each extra instance after its base role by number.
+    /// In `roles[]` order, each extra instance after its base role by number; in tree mode,
+    /// coordinator first followed by native subagent workers in listed order.
     pub sessions: Vec<Session>,
     pub owner: Owner,
     pub recent: Vec<Recent>,
@@ -139,11 +140,20 @@ pub fn load(bytes: &[u8], c: &Config) -> Result<Status, Unavailable> {
                 continue;
             }
         };
-        if c.session_order(&s.role).is_none() {
-            errors.push(format!(
-                "{path}.role: \"{}\" is not a role or an extra instance of roles[]",
-                s.role
-            ));
+        let valid_role = c.session_order(&s.role).is_some()
+            || (c.is_tree() && crate::config::is_agent_name(&s.role));
+        if !valid_role {
+            if c.is_tree() {
+                errors.push(format!(
+                    "{path}.role: \"{}\" must be the coordinator role or a valid worker name ([a-z][a-z0-9_-]{{0,31}})",
+                    s.role
+                ));
+            } else {
+                errors.push(format!(
+                    "{path}.role: \"{}\" is not a role or an extra instance of roles[]",
+                    s.role
+                ));
+            }
         } else if sessions.iter().any(|o| o.role == s.role) {
             errors.push(format!("{path}.role: \"{}\" is repeated", s.role));
         }
@@ -199,7 +209,7 @@ pub fn load(bytes: &[u8], c: &Config) -> Result<Status, Unavailable> {
 
     match (errors.is_empty(), updated_at, owner) {
         (true, Some(updated_at), Some(owner)) => {
-            sessions.sort_by_key(|s| c.session_order(&s.role));
+            sessions.sort_by_key(|s| c.session_order(&s.role).unwrap_or((usize::MAX, 0)));
             Ok(Status {
                 updated_at,
                 updated_by: raw.updated_by,
@@ -383,6 +393,84 @@ pub(crate) mod tests {
             panic!()
         };
         assert!(msg.contains("line 1 column"), "{msg}");
+    }
+
+    fn agy_tree_config() -> Config {
+        Config::parse(
+            include_str!("../../tests/fixtures/crew-agy-tree.toml"),
+            Path::new("/r/agy-tree"),
+        )
+        .unwrap()
+    }
+
+    fn codex_tree_config() -> Config {
+        let mut c = worktrees();
+        c.roles.truncate(1);
+        c.roles[0].kind = crate::agent::Kind::Codex;
+        c.roles[0].worktree = false;
+        c.roles[0].extra = false;
+        c.experimental_codex_tree = true;
+        c
+    }
+
+    fn with_sessions_for(writer: &str, roles: &[&str]) -> String {
+        with_sessions(roles).replace(
+            "\"updatedBy\": \"globex-lead\"",
+            &format!("\"updatedBy\": \"{writer}\""),
+        )
+    }
+
+    #[test]
+    fn tree_mode_accepts_workers_and_orders_coordinator_first() {
+        let agy = agy_tree_config();
+        let json = with_sessions_for(
+            "agy-lead",
+            &["reviewer", "dev", "agy-lead", "herdr-crew-dev", "dev-2"],
+        );
+        let s = load(json.as_bytes(), &agy).unwrap();
+        let roles: Vec<_> = s.sessions.iter().map(|s| s.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            ["agy-lead", "reviewer", "dev", "herdr-crew-dev", "dev-2"]
+        );
+
+        // Codex tree mode follows the same coordinator-first, listed-worker order.
+        let codex = codex_tree_config();
+        let json = with_sessions_for("globex-lead", &["dev-b", "dev-a", "globex-lead"]);
+        let s = load(json.as_bytes(), &codex).unwrap();
+        let roles: Vec<_> = s.sessions.iter().map(|s| s.role.as_str()).collect();
+        assert_eq!(roles, ["globex-lead", "dev-b", "dev-a"]);
+    }
+
+    #[test]
+    fn tree_mode_rejects_duplicate_and_invalid_worker_names() {
+        let c = agy_tree_config();
+        assert_eq!(
+            schema_errors(&with_sessions_for("agy-lead", &["dev", "dev"]), &c),
+            ["sessions[1].role: \"dev\" is repeated"]
+        );
+        assert_eq!(
+            schema_errors(
+                &with_sessions_for("agy-lead", &["agy-lead", "agy-lead"]),
+                &c
+            ),
+            ["sessions[1].role: \"agy-lead\" is repeated"]
+        );
+        let too_long = "a".repeat(33);
+        for bad in [
+            "", "Dev", "dev 1", "1dev", "-dev", "_dev", "dev/1", &too_long,
+        ] {
+            assert_eq!(
+                schema_errors(&with_sessions_for("agy-lead", &[bad]), &c),
+                [format!(
+                    "sessions[0].role: \"{bad}\" must be the coordinator role or a valid worker name ([a-z][a-z0-9_-]{{0,31}})"
+                )],
+                "bad worker name {bad:?}"
+            );
+        }
+        // Exactly 32 lowercase characters is accepted.
+        let max_len = "a".repeat(32);
+        assert!(load(with_sessions_for("agy-lead", &[&max_len]).as_bytes(), &c).is_ok());
     }
 
     #[test]
