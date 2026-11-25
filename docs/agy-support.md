@@ -164,6 +164,11 @@ specifying both keys with contradictory values is rejected):
   first and reusing any surviving worker `conversationId` via `send_message` before
   considering a replacement, and reporting recovery failures to the user instead of
   spawning duplicate workers.
+- **Worker-aware status board:** `.herdr/status.json` (and the generated
+  `.herdr/status.schema.json`) supports both the coordinator role and native subagent
+  worker entries matching `[a-z][a-z0-9_-]{0,31}` (e.g., `dev`, `reviewer`) in
+  `sessions[]`, each name at most once, ordered with the coordinator first followed by
+  workers in listed order.
 
 ```toml
 version = 1

@@ -17,12 +17,40 @@ pub fn generate(c: &Config) -> String {
     let writer = &c.board.writer;
     let file = &c.board.file;
 
-    let (sessions_text, role_schema) = if extras.is_empty() {
+    let (sessions_text, sessions_description, role_schema) = if c.is_tree() {
+        (
+            format!(
+                "Status board of the crew coordinator ({}) and any native subagent workers it \
+                 delegates to.",
+                roles.join(", ")
+            ),
+            "One entry for the coordinator plus any tracked native subagent workers, each name at \
+             most once. The board orders the coordinator first, followed by workers in listed \
+             order.",
+            json!({
+                "description": format!(
+                    "Session name: the coordinator role ({}) or a valid worker name \
+                     ([a-z][a-z0-9_-]{{0,31}}, e.g. dev, reviewer).",
+                    roles.join(", ")
+                ),
+                "anyOf": [
+                    { "enum": roles },
+                    {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 32,
+                        "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+                    },
+                ],
+            }),
+        )
+    } else if extras.is_empty() {
         (
             format!(
                 "Status board of the crew sessions, one per role ({}).",
                 roles.join(", ")
             ),
+            "One entry per session, each name at most once. The board orders them as roles[] in .herdr/crew.toml, each extra instance after its role by number.",
             json!({ "description": "The session's role.", "enum": roles }),
         )
     } else {
@@ -34,6 +62,7 @@ pub fn generate(c: &Config) -> String {
                 roles.join(", "),
                 extras.join(", ")
             ),
+            "One entry per session, each name at most once. The board orders them as roles[] in .herdr/crew.toml, each extra instance after its role by number.",
             json!({
                 "description": format!(
                     "Session name: a role ({}) or an extra instance <role>-N (N >= 2) of {}.",
@@ -84,7 +113,7 @@ pub fn generate(c: &Config) -> String {
                 "const": writer,
             },
             "sessions": {
-                "description": "One entry per session, each name at most once. The board orders them as roles[] in .herdr/crew.toml, each extra instance after its role by number.",
+                "description": sessions_description,
                 "type": "array",
                 "items": { "$ref": "#/$defs/session" },
             },
@@ -265,5 +294,115 @@ mod tests {
         }
         let b = with("/version", &|v| *v = json!(1.0));
         assert!(accepts(&b), "the const 1 compares by value");
+    }
+
+    #[test]
+    fn tree_schema_allows_coordinator_and_native_subagent_workers() {
+        let agy = Config::parse(
+            include_str!("../../tests/fixtures/crew-agy-tree.toml"),
+            std::path::Path::new("/r/agy-tree"),
+        )
+        .unwrap();
+        let mut codex = worktrees();
+        codex.roles.truncate(1);
+        codex.roles[0].kind = crate::agent::Kind::Codex;
+        codex.roles[0].worktree = false;
+        codex.roles[0].extra = false;
+        codex.experimental_codex_tree = true;
+
+        for (c, coordinator) in [(&agy, "agy-lead"), (&codex, "globex-lead")] {
+            let v: Value = serde_json::from_str(&generate(c)).unwrap();
+            let desc = v["description"].as_str().unwrap();
+            assert!(
+                desc.contains(&format!("crew coordinator ({coordinator})")),
+                "{desc}"
+            );
+            assert!(desc.contains("native subagent workers"), "{desc}");
+            let sessions_desc = v["properties"]["sessions"]["description"].as_str().unwrap();
+            assert!(
+                sessions_desc.contains("coordinator plus any tracked native subagent workers"),
+                "{sessions_desc}"
+            );
+            assert!(
+                sessions_desc.contains("coordinator first, followed by workers in listed order"),
+                "{sessions_desc}"
+            );
+            let role = &v["$defs"]["session"]["properties"]["role"];
+            assert_eq!(role["anyOf"][0]["enum"], json!([coordinator]));
+            assert_eq!(
+                role["anyOf"][1],
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn tree_viewer_matches_schema_role_and_field_rules() {
+        let c = Config::parse(
+            include_str!("../../tests/fixtures/crew-agy-tree.toml"),
+            std::path::Path::new("/r/agy-tree"),
+        )
+        .unwrap();
+        let schema: Value = serde_json::from_str(&generate(&c)).unwrap();
+        let worker_rule = &schema["$defs"]["session"]["properties"]["role"]["anyOf"][1];
+        assert_eq!(worker_rule["minLength"], 1);
+        assert_eq!(worker_rule["maxLength"], 32);
+        assert_eq!(worker_rule["pattern"], "^[a-z][a-z0-9_-]{0,31}$");
+
+        let board = json!({
+            "$schema": "status.schema.json",
+            "version": 1,
+            "updatedAt": "2026-09-26T10:00:00-03:00",
+            "updatedBy": "agy-lead",
+            "sessions": [
+                {
+                    "role": "agy-lead",
+                    "state": "working",
+                    "now": "coordinating",
+                    "next": [],
+                    "note": "active",
+                    "updatedAt": "2026-09-26T09:59:00-03:00"
+                },
+                {
+                    "role": "dev",
+                    "state": "working",
+                    "now": "implementing feature",
+                    "next": ["run tests"]
+                },
+                {
+                    "role": "reviewer",
+                    "state": "waiting",
+                    "now": "waiting for dev",
+                    "next": []
+                }
+            ],
+            "owner": { "urgent": [], "beforeMain": [], "optional": [] },
+            "recent": [{ "at": "2026-09-26T09:58:00-03:00", "text": "spawned dev" }]
+        });
+        let accepts = |b: &Value| load(b.to_string().as_bytes(), &c).is_ok();
+        assert!(accepts(&board));
+
+        for (candidate, expected) in [
+            ("dev-a", true),
+            ("herdr-crew-dev", true),
+            ("a", true),
+            (&"a".repeat(32), true),
+            ("", false),
+            (&"a".repeat(33), false),
+            ("Dev", false),
+            ("1dev", false),
+            ("-dev", false),
+            ("dev 2", false),
+            ("dev/2", false),
+        ] {
+            let mut b = board.clone();
+            b["sessions"][1]["role"] = json!(candidate);
+            assert_eq!(accepts(&b), expected, "role {candidate:?}");
+        }
     }
 }

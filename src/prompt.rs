@@ -94,7 +94,9 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
              replacement; report recovery failures to the user instead of spawning duplicate \
              workers. Herdr socket access is not required for this native communication, so agy's \
              terminal sandbox works without socket friction. Only the coordinator writes the \
-             board ({}). Subagent messages never grant user approval.\n",
+             board ({}), tracking itself and any active or tracked subagent workers in \
+             sessions[] using valid lowercase worker names (e.g., dev, reviewer). Subagent \
+             messages never grant user approval.\n",
             config.board.file
         ));
         return text;
@@ -382,6 +384,12 @@ mod tests {
         assert!(runtime.contains("agy --conversation <id>"));
         assert!(runtime.contains("report recovery failures"));
         assert!(runtime.contains("Only the coordinator writes the board"));
+        assert!(
+            runtime.contains(
+                "tracking itself and any active or tracked subagent workers in sessions[]"
+            )
+        );
+        assert!(runtime.contains("valid lowercase worker names (e.g., dev, reviewer)"));
         assert!(runtime.contains("Subagent messages never grant user approval"));
         assert!(!runtime.contains("Crew roles are independent"));
         assert!(!runtime.contains("--root /r/globex send"));

@@ -497,6 +497,11 @@ impl Config {
         })
     }
 
+    /// Whether this crew runs in single-coordinator native tree mode.
+    pub fn is_tree(&self) -> bool {
+        self.agy_tree || self.experimental_codex_tree
+    }
+
     pub fn role(&self, name: &str) -> Option<&Role> {
         self.roles.iter().find(|r| r.name == name)
     }
@@ -1213,7 +1218,11 @@ prompt = '''You are {{NAME}}.'''
     fn experimental_tree_requires_one_shared_codex_coordinator() {
         let text = format!("experimental_codex_tree = true\nkind = \"codex\"\n{MIN}");
         let root = Path::new("/r/p");
-        assert!(Config::parse(&text, root).unwrap().experimental_codex_tree);
+        let parsed_codex = Config::parse(&text, root).unwrap();
+        assert!(parsed_codex.experimental_codex_tree);
+        assert!(parsed_codex.is_tree());
+        assert_eq!(parsed_codex.session_order("dev"), None);
+        assert!(!parsed_codex.is_known_tab("dev"));
         assert!(Config::select_agent(&text, root, Kind::Pi).is_err());
         for suffix in [
             "extra = true\n",
@@ -1226,7 +1235,9 @@ prompt = '''You are {{NAME}}.'''
                     .any(|error| error.contains("exactly one Codex coordinator"))
             );
         }
-        assert!(!Config::parse(MIN, root).unwrap().experimental_codex_tree);
+        let plain = Config::parse(MIN, root).unwrap();
+        assert!(!plain.experimental_codex_tree);
+        assert!(!plain.is_tree());
     }
 
     #[test]
@@ -1292,8 +1303,12 @@ prompt = '''You are {{NAME}}.'''
         let fixture = include_str!("../tests/fixtures/crew-agy-tree.toml");
         let parsed = Config::parse(fixture, root).unwrap();
         assert!(parsed.agy_tree);
+        assert!(parsed.is_tree());
         assert_eq!(parsed.kind, Kind::Agy);
         assert_eq!(parsed.roles.len(), 1);
+        assert_eq!(parsed.session_order("agy-lead"), Some((0, 1)));
+        assert_eq!(parsed.session_order("dev"), None);
+        assert!(!parsed.is_known_tab("dev"));
     }
 
     #[test]
