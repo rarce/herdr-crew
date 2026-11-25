@@ -424,6 +424,14 @@ impl Wizard {
             {
                 Err(init::no_remote().lines[0].clone())
             }
+            Step::Topology if self.explicit_tree && !self.is_tree() => Err(
+                "--topology tree was passed on the command line; choose tree or omit --topology"
+                    .into(),
+            ),
+            Step::Topology if self.explicit_tabs && self.is_codex_tree() => Err(
+                "--topology tabs was passed on the command line; choose tabs or omit --topology"
+                    .into(),
+            ),
             Step::Topology if self.is_codex_tree() && self.explicit_base => {
                 Err(init::TREE_BASE_INTERACTIVE_ERROR.into())
             }
@@ -432,10 +440,12 @@ impl Wizard {
             {
                 Err(init::no_remote().lines[0].clone())
             }
-            Step::Worktrees if self.explicit_base && !self.is_tree() && !self.isolated_tabs => {
+            Step::Worktrees
+                if self.explicit_base && !self.uses_agy_tree() && !self.isolated_tabs =>
+            {
                 Err("--base requires separate worktrees; choose separate or omit --base".into())
             }
-            Step::Worktrees if !self.is_tree() && self.isolated_tabs && !self.has_remote => {
+            Step::Worktrees if !self.uses_agy_tree() && self.isolated_tabs && !self.has_remote => {
                 Err(init::no_remote().lines[0].clone())
             }
             Step::Base => {
@@ -505,7 +515,7 @@ impl Wizard {
                     }
                 }
                 Step::Worktrees => {
-                    let isolated = if self.is_tree() {
+                    let isolated = if self.uses_agy_tree() {
                         self.isolated_tree
                     } else {
                         self.isolated_tabs
@@ -679,7 +689,9 @@ impl Wizard {
                 ];
                 lines.extend(Self::choices(&items, self.agent));
                 lines.push(Line::from(""));
-                if self.explicit_base && self.uses_agy_tree() {
+                if self.explicit_tree && !matches!(self.agent(), Kind::Codex | Kind::Agy) {
+                    lines.push(Line::styled(init::TREE_AGENT_ERROR, warn()));
+                } else if self.explicit_base && self.uses_agy_tree() {
                     lines.push(Line::styled(init::AGY_TREE_BASE_ERROR, warn()));
                 } else if self.explicit_tabs && self.uses_agy_tree() {
                     lines.push(Line::styled(init::AGY_TABS_ERROR, warn()));
@@ -717,7 +729,17 @@ impl Wizard {
                 let mut lines = vec![question("How should Codex roles run?"), Line::from("")];
                 lines.extend(Self::choices(&items, self.topology));
                 lines.push(Line::from(""));
-                if self.explicit_base && self.is_codex_tree() {
+                if self.explicit_tree && !self.is_tree() {
+                    lines.push(Line::styled(
+                        "--topology tree was passed on the command line; choose tree or omit --topology.",
+                        warn(),
+                    ));
+                } else if self.explicit_tabs && self.is_codex_tree() {
+                    lines.push(Line::styled(
+                        "--topology tabs was passed on the command line; choose tabs or omit --topology.",
+                        warn(),
+                    ));
+                } else if self.explicit_base && self.is_codex_tree() {
                     lines.push(Line::styled(init::TREE_BASE_INTERACTIVE_ERROR, warn()));
                 } else if self.explicit_base {
                     lines.push(Line::styled(
@@ -780,7 +802,7 @@ impl Wizard {
                 );
             }
             Step::Worktrees => {
-                let (title, items, chosen) = if self.is_tree() {
+                let (title, items, chosen) = if self.uses_agy_tree() {
                     (
                         "Isolate implementation workers in native worktrees?",
                         vec![
@@ -1088,7 +1110,7 @@ impl Screen for Wizard {
                 }
             },
             Step::Worktrees => {
-                let isolated = if self.is_tree() {
+                let isolated = if self.uses_agy_tree() {
                     &mut self.isolated_tree
                 } else {
                     &mut self.isolated_tabs
@@ -1545,6 +1567,106 @@ mod tests {
         let config = Config::parse(&text, &root).unwrap();
         assert!(!config.codex_tree);
         assert_eq!(config.worktrees.as_ref().unwrap().branch, "main");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn explicit_topology_flags_are_enforced_across_wizard_steps() {
+        let root = git::test_repo("tui-explicit-topology");
+        git::test_remote_branch(&root, "origin/main");
+
+        // `--topology tree`: defaults to Review + Codex + Tree; refuses Solo, Claude, and tabs.
+        let tree_opts = Options {
+            name: Some("acme".into()),
+            topology: Some(Topology::Tree),
+            ..Options::default()
+        };
+        let mut wizard = Wizard::new(&root, &tree_opts);
+        assert_eq!(wizard.preset(), Preset::Review);
+        assert_eq!(wizard.agent(), Kind::Codex);
+        assert_eq!(wizard.topology(), Topology::Tree);
+        // Workflow: Solo (1) is refused.
+        send(&mut wizard, "{enter}1{enter}");
+        assert_eq!(wizard.step, Step::Workflow);
+        assert_eq!(wizard.message.as_deref(), Some(init::TREE_PRESET_ERROR));
+        // Workflow -> Review (2) -> Agent: Claude (1) shows warning and is refused.
+        send(&mut wizard, "2{enter}1");
+        let agent_screen = draw(&mut wizard, 110, 28);
+        assert!(
+            agent_screen.contains(init::TREE_AGENT_ERROR),
+            "{agent_screen}"
+        );
+        send(&mut wizard, "{enter}");
+        assert_eq!(wizard.step, Step::Agent);
+        assert_eq!(wizard.message.as_deref(), Some(init::TREE_AGENT_ERROR));
+        // Agent -> Codex (2) -> Topology: tabs (1) shows warning and is refused.
+        send(&mut wizard, "2{enter}1");
+        assert_eq!(wizard.step, Step::Topology);
+        let topo_screen = draw(&mut wizard, 110, 28);
+        assert!(
+            topo_screen.contains("--topology tree was passed on the command line"),
+            "{topo_screen}"
+        );
+        send(&mut wizard, "{enter}");
+        assert_eq!(wizard.step, Step::Topology);
+        assert!(
+            wizard
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("--topology tree was passed on the command line")
+        );
+        // Pick tree (2) -> Models -> Ignore -> Review -> Finish.
+        let (selection, text) = finish(&mut wizard, "2{enter}{enter}{enter}{enter}");
+        assert!(selection.is_codex_tree());
+        assert!(Config::parse(&text, &root).unwrap().codex_tree);
+
+        // `--topology tree` with Agy skips Topology and succeeds.
+        let mut agy_wizard = Wizard::new(&root, &tree_opts);
+        send(&mut agy_wizard, "{enter}{enter}4{enter}");
+        assert_eq!(agy_wizard.step, Step::Models);
+        let (selection, text) = finish(&mut agy_wizard, "{enter}{enter}{enter}{enter}");
+        assert!(selection.is_agy_tree());
+        assert!(Config::parse(&text, &root).unwrap().agy_tree);
+
+        // `--topology tabs`: refuses multi-role Agy at Agent and Codex+tree at Topology.
+        let tabs_opts = Options {
+            name: Some("acme".into()),
+            preset: Some(Preset::Review),
+            topology: Some(Topology::Tabs),
+            shared_checkout: true,
+            ..Options::default()
+        };
+        let mut tabs_wizard = Wizard::new(&root, &tabs_opts);
+        // Name -> Workflow -> Agent: Agy (4) is refused.
+        send(&mut tabs_wizard, "{enter}{enter}4{enter}");
+        assert_eq!(tabs_wizard.step, Step::Agent);
+        assert_eq!(tabs_wizard.message.as_deref(), Some(init::AGY_TABS_ERROR));
+        // Pick Codex (2) -> Topology: tree (2) shows warning and is refused.
+        send(&mut tabs_wizard, "2{enter}2");
+        assert_eq!(tabs_wizard.step, Step::Topology);
+        let tabs_topo_screen = draw(&mut tabs_wizard, 110, 28);
+        assert!(
+            tabs_topo_screen.contains("--topology tabs was passed on the command line"),
+            "{tabs_topo_screen}"
+        );
+        send(&mut tabs_wizard, "{enter}");
+        assert_eq!(tabs_wizard.step, Step::Topology);
+        assert!(
+            tabs_wizard
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("--topology tabs was passed on the command line")
+        );
+        // Pick tabs (1) -> Models -> Worktrees (shared) -> Ignore -> Review -> Finish.
+        let (selection, text) = finish(&mut tabs_wizard, "1{enter}{enter}{enter}{enter}{enter}");
+        assert_eq!(selection.topology, Topology::Tabs);
+        assert!(!selection.is_tree());
+        let config = Config::parse(&text, &root).unwrap();
+        assert!(!config.codex_tree);
+        assert_eq!(config.roles.len(), 3);
+
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
