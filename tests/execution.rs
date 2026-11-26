@@ -3063,6 +3063,10 @@ fn codex_wiki_memory_preflight_strips_add_dir_from_app_server_but_keeps_it_for_l
         "expected Codex launch args to include --add-dir {}: {lead_start:?}",
         canonical_mem.display()
     );
+    assert!(
+        !lead_start.contains(&"features.multi_agent_v2=true".to_string()),
+        "a non-tree crew must not enable multi_agent_v2: {lead_start:?}"
+    );
     let lead_snapshot = f
         .snapshots()
         .into_iter()
@@ -3147,7 +3151,16 @@ fn codex_tree_launches_and_resumes_with_multi_agent_v2_and_needs_codex_0_163() {
 
     // Tree mode was tested with Codex 0.163.0; older CLIs stop before any mutation.
     fs::write(f.state.join("codex-version"), "0.162.9").unwrap();
-    failure(f.crew(&["up", "--no-attach"]), "0.163.0");
+    failure(f.crew(&["up", "--no-attach"]), "codex_tree");
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    assert_eq!(f.count(&["tab", "create"]), 0);
+    let checked = f.crew(&["check"]);
+    assert!(!checked.status.success(), "{checked:?}");
+    assert!(
+        String::from_utf8_lossy(&checked.stdout).contains("codex 0.163.0 or newer")
+            || String::from_utf8_lossy(&checked.stderr).contains("codex 0.163.0 or newer"),
+        "{checked:?}"
+    );
     fs::write(f.state.join("codex-version"), "0.163.0").unwrap();
     f.up();
 
@@ -3187,5 +3200,41 @@ fn codex_tree_launches_and_resumes_with_multi_agent_v2_and_needs_codex_0_163() {
         args.windows(2)
             .any(|pair| pair == [json!("-c"), json!(feature)]),
         "expected codex resume to enable {feature}: {args:?}"
+    );
+
+    // A tree snapshot written before the `tree` field existed is recognised by its prompt.
+    let snapshot_path = f.repo.join(format!(".herdr/codex/snapshots/{token}.json"));
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("tree");
+    fs::write(&snapshot_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    fs::remove_file(f.state.join("codex-resume.json")).unwrap();
+    success(
+        host.command(&f, &pane)
+            .args(["codex-resume", token])
+            .output()
+            .unwrap(),
+    );
+    let resumed: Value =
+        serde_json::from_slice(&fs::read(f.state.join("codex-resume.json")).unwrap()).unwrap();
+    assert!(
+        resumed["args"]
+            .as_array()
+            .unwrap()
+            .windows(2)
+            .any(|pair| pair == [json!("-c"), json!(feature)]),
+        "expected a legacy tree snapshot to resume with {feature}: {resumed}"
+    );
+
+    // `codex-resume` also refuses an older CLI for a tree snapshot.
+    fs::write(f.state.join("codex-version"), "0.162.9").unwrap();
+    let refused = host
+        .command(&f, &pane)
+        .args(["codex-resume", token])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("codex_tree"),
+        "{refused:?}"
     );
 }

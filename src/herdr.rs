@@ -682,6 +682,19 @@ pub fn execute(
         let mut effective = options.clone();
         effective.resolve_dirs(&c.root)?;
     }
+    // `codex-resume` repeats this check in the pane, but a refusal there looks like a missing
+    // conversation and herdr-core then forgets the session; refuse here instead.
+    if plan.steps.iter().any(|step| {
+        matches!(
+            step,
+            Step::ResumeAgent {
+                agent: AgentOptions::Codex(_),
+                ..
+            }
+        )
+    }) {
+        codex::integration::require_version(c.codex_tree)?;
+    }
     for (name, options) in codex_roles {
         codex::context_prompt(c, name, prompt_of(name)?)?;
         let cwd = if c.session_role(name).unwrap().worktree {
@@ -940,11 +953,7 @@ fn agent_args(
             let mut effective = options.clone();
             effective.resolve_dirs(&c.root)?;
             let mut args = effective.args();
-            args.extend(["-c".into(), "features.hooks=true".into()]);
-            if c.codex_tree {
-                // Tree prompts name multi_agent_v2 tools (followup_task, list_agents).
-                args.extend(["-c".into(), crate::codex::TREE_FEATURE.into()]);
-            }
+            args.extend(codex::crew_overrides(c.codex_tree));
             args
         }
         // The crew's pi extension reads these flags and keeps the prompt in the session. A

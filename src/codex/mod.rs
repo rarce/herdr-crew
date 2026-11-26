@@ -98,6 +98,17 @@ struct Snapshot {
 
 pub const TREE_FEATURE: &str = "features.multi_agent_v2=true";
 
+/// The `-c` overrides crew adds to every Codex launch and resume (and to the app-server
+/// preflight): hooks always, and multi_agent_v2 for native tree crews, whose prompt names the
+/// v2 collaboration tools (`followup_task`, `list_agents`). Codex defaults it to off.
+pub fn crew_overrides(tree: bool) -> Vec<String> {
+    let mut args = vec!["-c".to_string(), "features.hooks=true".to_string()];
+    if tree {
+        args.extend(["-c".to_string(), TREE_FEATURE.to_string()]);
+    }
+    args
+}
+
 #[derive(Serialize, Deserialize)]
 struct Binding {
     context: Context,
@@ -341,6 +352,8 @@ fn snapshot(root: &Path, token: &str) -> Result<Snapshot, String> {
     for dir in snapshot.extra_dirs.clone() {
         snapshot.options.add_extra_dir(dir);
     }
+    // Tree snapshots written before `tree` existed still carry the tree runtime prompt.
+    snapshot.tree |= snapshot.prompt.contains(crate::prompt::CODEX_TREE_HEADING);
     git::verify_checkout(root, &snapshot.cwd)?;
     Ok(snapshot)
 }
@@ -803,15 +816,7 @@ pub fn resume(token: &str, root_flag: Option<&Path>) -> Result<(), String> {
     command
         .arg("resume")
         .args(snapshot.options.args())
-        .arg("-c")
-        .arg("features.hooks=true")
-        .args(
-            snapshot
-                .tree
-                .then_some(["-c", TREE_FEATURE])
-                .into_iter()
-                .flatten(),
-        )
+        .args(crew_overrides(snapshot.tree))
         .arg(id)
         .current_dir(&snapshot.cwd)
         .env("CREW_CODEX_BINDING", token)

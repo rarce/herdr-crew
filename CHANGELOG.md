@@ -10,15 +10,28 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Changed
+
+- Native Codex tree crews (`codex_tree = true`) now require Codex 0.163.0+, the version tree
+  mode was tested with. `check`, `up` and `codex-resume` refuse older CLIs with a message naming
+  `codex_tree`; other Codex roles keep the 0.160.1 minimum. `up` also checks the Codex version
+  before resuming a Codex role, so herdr-core no longer forgets a saved session because of a
+  version refusal inside the pane.
+- Codex launch snapshots of tree crews record `tree: true`. herdr-crew 0.12.1 and older cannot
+  read such a snapshot, so rolling the plugin back cannot resume a tree coordinator launched by
+  this version.
+
 ### Fixed
 
-- Native Codex tree crews (`codex_tree = true`) now launch and resume the coordinator with
-  `-c features.multi_agent_v2=true`. Codex defaults the feature to off (still in 0.172), so a
-  crew made with `init --topology tree` previously started with the `multi_agent_v1` tools,
-  and every `followup_task` / `list_agents` call named in the tree prompt failed. Existing
-  snapshots without the new `tree` field keep resuming as before.
-- `check`, `up` and `codex-resume` now require Codex 0.163.0+ for tree crews, the version
-  tree mode was tested with (other Codex roles keep the 0.160.1 minimum).
+- Native Codex tree crews now launch and resume the coordinator with
+  `-c features.multi_agent_v2=true`, and the app-server preflight checks the same overrides.
+  Codex defaults the feature to off (still in 0.172), so a crew made with
+  `init --topology tree` previously started with the `multi_agent_v1` tools, and every
+  `followup_task` / `list_agents` call named in the tree prompt failed. Tree snapshots written
+  before this version are recognised by their prompt and also resume with the flag. A plain
+  `codex resume <id>` of the coordinator still needs `features.multi_agent_v2 = true` in
+  `~/.codex/config.toml`.
+- The Codex 8192-byte launch bound now counts the crew's own `-c` overrides.
 
 ## [0.12.1] - 2026-11-26
 
