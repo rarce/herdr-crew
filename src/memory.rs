@@ -9,13 +9,13 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 use serde_json::{Value, json};
 
-use crate::board::frontmatter;
 use crate::board::model::{self, Unavailable};
 use crate::config::Config;
 use crate::files;
@@ -49,70 +49,273 @@ fn sanitize_slug(name: &str) -> String {
     }
 }
 
-fn resolve_explicit_base(explicit: &str, cwd: Option<&Path>) -> Option<PathBuf> {
-    if explicit.is_empty() {
-        return None;
-    }
-    let path = PathBuf::from(explicit);
-    if path.is_absolute() {
-        Some(path)
-    } else {
-        cwd.map(|base| base.join(path))
+/// File in the repository's common Git directory that records the memory directory chosen
+/// the first time (`up` or `mem init`), so every later process (whatever its environment or
+/// working directory) and every linked worktree resolves the same one.
+pub const PIN_FILE: &str = "herdr-crew-memory-dir";
+
+/// How to choose another memory directory, for errors about the current one.
+const CHOOSE_AGAIN: &str = "choose another directory with CREW_MEMORY_DIR, after deleting \
+                            herdr-crew-memory-dir in the repository's Git directory if it exists";
+
+/// Lock file inside the memory directory that serializes herdr-crew's own writes.
+pub const LOCK_FILE: &str = ".lock";
+
+/// How long a memory write waits for another herdr-crew process to finish.
+pub const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// The environment variables that choose the memory base directory, gathered by the adapter.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BaseEnv {
+    pub crew_memory_dir: Option<String>,
+    pub xdg_data_home: Option<String>,
+    pub home: Option<String>,
+}
+
+impl BaseEnv {
+    pub fn from_process() -> Self {
+        let var = |name| std::env::var(name).ok().filter(|v: &String| !v.is_empty());
+        Self {
+            crew_memory_dir: var("CREW_MEMORY_DIR"),
+            xdg_data_home: var("XDG_DATA_HOME"),
+            home: var("HOME"),
+        }
     }
 }
 
 /// Resolves the base directory for all project operational memories:
-/// `CREW_MEMORY_DIR` (resolved against cwd when relative) ->
-/// `$XDG_DATA_HOME/herdr-crew/memory` (if absolute) ->
-/// `$HOME/.local/share/herdr-crew/memory` -> `/tmp/herdr-crew-memory`.
-pub fn base_dir() -> PathBuf {
-    if let Ok(explicit) = std::env::var("CREW_MEMORY_DIR")
-        && let Some(resolved) =
-            resolve_explicit_base(&explicit, std::env::current_dir().ok().as_deref())
-    {
-        return resolved;
+/// `CREW_MEMORY_DIR` (must be absolute) -> `$XDG_DATA_HOME/herdr-crew/memory` (if absolute) ->
+/// `$HOME/.local/share/herdr-crew/memory`.
+pub fn base_dir(env: &BaseEnv) -> Result<PathBuf, String> {
+    if let Some(explicit) = &env.crew_memory_dir {
+        let p = PathBuf::from(explicit);
+        if !p.is_absolute() {
+            return Err(format!(
+                "CREW_MEMORY_DIR \"{explicit}\" must be an absolute path"
+            ));
+        }
+        return Ok(p);
     }
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
-        && !xdg.is_empty()
-    {
+    if let Some(xdg) = &env.xdg_data_home {
         let p = PathBuf::from(xdg);
         if p.is_absolute() {
-            return p.join("herdr-crew").join("memory");
+            return Ok(p.join("herdr-crew").join("memory"));
         }
     }
-    if let Ok(home) = std::env::var("HOME")
-        && !home.is_empty()
-    {
+    if let Some(home) = &env.home {
         let p = PathBuf::from(home);
         if p.is_absolute() {
-            return p
-                .join(".local")
-                .join("share")
-                .join("herdr-crew")
-                .join("memory");
+            return Ok(p.join(".local/share/herdr-crew/memory"));
         }
     }
-    PathBuf::from("/tmp/herdr-crew-memory")
+    Err("cannot choose an operational memory directory: set HOME or CREW_MEMORY_DIR".into())
 }
 
-/// Resolves the deterministic out-of-repo memory directory for `root` under `base`.
-pub fn memory_dir_with_base(root: &Path, base: &Path) -> PathBuf {
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let folder = canonical
+/// The deterministic memory directory for `canonical_root` under `base`: `<slug>-<8 hex>`.
+pub fn memory_dir_with_base(canonical_root: &Path, base: &Path) -> PathBuf {
+    let folder = canonical_root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let slug = sanitize_slug(&folder);
     let hex = format!(
         "{:016x}",
-        files::fnv64(FNV_OFFSET_BASIS, canonical.to_string_lossy().as_bytes())
+        files::fnv64(
+            FNV_OFFSET_BASIS,
+            canonical_root.to_string_lossy().as_bytes()
+        )
     );
     base.join(format!("{slug}-{}", &hex[..8]))
 }
 
-/// Resolves the deterministic out-of-repo memory directory for `root`.
-pub fn memory_dir(root: &Path) -> PathBuf {
-    memory_dir_with_base(root, &base_dir())
+/// What the adapter found about an existing pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinFacts {
+    /// The pinned directory (absolute).
+    pub dir: PathBuf,
+    /// The canonical `root` recorded in the pinned directory's `project.json`, if readable.
+    pub project_root: Option<PathBuf>,
+    /// Whether `project_root` still exists as a directory.
+    pub project_root_exists: bool,
+}
+
+/// How the next writing command updates the pin file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinWrite {
+    /// No pin yet: create it, adopting whichever pin wins a race.
+    Create(PathBuf),
+    /// The pin was copied from another checkout: replace it.
+    Replace(PathBuf),
+}
+
+/// The memory directory to use and whether the pin must be written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub dir: PathBuf,
+    pub pin: Option<PinWrite>,
+}
+
+/// Chooses the memory directory from the pin (if any), this checkout's canonical root and the
+/// environment's candidate. Pure.
+/// - no pin: the candidate, pinned by the next writer;
+/// - the pinned directory has no readable `project.json` (deleted or never initialized), or it
+///   names this root: the pin;
+/// - it names a root that no longer exists: the repository moved, keep the pin (initialization
+///   rewrites `project.json`);
+/// - it names another existing root: this checkout is a copy, use the candidate and replace
+///   the pin.
+pub fn decide(pin: Option<&PinFacts>, canonical_root: &Path, candidate: PathBuf) -> Decision {
+    let Some(pin) = pin else {
+        return Decision {
+            pin: Some(PinWrite::Create(candidate.clone())),
+            dir: candidate,
+        };
+    };
+    match &pin.project_root {
+        Some(other) if other != canonical_root && pin.project_root_exists => Decision {
+            pin: Some(PinWrite::Replace(candidate.clone())),
+            dir: candidate,
+        },
+        _ => Decision {
+            dir: pin.dir.clone(),
+            pin: None,
+        },
+    }
+}
+
+/// Parses the pin file's content: one absolute path.
+pub fn parse_pin(text: &str) -> Result<PathBuf, String> {
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    if line.is_empty() || line.contains('\n') || line.contains('\0') {
+        return Err("must hold one absolute path".into());
+    }
+    let p = PathBuf::from(line);
+    if !p.is_absolute() {
+        return Err(format!("\"{line}\" is not an absolute path"));
+    }
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(format!("\"{line}\" must not contain .."));
+    }
+    Ok(p)
+}
+
+fn canonical(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Reads the canonical `root` from `<dir>/project.json`, refusing symlinks.
+fn project_root(dir: &Path) -> Option<PathBuf> {
+    let path = dir.join("project.json");
+    if !check_not_symlink(&path).unwrap_or(false) {
+        return None;
+    }
+    let text = fs::read_to_string(&path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value["root"].as_str().map(|r| canonical(Path::new(r)))
+}
+
+/// The memory resolution of a checkout (adapter): where the pin is and the decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub decision: Decision,
+    /// Set when `CREW_MEMORY_DIR` names another directory than the pinned one.
+    pub env_note: Option<String>,
+}
+
+/// Resolves the memory directory of the main checkout `root` (adapter: reads Git, the pin and
+/// `project.json`, never writes).
+pub fn resolve(root: &Path, env: &BaseEnv) -> Result<Resolved, String> {
+    let canonical_root = canonical(root);
+    let common = crate::git::common_dir(root)?;
+    let pin_path = common.join(PIN_FILE);
+    let pin = match check_not_symlink(&pin_path) {
+        Ok(true) => {
+            let text = fs::read_to_string(&pin_path)
+                .map_err(|e| format!("cannot read {}: {e}", pin_path.display()))?;
+            let dir = parse_pin(&text).map_err(|why| {
+                format!(
+                    "{}: {why}; delete it to choose the memory directory again",
+                    pin_path.display()
+                )
+            })?;
+            let project_root = project_root(&dir);
+            let project_root_exists = project_root.as_deref().is_some_and(Path::is_dir);
+            Some(PinFacts {
+                dir,
+                project_root,
+                project_root_exists,
+            })
+        }
+        Ok(false) => None,
+        Err(e) => return Err(e),
+    };
+    let candidate = base_dir(env).map(|base| memory_dir_with_base(&canonical_root, &base));
+    let candidate = match (&pin, candidate) {
+        (_, Ok(c)) => c,
+        // The environment does not matter while the pin is used.
+        (Some(p), Err(_)) => p.dir.clone(),
+        (None, Err(e)) => return Err(e),
+    };
+    let decision = decide(pin.as_ref(), &canonical_root, candidate.clone());
+    let env_note = match (&pin, &env.crew_memory_dir) {
+        (Some(_), Some(_))
+            if decision.pin.is_none() && canonical(&candidate) != canonical(&decision.dir) =>
+        {
+            Some(format!(
+                "CREW_MEMORY_DIR is ignored: {} pins the memory directory {}; delete it to choose again",
+                pin_path.display(),
+                decision.dir.display()
+            ))
+        }
+        _ => None,
+    };
+    Ok(Resolved { decision, env_note })
+}
+
+/// Records `write` in the pin file of `root` and returns the directory to use: the one written,
+/// or, when another process created the pin first, the one it chose.
+pub fn write_pin(root: &Path, write: &PinWrite) -> Result<PathBuf, String> {
+    let common = crate::git::common_dir(root)?;
+    let pin_path = common.join(PIN_FILE);
+    match write {
+        PinWrite::Create(dir) => {
+            // Write a complete temporary file, then hard-link it into place: the link fails if
+            // the pin exists, and a reader never sees a partial pin.
+            let tmp = common.join(format!(
+                ".{PIN_FILE}.{}.{}.tmp",
+                std::process::id(),
+                NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let written = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .and_then(|mut file| {
+                    file.write_all(format!("{}\n", dir.display()).as_bytes())?;
+                    file.sync_all()
+                });
+            if let Err(e) = written {
+                let _ = fs::remove_file(&tmp);
+                return Err(format!("cannot write {}: {e}", tmp.display()));
+            }
+            let linked = fs::hard_link(&tmp, &pin_path);
+            let _ = fs::remove_file(&tmp);
+            match linked {
+                Ok(()) => Ok(dir.clone()),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    let _ = check_not_symlink(&pin_path)?;
+                    let text = fs::read_to_string(&pin_path)
+                        .map_err(|e| format!("cannot read {}: {e}", pin_path.display()))?;
+                    parse_pin(&text).map_err(|why| format!("{}: {why}", pin_path.display()))
+                }
+                Err(e) => Err(format!("cannot create {}: {e}", pin_path.display())),
+            }
+        }
+        PinWrite::Replace(dir) => {
+            atomic_write_file(&pin_path, &format!("{}\n", dir.display()))?;
+            Ok(dir.clone())
+        }
+    }
 }
 
 /// Result of `ensure_initialized`.
@@ -161,12 +364,13 @@ pub fn generate_schema(c: &Config, dir: &Path) -> String {
          ## Layout\n\n\
          - `now.md` — live status board (YAML frontmatter parsed by `herdr-crew board`) plus short working notes.\n\
          - `index.md` — Layer 1 catalog of active tasks, decisions, and notes (keep compact and linked).\n\
-         - `log.md` — Layer 2 chronological append-only activity log.\n\
+         - `log.md` — Layer 2 activity log, newest entry first.\n\
          - `tasks/` — per-task operational pages (objective, acceptance, provenance, validation, blockers).\n\
          - `decisions/` — architectural and workflow decisions with rationale and alternatives.\n\
          - `notes/` — bounded investigation findings, reproduction commands, and environment facts.\n\
          - `project.json` — machine metadata linking this directory back to the repository.\n\
-         - `SCHEMA.md` — this generated contract (refreshed by `herdr-crew up` and `herdr-crew mem init`).\n\n\
+         - `SCHEMA.md` — this generated contract (refreshed by `herdr-crew up` and `herdr-crew mem init`).\n\
+         - `.lock` — herdr-crew's write lock; leave it alone.\n\n\
          ## Ownership & Atomic Writes\n\n\
          - **ONLY `{writer}` writes `now.md`, `index.md`, and `log.md`.** Other roles report progress, \
            blockers, and evidence to `{writer}` and never edit these files directly.\n\
@@ -191,11 +395,13 @@ pub fn generate_schema(c: &Config, dir: &Path) -> String {
            automatically populates the 5 newest entries from `log.md`.\n\
          - Quote YAML string values containing `: ` or starting with `[`, `{{`, `'`, or `\"`.\n\n\
          ## `log.md` Header Format\n\n\
-         Append structured entries chronologically using either local minute precision or RFC 3339:\n\n\
+         Add each new entry directly below the `# ... Activity Log` title, so the newest entry \
+         comes first. Use an RFC 3339 timestamp with offset:\n\n\
          ```markdown\n\
-         ## [YYYY-MM-DD HH:MM] <type> | <title>\n\
          ## [YYYY-MM-DDTHH:MM:SS±HH:MM] <type> | <title>\n\
          ```\n\n\
+         The legacy local form `## [YYYY-MM-DD HH:MM] <type> | <title>` is still read, in the \
+         reader's time zone.\n\n\
          Suggested `<type>` values: `init`, `task`, `review`, `fix`, `merge`, `decision`, `note`, `blocker`.\n\n\
          ## Provenance Fields (for `tasks/`, `decisions/`, `notes/`)\n\n\
          Include concise provenance metadata in page frontmatter or header lines where applicable:\n\
@@ -207,7 +413,7 @@ pub fn generate_schema(c: &Config, dir: &Path) -> String {
          1. **Query (progressive disclosure):** read Layer 1 (`herdr-crew mem index`), then Layer 2 \
             (`herdr-crew mem timeline`), then Layer 3 specific pages (`herdr-crew mem show <page>` or \
             `herdr-crew mem search <query>`).\n\
-         2. **Ingest:** update `now.md` on every role state change, append significant events to `log.md`, \
+         2. **Ingest:** update `now.md` on every role state change, add significant events at the top of `log.md`, \
             create/update pages in `tasks/`, `decisions/`, or `notes/`, and register every page in `index.md` \
             with `[[tasks/<name>]]` wikilinks.\n\
          3. **Lint:** run `herdr-crew mem lint` to verify `now.md` frontmatter, orphan pages missing from \
@@ -351,7 +557,7 @@ fn seed_index_md(c: &Config) -> String {
         "# {label} Memory Index\n\n\
          ## Active\n\n\
          - [[now]] — live crew status board\n\
-         - [[log]] — chronological activity log\n\n\
+         - [[log]] — activity log, newest first\n\n\
          ## Tasks\n\n\
          ## Decisions\n\n\
          ## Notes\n",
@@ -368,18 +574,98 @@ fn seed_log_md(c: &Config, now: &str) -> String {
     )
 }
 
-/// Initializes `<dir>` (creating `tasks/`, `decisions/`, `notes/`), refreshes `project.json` and
-/// `SCHEMA.md`, and seeds `now.md`, `index.md`, and `log.md` only when absent.
-pub fn ensure_initialized(dir: &Path, c: &Config, now: &str) -> Result<InitResult, String> {
-    ensure_safe_dir(dir)?;
-    for sub in SUBDIRS {
-        ensure_safe_subdir(dir, sub)?;
+/// Takes the memory directory's write lock (`<dir>/.lock`), waiting up to `wait`. It serializes
+/// herdr-crew's own read-modify-write of `now.md`, `index.md`, `log.md` and the seed files; it
+/// does not stop an agent from editing those files directly. Lock order: the project lock
+/// (`lock.rs`) first, then this one, never the reverse.
+pub fn lock_memory(dir: &Path, wait: Duration) -> Result<fs::File, String> {
+    let path = dir.join(LOCK_FILE);
+    let _ = check_not_symlink(&path)?;
+    crate::lock::lock_file(&path, wait, || {}).map_err(|busy| match busy {
+        crate::lock::Busy::Held => format!(
+            "another herdr-crew process is writing the operational memory in {}; try again",
+            dir.display()
+        ),
+        crate::lock::Busy::Error(e) => e,
+    })
+}
+
+/// Whether `dir` holds only what herdr-crew creates before `project.json` (the lock, temporary
+/// files and empty `tasks/`, `decisions/`, `notes/`), so it is safe to initialize.
+fn only_skeleton(dir: &Path) -> Result<bool, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let meta = fs::symlink_metadata(entry.path())
+            .map_err(|e| format!("cannot inspect {}: {e}", entry.path().display()))?;
+        let skeleton = if meta.is_file() {
+            name == LOCK_FILE || (name.starts_with('.') && name.ends_with(".tmp"))
+        } else if meta.is_dir() && SUBDIRS.contains(&name.as_ref()) {
+            fs::read_dir(entry.path())
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !skeleton {
+            return Ok(false);
+        }
     }
+    Ok(true)
+}
+
+/// Refuses to initialize a directory that belongs to another checkout or that herdr-crew did
+/// not create, so an edited pin or `CREW_MEMORY_DIR` cannot point agents at arbitrary files.
+/// A `project.json` naming a root that no longer exists is a moved repository: accepted.
+fn check_owner(dir: &Path, canonical_root: &Path) -> Result<(), String> {
+    let path = dir.join("project.json");
+    if check_not_symlink(&path)? {
+        match project_root(dir) {
+            Some(other) if other != canonical_root && other.is_dir() => Err(format!(
+                "{} belongs to {} (see its project.json), not {}; {CHOOSE_AGAIN}",
+                dir.display(),
+                other.display(),
+                canonical_root.display(),
+            )),
+            Some(_) => Ok(()),
+            None => Err(format!(
+                "{} has an unreadable project.json; fix or remove it",
+                path.display()
+            )),
+        }
+    } else if only_skeleton(dir)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not empty and has no project.json, so herdr-crew did not create it; \
+             {CHOOSE_AGAIN}",
+            dir.display()
+        ))
+    }
+}
+
+/// Initializes `<dir>` (creating `tasks/`, `decisions/`, `notes/`), refreshes `project.json` and
+/// `SCHEMA.md`, and seeds `now.md`, `index.md`, and `log.md` only when absent. Holds the memory
+/// lock, waiting up to `wait` (`startup` passes zero: it never waits).
+pub fn ensure_initialized(
+    dir: &Path,
+    c: &Config,
+    now: &str,
+    wait: Duration,
+) -> Result<InitResult, String> {
+    ensure_safe_dir(dir)?;
+    let canonical_root = canonical(&c.root);
+    // Checked before the lock file is created, so a refused directory gets nothing written,
+    // and again under the lock.
+    check_owner(dir, &canonical_root)?;
+    let _lock = lock_memory(dir, wait)?;
+    check_owner(dir, &canonical_root)?;
 
     let mut created_files = Vec::new();
     let mut refreshed_files = Vec::new();
 
-    let canonical_root = c.root.canonicalize().unwrap_or_else(|_| c.root.clone());
     let project_json = format!(
         "{}\n",
         serde_json::to_string_pretty(&json!({
@@ -390,6 +676,7 @@ pub fn ensure_initialized(dir: &Path, c: &Config, now: &str) -> Result<InitResul
     );
     let schema_md = generate_schema(c, dir);
 
+    // `project.json` first: it marks the directory as this checkout's before anything else.
     for (name, content) in [("project.json", project_json), ("SCHEMA.md", schema_md)] {
         let path = dir.join(name);
         let existed = check_not_symlink(&path)?;
@@ -402,6 +689,9 @@ pub fn ensure_initialized(dir: &Path, c: &Config, now: &str) -> Result<InitResul
                 created_files.push(name.to_string());
             }
         }
+    }
+    for sub in SUBDIRS {
+        ensure_safe_subdir(dir, sub)?;
     }
 
     for (name, content) in [
@@ -1315,13 +1605,46 @@ fn write_yaml_string_list(
     Ok(())
 }
 
+/// The Markdown body of an existing `now.md`, without loss: the text after the closing
+/// frontmatter delimiter even when the YAML itself is invalid, or the whole file when it has no
+/// frontmatter.
+fn existing_body(text: &str) -> String {
+    let source = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = source.split_inclusive('\n');
+    let opens = lines.next().is_some_and(|l| {
+        l.trim_end_matches(['\r', '\n'])
+            .trim_end_matches([' ', '\t'])
+            == "---"
+    });
+    if opens {
+        let mut offset = source.find('\n').map_or(source.len(), |i| i + 1);
+        for line in lines {
+            offset += line.len();
+            let marker = line
+                .trim_end_matches(['\r', '\n'])
+                .trim_end_matches([' ', '\t']);
+            if marker == "---" || marker == "..." {
+                return source[offset..].to_string();
+            }
+        }
+    }
+    // No (closed) frontmatter: keep everything as the body.
+    if source.starts_with('\n') {
+        source.to_string()
+    } else {
+        format!("\n{source}")
+    }
+}
+
 /// Validates and atomically writes `now.md` with canonical YAML frontmatter, preserving the
 /// existing Markdown body when `focus` is `None`. Never mutates `now.md` on validation failure.
+#[allow(clippy::too_many_arguments)]
 pub fn update_status(
     dir: &Path,
     c: &Config,
     sessions: Value,
     owner: Value,
+    recent: Option<Value>,
     focus: Option<&str>,
     updated_at: Option<&str>,
     tz: &TimeZone,
@@ -1329,6 +1652,7 @@ pub fn update_status(
     if !check_dir_not_symlink(dir)? {
         return Err(format!("memory directory {} does not exist", dir.display()));
     }
+    let _lock = lock_memory(dir, LOCK_WAIT)?;
     let now_path = dir.join("now.md");
     let existed = check_not_symlink(&now_path)?;
 
@@ -1339,13 +1663,18 @@ pub fn update_status(
             .strftime("%Y-%m-%dT%H:%M:%S%:z")
             .to_string(),
     };
-    let payload = json!({
+    let mut payload = json!({
         "version": 1,
         "updatedAt": updated_at_str,
         "updatedBy": c.board.writer,
         "sessions": sessions,
         "owner": owner,
     });
+    // `recent` is written only when passed; when absent the board shows the newest `log.md`
+    // entries, so preserving an old list would freeze that box.
+    if let Some(recent) = recent {
+        payload["recent"] = recent;
+    }
     let payload_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
     let status = match model::load(&payload_bytes, c) {
         Ok(s) => s,
@@ -1369,13 +1698,7 @@ pub fn update_status(
             if existed {
                 let existing = fs::read_to_string(&now_path)
                     .map_err(|e| format!("cannot read now.md: {e}"))?;
-                match frontmatter::parse_frontmatter(&existing) {
-                    Ok((_, existing_body)) => existing_body.to_string(),
-                    Err(_) => format!(
-                        "\n# {} — Current State\n\nSee [[index]] for the memory catalog and [[log]] for recent activity.\n",
-                        c.label
-                    ),
-                }
+                existing_body(&existing)
             } else {
                 format!(
                     "\n# {} — Current State\n\nSee [[index]] for the memory catalog and [[log]] for recent activity.\n",
@@ -1418,6 +1741,21 @@ pub fn update_status(
     write_yaml_string_list(&mut yaml, "  ", "urgent", &status.owner.urgent)?;
     write_yaml_string_list(&mut yaml, "  ", "beforeMain", &status.owner.before_main)?;
     write_yaml_string_list(&mut yaml, "  ", "optional", &status.owner.optional)?;
+    if payload.get("recent").is_some() {
+        if status.recent.is_empty() {
+            yaml.push_str("recent: []\n");
+        } else {
+            yaml.push_str("recent:\n");
+            for r in &status.recent {
+                let at =
+                    r.at.to_zoned(tz.clone())
+                        .strftime("%Y-%m-%dT%H:%M:%S%:z")
+                        .to_string();
+                yaml.push_str(&format!("  - at: {}\n", yaml_scalar(&at)?));
+                yaml.push_str(&format!("    text: {}\n", yaml_scalar(&r.text)?));
+            }
+        }
+    }
     yaml.push_str("---\n");
     yaml.push_str(&body);
 
@@ -1456,6 +1794,7 @@ pub fn upsert_page(
     if !check_dir_not_symlink(dir)? {
         return Err(format!("memory directory {} does not exist", dir.display()));
     }
+    let _lock = lock_memory(dir, LOCK_WAIT)?;
     let page = page.trim();
     let stem = page.strip_suffix(".md").unwrap_or(page);
     if stem.ends_with('/')
@@ -1806,7 +2145,7 @@ mod tests {
         let c = basic();
         let now = "2026-11-26T02:24:54-03:00";
 
-        let first = ensure_initialized(&mem, &c, now).unwrap();
+        let first = ensure_initialized(&mem, &c, now, LOCK_WAIT).unwrap();
         assert_eq!(
             first.created_files,
             ["project.json", "SCHEMA.md", "now.md", "index.md", "log.md"]
@@ -1819,7 +2158,7 @@ mod tests {
         // Customize operational memory files; second init must not overwrite them.
         let custom_now = fs::read_to_string(mem.join("now.md")).unwrap() + "\nCustom note.\n";
         fs::write(mem.join("now.md"), &custom_now).unwrap();
-        let second = ensure_initialized(&mem, &c, "2026-11-26T03:00:00-03:00").unwrap();
+        let second = ensure_initialized(&mem, &c, "2026-11-26T03:00:00-03:00", LOCK_WAIT).unwrap();
         assert!(second.created_files.is_empty());
         assert!(second.refreshed_files.is_empty());
         assert_eq!(fs::read_to_string(mem.join("now.md")).unwrap(), custom_now);
@@ -1840,7 +2179,7 @@ mod tests {
         let mem = dir.join("store");
         let c = basic();
         let tz = TimeZone::fixed(jiff::tz::offset(-3));
-        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00").unwrap();
+        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00", LOCK_WAIT).unwrap();
 
         // Add a linked task and an orphan note; add a broken wikilink and a fenced code example.
         fs::write(
@@ -1911,7 +2250,7 @@ mod tests {
         let mem = dir.join("store");
         let c = basic();
         let tz = TimeZone::fixed(jiff::tz::offset(-3));
-        ensure_initialized(&mem, &c, "2026-11-26T01:00:00-03:00").unwrap();
+        ensure_initialized(&mem, &c, "2026-11-26T01:00:00-03:00", LOCK_WAIT).unwrap();
 
         fs::write(
             mem.join("tasks/alpha.md"),
@@ -1964,7 +2303,7 @@ mod tests {
         let mem = dir.join("store");
         let c = basic();
         let tz = TimeZone::fixed(jiff::tz::offset(-3));
-        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00").unwrap();
+        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00", LOCK_WAIT).unwrap();
 
         fs::write(mem.join("tasks/auth-v2.md"), "# Auth v2\n").unwrap();
         fs::write(mem.join("tasks/auth.md"), "# Auth\n").unwrap();
@@ -2005,7 +2344,7 @@ mod tests {
         let mem = dir.join("store");
         let c = basic();
         let tz = TimeZone::fixed(jiff::tz::offset(-3));
-        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00").unwrap();
+        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00", LOCK_WAIT).unwrap();
 
         fs::write(
             mem.join("tasks/doc.md"),
@@ -2057,7 +2396,7 @@ mod tests {
 
         let c = basic();
         let tz = TimeZone::fixed(jiff::tz::offset(-3));
-        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00").unwrap();
+        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00", LOCK_WAIT).unwrap();
 
         std::os::unix::fs::symlink(&outside, mem.join("tasks/linkdir")).unwrap();
         fs::write(
@@ -2097,17 +2436,263 @@ mod tests {
     }
 
     #[test]
-    fn relative_explicit_memory_dir_resolves_against_cwd() {
-        let cwd = Path::new("/work/repo");
+    fn base_dir_order_rejects_relative_override_and_has_no_tmp_fallback() {
+        let env = |crew: Option<&str>, xdg: Option<&str>, home: Option<&str>| BaseEnv {
+            crew_memory_dir: crew.map(str::to_string),
+            xdg_data_home: xdg.map(str::to_string),
+            home: home.map(str::to_string),
+        };
         assert_eq!(
-            resolve_explicit_base("relative/mem", Some(cwd)),
-            Some(PathBuf::from("/work/repo/relative/mem"))
+            base_dir(&env(Some("/abs/mem"), Some("/x"), Some("/h"))).unwrap(),
+            Path::new("/abs/mem")
         );
+        let relative = base_dir(&env(Some("relative/mem"), Some("/x"), Some("/h"))).unwrap_err();
+        assert!(relative.contains("must be an absolute path"), "{relative}");
         assert_eq!(
-            resolve_explicit_base("/abs/mem", Some(cwd)),
-            Some(PathBuf::from("/abs/mem"))
+            base_dir(&env(None, Some("/x"), Some("/h"))).unwrap(),
+            Path::new("/x/herdr-crew/memory")
         );
-        assert_eq!(resolve_explicit_base("", Some(cwd)), None);
+        // A relative XDG_DATA_HOME is ignored, as the XDG spec says.
+        assert_eq!(
+            base_dir(&env(None, Some("rel"), Some("/h"))).unwrap(),
+            Path::new("/h/.local/share/herdr-crew/memory")
+        );
+        let none = base_dir(&env(None, None, None)).unwrap_err();
+        assert!(none.contains("set HOME or CREW_MEMORY_DIR"), "{none}");
+    }
+
+    #[test]
+    fn update_status_writes_recent_only_when_passed_and_keeps_an_invalid_body() {
+        let dir = temp_dir("status-fidelity");
+        let mem = dir.join("store");
+        let c = basic();
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+        ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
+        let owner = json!({"urgent": [], "beforeMain": [], "optional": []});
+
+        update_status(
+            &mem,
+            &c,
+            json!([]),
+            owner.clone(),
+            Some(json!([{"at": "2026-11-26T09:30:00-03:00", "text": "Curated: merged #40"}])),
+            None,
+            Some("2026-11-26T09:31:00-03:00"),
+            &tz,
+        )
+        .unwrap();
+        let text = fs::read_to_string(mem.join("now.md")).unwrap();
+        assert!(
+            text.contains(
+                "recent:\n  - at: 2026-11-26T09:30:00-03:00\n    text: \"Curated: merged #40\"\n"
+            ),
+            "{text}"
+        );
+        let log = fs::read(mem.join("log.md")).unwrap();
+        let status = model::load_markdown(text.as_bytes(), Some(&log), &c, &tz).unwrap();
+        assert_eq!(status.recent[0].text, "Curated: merged #40");
+
+        // Omitted `recent` is dropped, so the board falls back to log.md instead of freezing.
+        update_status(&mem, &c, json!([]), owner.clone(), None, None, None, &tz).unwrap();
+        let text = fs::read_to_string(mem.join("now.md")).unwrap();
+        assert!(!text.contains("recent:"), "{text}");
+        let status = model::load_markdown(text.as_bytes(), Some(&log), &c, &tz).unwrap();
+        assert_eq!(
+            status.recent[0].text,
+            "[init] Initialized operational memory"
+        );
+
+        // Invalid YAML: the body after the closing delimiter survives the rewrite.
+        fs::write(
+            mem.join("now.md"),
+            "---\nversion: [unclosed\n---\n\n# Hand notes\n\nKeep me.\n",
+        )
+        .unwrap();
+        update_status(&mem, &c, json!([]), owner.clone(), None, None, None, &tz).unwrap();
+        let text = fs::read_to_string(mem.join("now.md")).unwrap();
+        assert!(
+            text.ends_with("---\n\n# Hand notes\n\nKeep me.\n"),
+            "{text}"
+        );
+        // No frontmatter at all: the whole file becomes the body.
+        fs::write(mem.join("now.md"), "# Only notes\n").unwrap();
+        update_status(&mem, &c, json!([]), owner, None, None, None, &tz).unwrap();
+        let text = fs::read_to_string(mem.join("now.md")).unwrap();
+        assert!(text.ends_with("---\n\n# Only notes\n"), "{text}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_upserts_keep_every_index_entry() {
+        let dir = temp_dir("concurrent");
+        let mem = dir.join("store");
+        let c = basic();
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+        ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
+        std::thread::scope(|scope| {
+            for t in 0..4 {
+                let (mem, c, tz) = (&mem, &c, &tz);
+                scope.spawn(move || {
+                    for i in 0..5 {
+                        let page = format!("tasks/t{t}-{i}");
+                        upsert_page(
+                            mem,
+                            c,
+                            &page,
+                            "# T\n",
+                            Some("s"),
+                            Some("task"),
+                            Some(&page),
+                            tz,
+                        )
+                        .unwrap();
+                    }
+                });
+            }
+        });
+        let index = fs::read_to_string(mem.join("index.md")).unwrap();
+        let log = fs::read_to_string(mem.join("log.md")).unwrap();
+        for t in 0..4 {
+            for i in 0..5 {
+                assert!(index.contains(&format!("[[tasks/t{t}-{i}]]")), "{index}");
+                assert!(log.contains(&format!("| tasks/t{t}-{i}\n")), "{log}");
+            }
+        }
+        assert!(lint(&mem, &c, &tz).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_held_lock_makes_a_zero_wait_init_give_up() {
+        let dir = temp_dir("busy");
+        let mem = dir.join("store");
+        let c = basic();
+        ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
+        // Other tests fork processes in parallel; a child briefly shares an open lock file
+        // until its exec closes it, so the uncontended calls allow a short wait.
+        let held = lock_memory(&mem, LOCK_WAIT).unwrap();
+        let err =
+            ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", Duration::ZERO).unwrap_err();
+        assert!(err.contains("another herdr-crew process"), "{err}");
+        drop(held);
+        ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_refuses_foreign_or_unknown_directories_but_accepts_moves_and_skeletons() {
+        let dir = temp_dir("owner");
+        let c = basic(); // root /r/acme, which does not exist
+
+        // A directory with someone else's files and no project.json.
+        let foreign = dir.join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(foreign.join("secrets.txt"), "x").unwrap();
+        let err =
+            ensure_initialized(&foreign, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap_err();
+        assert!(err.contains("herdr-crew did not create it"), "{err}");
+        assert!(!foreign.join("now.md").exists());
+
+        // Memory of another checkout that still exists.
+        let other_root = dir.join("other-checkout");
+        fs::create_dir_all(&other_root).unwrap();
+        let taken = dir.join("taken");
+        fs::create_dir_all(&taken).unwrap();
+        fs::write(
+            taken.join("project.json"),
+            json!({"root": other_root.display().to_string(), "label": "other"}).to_string(),
+        )
+        .unwrap();
+        let err =
+            ensure_initialized(&taken, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap_err();
+        assert!(err.contains("belongs to"), "{err}");
+
+        // A moved repository: its old root is gone, so the memory is adopted.
+        let moved = dir.join("moved");
+        fs::create_dir_all(&moved).unwrap();
+        fs::write(
+            moved.join("project.json"),
+            json!({"root": "/gone/acme", "label": "acme"}).to_string(),
+        )
+        .unwrap();
+        let init = ensure_initialized(&moved, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
+        assert_eq!(init.refreshed_files, ["project.json"]);
+        assert!(
+            fs::read_to_string(moved.join("project.json"))
+                .unwrap()
+                .contains("/r/acme")
+        );
+
+        // An interrupted first init (lock, temp file, empty subdirs) can be resumed.
+        let partial = dir.join("partial");
+        fs::create_dir_all(partial.join("tasks")).unwrap();
+        fs::write(partial.join(LOCK_FILE), "").unwrap();
+        fs::write(partial.join(".now.md.1.0.tmp"), "half").unwrap();
+        ensure_initialized(&partial, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
+        assert!(partial.join("now.md").is_file());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decide_covers_fresh_pinned_moved_copied_and_deleted_memory() {
+        let root = Path::new("/r/acme");
+        let candidate = PathBuf::from("/m/acme-11111111");
+        let pinned = PathBuf::from("/m/acme-22222222");
+        let facts = |project_root: Option<&str>, exists: bool| PinFacts {
+            dir: pinned.clone(),
+            project_root: project_root.map(PathBuf::from),
+            project_root_exists: exists,
+        };
+
+        // No pin: use the candidate and create the pin.
+        assert_eq!(
+            decide(None, root, candidate.clone()),
+            Decision {
+                dir: candidate.clone(),
+                pin: Some(PinWrite::Create(candidate.clone())),
+            }
+        );
+        // The pin names this checkout.
+        let same = facts(Some("/r/acme"), true);
+        assert_eq!(
+            decide(Some(&same), root, candidate.clone()),
+            Decision {
+                dir: pinned.clone(),
+                pin: None
+            }
+        );
+        // The data directory was deleted (no project.json): keep the pin, do not diverge.
+        let deleted = facts(None, false);
+        assert_eq!(decide(Some(&deleted), root, candidate.clone()).dir, pinned);
+        // The repository moved: its old root is gone, keep its memory.
+        let moved = facts(Some("/old/acme"), false);
+        assert_eq!(
+            decide(Some(&moved), root, candidate.clone()),
+            Decision {
+                dir: pinned.clone(),
+                pin: None
+            }
+        );
+        // A copy of a checkout that still exists: fresh memory, replace the copied pin.
+        let copied = facts(Some("/elsewhere/acme"), true);
+        assert_eq!(
+            decide(Some(&copied), root, candidate.clone()),
+            Decision {
+                dir: candidate.clone(),
+                pin: Some(PinWrite::Replace(candidate)),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_pin_requires_one_absolute_path() {
+        assert_eq!(parse_pin("/m/acme-1\n").unwrap(), Path::new("/m/acme-1"));
+        assert_eq!(parse_pin("/m/acme-1").unwrap(), Path::new("/m/acme-1"));
+        for bad in ["", "\n", "rel/dir\n", "/a\n/b\n", "/a/../b\n"] {
+            assert!(parse_pin(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -2154,7 +2739,7 @@ mod tests {
         let mem = dir.join("store");
         let c = basic();
         let tz = TimeZone::fixed(jiff::tz::offset(-3));
-        ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00").unwrap();
+        ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
         fs::write(
             mem.join("log.md"),
             "# Log\n\n\
@@ -2194,6 +2779,7 @@ mod tests {
             &c,
             json!([]),
             json!({"urgent": [], "beforeMain": [], "optional": []}),
+            None,
             Some("# Custom Focus\n\nNew body."),
             Some("2026-11-26T09:45:00-03:00"),
             &tz,
@@ -2218,7 +2804,7 @@ mod tests {
             .to_zoned(tz.clone())
             .strftime("%Y-%m-%dT%H:%M:%S%:z")
             .to_string();
-        ensure_initialized(&mem, &c, &now).unwrap();
+        ensure_initialized(&mem, &c, &now, LOCK_WAIT).unwrap();
         let initial_index = fs::read_to_string(mem.join("index.md")).unwrap();
 
         for bad in [

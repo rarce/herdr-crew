@@ -68,7 +68,8 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   mem timeline [--limit N]       print Layer 2 recent log.md entries (default 20)
   mem search <query>             search operational memory pages
   mem show <page>                show a single operational memory page
-  mem mcp [--read-only]          run a zero-daemon stdio MCP server for operational memory
+  mem mcp [--write]              run a zero-daemon stdio MCP server for operational memory
+                                 (read-only unless --write; give --write to the board writer)
   codex-install                  install the crew hook; review it in Codex /hooks
   codex-uninstall                remove only the crew hook
   codex-list                     list saved role bindings and Codex session IDs
@@ -124,6 +125,7 @@ struct Args {
     interval: Option<Duration>,
     limit: Option<usize>,
     read_only: bool,
+    write: bool,
     init: init::Options,
 }
 
@@ -201,6 +203,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
                 a.limit = Some(n);
             }
             "--read-only" => a.read_only = true,
+            "--write" => a.write = true,
             s if s.starts_with('-') => return Err(Fail::usage(format!("unknown option {s}"))),
             _ if a.command.is_empty() => a.command = arg,
             _ => a.positional.push(arg),
@@ -241,7 +244,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         | "pi-install" | "pi-uninstall" | "agy-install" | "agy-uninstall" | "agy-hook"
         | "app-install" | "app-uninstall" => &[],
         "board" => &["file", "once", "interval"],
-        "mem" => &["limit", "read_only"],
+        "mem" => &["limit", "read_only", "write"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
     };
@@ -254,6 +257,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ("interval", a.interval.is_some()),
         ("limit", a.limit.is_some()),
         ("read_only", a.read_only),
+        ("write", a.write),
         ("agent", a.agent.is_some()),
         ("preset", a.init.preset.is_some()),
         ("topology", a.init.topology.is_some()),
@@ -292,6 +296,14 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         }
         if a.read_only && sub != "mcp" {
             return Err(Fail::usage(format!("mem {sub} does not take --read-only")));
+        }
+        if a.write && sub != "mcp" {
+            return Err(Fail::usage(format!("mem {sub} does not take --write")));
+        }
+        if a.read_only && a.write {
+            return Err(Fail::usage(
+                "mem mcp takes --read-only (the default) or --write, not both",
+            ));
         }
         if a.positional.len() != expected {
             return Err(Fail::usage(format!(
@@ -364,7 +376,55 @@ fn load_config(root: &Path) -> Result<Config, Fail> {
         lines: errors.iter().map(ToString::to_string).collect(),
     })?;
     files::validate_config(&config).map_err(Fail::run)?;
+    let mut config = config;
+    if config.uses_wiki_memory() {
+        // Resolved here, in the adapter, so the core never reads the environment. A failure is
+        // kept and surfaced only by the commands that use memory (`send`, `close` still work).
+        match memory::resolve(root, &memory::BaseEnv::from_process()) {
+            Ok(r) => {
+                config.memory.dir = Some(r.decision.dir);
+                config.memory.pin = r.decision.pin;
+                config.memory.note = r.env_note;
+            }
+            Err(e) => config.memory.unresolved = Some(e),
+        }
+    }
     Ok(config)
+}
+
+/// Current time as RFC 3339 with offset.
+fn now_rfc3339() -> String {
+    Timestamp::now()
+        .to_zoned(TimeZone::system())
+        .strftime("%Y-%m-%dT%H:%M:%S%:z")
+        .to_string()
+}
+
+/// For a command that uses wiki memory: fails when the directory is unresolved and prints the
+/// resolution warning. Returns the config to use.
+fn prepare_memory(c: &Config) -> Result<Config, Fail> {
+    let c = c.clone();
+    c.memory_ready().map_err(Fail::run)?;
+    if let Some(note) = &c.memory.note {
+        eprintln!("herdr-crew: warning: {note}");
+    }
+    Ok(c)
+}
+
+/// For a writing command (`up`, `mem init`, `startup` adopting): initializes the decided memory
+/// directory and only then records the pin, so a refused directory is never pinned. When
+/// another process created the pin first, its directory is initialized and used instead.
+fn commit_memory(c: &mut Config, wait: Duration) -> Result<memory::InitResult, String> {
+    let dir = c.memory_ready()?.expect("wiki mode").to_path_buf();
+    let mut init = memory::ensure_initialized(&dir, c, &now_rfc3339(), wait)?;
+    if let Some(write) = c.memory.pin.take() {
+        let pinned = memory::write_pin(&c.root, &write)?;
+        if pinned != dir {
+            c.memory.dir = Some(pinned.clone());
+            init = memory::ensure_initialized(&pinned, c, &now_rfc3339(), wait)?;
+        }
+    }
+    Ok(init)
 }
 
 fn binary() -> PathBuf {
@@ -384,10 +444,7 @@ fn env(
         let pane = w.panes.iter().find(|p| p.tab_id == tab.id)?;
         herdr.map(|h| h.foreground(&pane.id))
     });
-    let now = Timestamp::now()
-        .to_zoned(TimeZone::system())
-        .strftime("%Y-%m-%dT%H:%M:%S%:z")
-        .to_string();
+    let now = now_rfc3339();
     Env {
         agent_cmd: std::env::var("CREW_AGENT_CMD")
             .ok()
@@ -626,17 +683,43 @@ fn up_inner(
             let path = c.root.join(config::CONFIG_FILE);
             files::validate(&c.root, &path, files::Kind::File).map_err(Fail::run)?;
             let text = std::fs::read_to_string(&path).map_err(|e| Fail::run(e.to_string()))?;
-            let (selected, updated) =
+            let (mut selected, updated) =
                 Config::select_agent(&text, &c.root, kind).map_err(|errors| Fail {
                     code: 2,
                     lines: errors.iter().map(ToString::to_string).collect(),
                 })?;
+            // `select_agent` parses again; keep what `load_config` resolved.
+            selected.memory = c.memory.clone();
             Ok::<_, Fail>((selected, (text != updated).then_some(updated)))
         })
         .transpose()?;
     let c = selection.as_ref().map_or(c, |(selected, _)| selected);
+    // Memory is resolved, pinned and initialized before herdr starts, so every role and the
+    // board get the directory that the pin records.
+    let mut prepared;
+    let mut memory_init = None;
+    let c = if c.uses_wiki_memory() {
+        prepared = prepare_memory(c).inspect_err(|f| herdr.notify(&f.lines.join("\n")))?;
+        if !a.dry_run {
+            memory_init = Some(
+                commit_memory(&mut prepared, memory::LOCK_WAIT)
+                    .map_err(|err| fail_notify(herdr, err))?,
+            );
+        }
+        &prepared
+    } else {
+        c
+    };
     let worktrees = git::existing_worktrees(c).map_err(Fail::run)?;
     let mut out = Output;
+    if let Some(init) = &memory_init
+        && (!init.created_files.is_empty() || !init.refreshed_files.is_empty())
+    {
+        out.step(&format!(
+            "operational memory ready in {}",
+            init.dir.display()
+        ));
+    }
     if !a.dry_run {
         let roles = c.roles.len();
         out.step(&format!(
@@ -675,20 +758,10 @@ fn up_inner(
     }
     if a.dry_run {
         print!("{}", p.dry_run());
-        if c.uses_wiki_memory() {
-            println!("memory: initialize/refresh {}", c.memory_dir().display());
+        if let Some(dir) = c.wiki_dir() {
+            println!("memory: initialize/refresh {}", dir.display());
         }
         return Ok(());
-    }
-    if c.uses_wiki_memory() {
-        let init = memory::ensure_initialized(&c.memory_dir(), c, &e.now)
-            .map_err(|err| fail_notify(herdr, err))?;
-        if !init.created_files.is_empty() || !init.refreshed_files.is_empty() {
-            out.step(&format!(
-                "operational memory ready in {}",
-                init.dir.display()
-            ));
-        }
     }
     let ws = herdr::execute(herdr, c, &state, &p, &mut out).map_err(|e| fail_notify(herdr, e))?;
     if p.actions().next().is_none() {
@@ -813,8 +886,27 @@ fn bring_up(
     workspaces: &Value,
     adoption: Result<Initial, Refusal>,
 ) -> Result<(), Fail> {
-    let c = load_config(root)?;
+    let mut c = load_config(root)?;
     let mut out = Output;
+    let watching = adoption.is_ok();
+    // On a restore the memory problem is only logged (a restore stays silent) and the board is
+    // still repaired; when herdr adopts the project agents would start on it, so it is fatal.
+    if let Err(why) = c.memory_ready() {
+        if watching {
+            return Err(Fail::run(why));
+        }
+        eprintln!(
+            "herdr-crew: {}: warning: operational memory unavailable ({why}); leaving the \
+             project to `herdr-crew up`",
+            c.label
+        );
+        return Ok(());
+    }
+    // Adopting starts agents on the directory, so it is a writer like `up`: initialize, then
+    // pin, before planning. A short wait covers a `mem mcp --write` writing at that moment.
+    if watching && c.uses_wiki_memory() {
+        commit_memory(&mut c, Duration::from_secs(1)).map_err(Fail::run)?;
+    }
     let state = herdr.state(workspaces, &c).map_err(Fail::run)?;
     let state = match plan::startup_state(state, adoption) {
         Ok(s) => s,
@@ -829,8 +921,14 @@ fn bring_up(
     let p = plan::plan(&c, &state, &e);
     // What startup saw, for the plugin log.
     print!("{}", startup_verdicts(&c.label, &p));
-    if c.uses_wiki_memory() {
-        memory::ensure_initialized(&c.memory_dir(), &c, &e.now).map_err(Fail::run)?;
+    // A restore repairs a recorded memory directory, never waiting on its lock. Without a pin
+    // there is no recorded directory, so it creates none (the next `up` chooses and pins it).
+    if !watching
+        && c.memory.pin.is_none()
+        && let Some(dir) = c.wiki_dir()
+        && let Err(why) = memory::ensure_initialized(dir, &c, &e.now, Duration::ZERO)
+    {
+        eprintln!("herdr-crew: {}: warning: {why}", c.label);
     }
     let ws = herdr::execute(herdr, &c, &state, &p, &mut out).map_err(Fail::run)?;
     if p.actions().next().is_none() {
@@ -908,6 +1006,14 @@ fn current_state(c: &Config, herdr: &dyn Backend) -> Result<HerdrState, Fail> {
 }
 
 fn add(c: &Config, role: &str) -> Result<(), Fail> {
+    // The new instance's prompt and `--add-dir` need the memory directory.
+    let prepared;
+    let c = if c.uses_wiki_memory() {
+        prepared = prepare_memory(c)?;
+        &prepared
+    } else {
+        c
+    };
     let herdr = host()?;
     let herdr = herdr.as_ref();
     let _lock = lock_project(c, herdr)?;
@@ -944,6 +1050,9 @@ fn close(c: &Config, name: &str) -> Result<(), Fail> {
 }
 
 fn board(c: &Config, a: &Args) -> Result<(), Fail> {
+    if a.file.is_none() {
+        c.memory_ready().map_err(Fail::run)?;
+    }
     let path = a.file.clone().unwrap_or_else(|| c.effective_board_path());
     let result = if a.once {
         board::tui::once(&path, c)
@@ -954,18 +1063,32 @@ fn board(c: &Config, a: &Args) -> Result<(), Fail> {
 }
 
 fn mem(c: &Config, a: &Args) -> Result<(), Fail> {
-    let dir = c.memory_dir();
-    match a.positional[0].as_str() {
+    if !c.uses_wiki_memory() {
+        return Err(Fail::usage(format!(
+            "mem needs [memory] mode = \"wiki\" in {}; this project uses .herdr/status.json",
+            config::CONFIG_FILE
+        )));
+    }
+    let sub = a.positional[0].as_str();
+    let mut c = prepare_memory(c)?;
+    // Only `mem init` records the pin; `mem mcp --write` initializes but does not choose.
+    let init = if sub == "init" {
+        Some(commit_memory(&mut c, memory::LOCK_WAIT).map_err(Fail::run)?)
+    } else {
+        None
+    };
+    let c = &c;
+    let dir = c
+        .wiki_dir()
+        .expect("resolved by prepare_memory")
+        .to_path_buf();
+    match sub {
         "path" => {
             println!("{}", dir.display());
             Ok(())
         }
         "init" => {
-            let now = Timestamp::now()
-                .to_zoned(TimeZone::system())
-                .strftime("%Y-%m-%dT%H:%M:%S%:z")
-                .to_string();
-            let result = memory::ensure_initialized(&dir, c, &now).map_err(Fail::run)?;
+            let result = init.expect("initialized above");
             println!("herdr-crew: memory directory {}", result.dir.display());
             if !result.created_files.is_empty() {
                 println!("  created: {}", result.created_files.join(", "));
@@ -1020,7 +1143,7 @@ fn mem(c: &Config, a: &Args) -> Result<(), Fail> {
             );
             Ok(())
         }
-        "mcp" => mcp::serve(c, dir, a.read_only).map_err(Fail::run),
+        "mcp" => mcp::serve(c, dir, a.write).map_err(Fail::run),
         _ => unreachable!("validated in parse_args"),
     }
 }
@@ -1115,6 +1238,16 @@ fn check(c: &Config) -> Result<(), Fail> {
         ]
     };
     let mut missing = Vec::new();
+    match c.memory_ready() {
+        Ok(Some(dir)) => {
+            println!("herdr-crew: operational memory in {}", dir.display());
+            if let Some(note) = &c.memory.note {
+                println!("herdr-crew: warning: {note}");
+            }
+        }
+        Ok(None) => {}
+        Err(why) => missing.push(format!("herdr-crew: operational memory: {why}")),
+    }
     let host = backend::Host::from_env().map_err(|e| Fail {
         code: 2,
         lines: vec![format!("herdr-crew: {e}")],
@@ -1208,8 +1341,8 @@ fn check(c: &Config) -> Result<(), Fail> {
                 };
                 // Same options `up` launches with, including the wiki memory `--add-dir`.
                 let mut options = role.codex.clone();
-                if c.uses_wiki_memory() {
-                    options.add_extra_dir(c.memory_dir());
+                if let Some(dir) = c.wiki_dir() {
+                    options.add_extra_dir(dir.to_path_buf());
                 }
                 if let Err(error) =
                     codex::integration::preflight(&cwd, &options, &c.root, c.codex_tree)
@@ -1561,12 +1694,16 @@ mod tests {
             args("mem show tasks/poc").unwrap().positional,
             ["show", "tasks/poc"]
         );
-        let mcp_rw = args("mem mcp").unwrap();
-        assert_eq!(mcp_rw.positional, ["mcp"]);
-        assert!(!mcp_rw.read_only);
+        let mcp_default = args("mem mcp").unwrap();
+        assert_eq!(mcp_default.positional, ["mcp"]);
+        assert!(!mcp_default.write, "read-only by default");
         let mcp_ro = args("mem mcp --read-only").unwrap();
         assert_eq!(mcp_ro.positional, ["mcp"]);
-        assert!(mcp_ro.read_only);
+        assert!(mcp_ro.read_only && !mcp_ro.write);
+        let mcp_rw = args("mem mcp --write").unwrap();
+        assert!(mcp_rw.write);
+        assert!(args("mem mcp --read-only --write").is_err());
+        assert!(args("mem index --write").is_err());
     }
 
     #[test]

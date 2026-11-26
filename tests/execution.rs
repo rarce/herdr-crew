@@ -3238,3 +3238,167 @@ fn codex_tree_launches_and_resumes_with_multi_agent_v2_and_needs_codex_0_163() {
         "{refused:?}"
     );
 }
+
+/// Switches the fixture crew to `[memory] mode = "wiki"` (memory under `$HOME/.local/share`).
+fn use_wiki_memory(f: &Fixture) {
+    let path = f.repo.join(".herdr/crew.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replace("[workspace]", "[memory]\nmode = \"wiki\"\n[workspace]"),
+    )
+    .unwrap();
+}
+
+fn memory_pin(f: &Fixture) -> PathBuf {
+    f.repo.join(".git/herdr-crew-memory-dir")
+}
+
+#[test]
+fn wiki_up_pins_memory_and_startup_restore_repairs_the_board_despite_memory_problems() {
+    let f = Fixture::new();
+    use_wiki_memory(&f);
+    f.up();
+    assert_eq!(f.agents(), ["dev", "lead"]);
+    assert!(!f.repo.join(".herdr/status.json").exists());
+    let pinned = PathBuf::from(fs::read_to_string(memory_pin(&f)).unwrap().trim_end());
+    assert!(
+        pinned.starts_with(f.root.join(".local/share/herdr-crew/memory")),
+        "{}",
+        pinned.display()
+    );
+    assert!(pinned.join("now.md").is_file());
+    assert!(pinned.join("project.json").is_file());
+    // A second `up` changes nothing.
+    assert!(f.up().contains("nothing to do"));
+
+    let id = f.workspace();
+    let startup = || {
+        f.command(CREW)
+            .arg("startup")
+            .env("HERDR_PLUGIN_ID", "herdr-crew")
+            .env(
+                "HERDR_PLUGIN_CONTEXT_JSON",
+                json!({"workspace_id": id}).to_string(),
+            )
+            // The server's environment chooses another base; the pin still wins.
+            .env("XDG_DATA_HOME", f.root.join("elsewhere"))
+            .output()
+            .unwrap()
+    };
+
+    // Restore with a broken memory directory: warn in the log, still repair the board.
+    fs::remove_dir(pinned.join("tasks")).unwrap();
+    std::os::unix::fs::symlink("/tmp", pinned.join("tasks")).unwrap();
+    fs::remove_file(f.tab("status").join("running")).unwrap();
+    let runs = f.count(&["pane", "run"]);
+    let out = startup();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    success(out);
+    assert!(stderr.contains("warning"), "{stderr}");
+    assert_eq!(f.count(&["pane", "run"]), runs + 1, "the board is repaired");
+    assert_eq!(
+        f.count(&["notification", "show"]),
+        0,
+        "a restore stays silent"
+    );
+    assert!(!f.root.join("elsewhere").exists());
+
+    // Restore with an unusable pin: the board path is unknown, so warn and leave it.
+    fs::write(memory_pin(&f), "relative/dir\n").unwrap();
+    fs::remove_file(f.tab("status").join("running")).unwrap();
+    let runs = f.count(&["pane", "run"]);
+    let out = startup();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    success(out);
+    assert!(
+        stderr.contains("operational memory unavailable"),
+        "{stderr}"
+    );
+    assert_eq!(f.count(&["pane", "run"]), runs);
+    assert_eq!(f.count(&["notification", "show"]), 0);
+
+    // `up` and `add` refuse with the reason instead of choosing another directory or falling
+    // back to `.herdr/status.json`.
+    failure(
+        f.crew(&["up", "--no-attach"]),
+        "delete it to choose the memory directory again",
+    );
+    failure(
+        f.crew(&["add", "dev"]),
+        "delete it to choose the memory directory again",
+    );
+    assert!(!f.repo.join(".herdr/status.json").exists());
+}
+
+#[test]
+fn wiki_adoption_pins_memory_and_restore_without_a_pin_creates_none() {
+    // Restore of a project that has no pin yet: nothing is created at the server's candidate.
+    let f = Fixture::new();
+    use_wiki_memory(&f);
+    f.up();
+    let pinned = fs::read_to_string(memory_pin(&f)).unwrap();
+    fs::remove_file(memory_pin(&f)).unwrap();
+    let id = f.workspace();
+    let elsewhere = f.root.join("server-data");
+    let out = f
+        .command(CREW)
+        .arg("startup")
+        .env("HERDR_PLUGIN_ID", "herdr-crew")
+        .env(
+            "HERDR_PLUGIN_CONTEXT_JSON",
+            json!({"workspace_id": id}).to_string(),
+        )
+        .env("XDG_DATA_HOME", &elsewhere)
+        .output()
+        .unwrap();
+    success(out);
+    assert!(!elsewhere.exists(), "a restore creates no unpinned memory");
+    assert!(!memory_pin(&f).exists(), "startup on a restore never pins");
+
+    // Adoption: startup is a writer and pins the directory it gives the agents, so a later
+    // `up` in another environment keeps using it.
+    let f = Fixture::new();
+    use_wiki_memory(&f);
+    let w = f.result(&[
+        "workspace",
+        "create",
+        "--cwd",
+        f.repo.to_str().unwrap(),
+        "--label",
+        "repo",
+        "--no-focus",
+    ]);
+    let id = w["workspace"]["workspace_id"].as_str().unwrap();
+    let server_data = f.root.join("server-data");
+    let out = f
+        .command(CREW)
+        .arg("startup")
+        .env("HERDR_PLUGIN_ID", "herdr-crew")
+        .env(
+            "HERDR_PLUGIN_CONTEXT_JSON",
+            json!({"workspace_id": id}).to_string(),
+        )
+        .env("XDG_DATA_HOME", &server_data)
+        .output()
+        .unwrap();
+    success(out);
+    assert_eq!(f.agents(), ["dev", "lead"]);
+    let adopted = PathBuf::from(fs::read_to_string(memory_pin(&f)).unwrap().trim_end());
+    assert!(adopted.starts_with(&server_data), "{}", adopted.display());
+    assert!(adopted.join("now.md").is_file());
+    assert_ne!(format!("{}\n", adopted.display()), pinned);
+    let status = f.tab("status");
+    fs::remove_file(status.join("running")).unwrap();
+    // `up` from the user's shell (no XDG_DATA_HOME) types the board with the pinned directory.
+    f.up();
+    let board = fs::read_to_string(status.join("command")).unwrap();
+    assert!(
+        board.contains(&adopted.join("now.md").display().to_string()),
+        "{board}"
+    );
+    assert_eq!(
+        fs::read_to_string(memory_pin(&f)).unwrap().trim_end(),
+        adopted.display().to_string()
+    );
+}

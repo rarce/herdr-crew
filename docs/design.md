@@ -41,7 +41,7 @@ That goes into the configuration file; the logic lives in one binary.
 2. **Idempotency.** Running `up` twice duplicates no workspace, tab or agent; the second run only creates what is missing.
 3. **Isolation between projects.** `up` only creates or changes things in the workspace with the project's label, and never reuses another project's workspace or tab. herdr agent names are global, so a live agent carrying a role's name, in any workspace, blocks that role (§10).
 4. **The main checkout.** The board and the generated files live there even when the call comes from a worktree.
-5. **Project-local runtime.** Crew commands write nothing outside the project's repository, except the worktrees the project declares. Explicit `codex-install`/`codex-uninstall` also manage the crew entry in the user's Codex hooks file, and `app-install`/`app-uninstall` manage only the folder `mods/herdr-crew/` in the Herdr app's home (`$HERDR_APP_HOME`, default `~/.config/herdr-app`). Installation separately prepares the plugin artifact and installs its public launcher in the user-selected bin directory (§8).
+5. **Project-local runtime.** Crew commands write nothing outside the project's repository, except the worktrees the project declares. Explicit `codex-install`/`codex-uninstall` also manage the crew entry in the user's Codex hooks file, and `app-install`/`app-uninstall` manage only the folder `mods/herdr-crew/` in the Herdr app's home (`$HERDR_APP_HOME`, default `~/.config/herdr-app`). Installation separately prepares the plugin artifact and installs its public launcher in the user-selected bin directory (§8). With `[memory] mode = "wiki"`, `up`, `add`'s agents, `startup`, `mem init` and `mem mcp --write` also write the project's operational memory directory outside the repository, and `up`, `mem init` and `startup` adoption record its path in `herdr-crew-memory-dir` in the common Git directory (§5.5).
 6. **Only an idle shell.** It never types into a pane that runs anything other than its shell (§4.2 step 9).
 7. **A robust viewer.** An unreadable or off-schema board is shown as such; it never brings the viewer down.
 8. **Nothing base is closed.** It never removes a worktree or closes a base role; `close` only closes the tab of an extra instance.
@@ -365,6 +365,8 @@ With the plugin linked, `cd repo && herdr` brings the project up with nothing el
 
 **Output.** For each project it processes, `startup` first prints its verdicts on stdout in the `--dry-run` format (`herdr-crew: <label>`, then one line per role and one for the board), so the log shows what it saw. Then come the steps on stdout and the warnings on stderr, all kept by herdr in `plugin log list`. Warnings never become notifications. On the adoption path the user is watching herdr open, so an error that makes `startup` exit 1 (an invalid `crew.toml`, an agent that fails to start) is also shown with `herdr notification show`. A restore stays fully silent, errors included. It focuses the adopted workspace and nothing else, and never attaches. It exits 0 when there is nothing to do and 1 when a root failed; the other roots still run.
 
+**Wiki memory.** With `[memory] mode = "wiki"` (§5.5), adoption is a writer like `up`: it initializes the directory (waiting up to 1 s on the memory lock) and pins it before planning, and an unresolvable or unusable directory makes the root fail like any other error, since the agents would start pointed at it. On a restore it is only a line on stderr: an initialization failure (or a held memory lock, which a restore never waits for) leaves the board repair to go on, an unresolvable directory skips the root since the board's path is unknown, and a project without a pin gets no directory created (the next `up` chooses and pins it). A restore never writes the pin.
+
 **Cold `up`.** When `up` starts the server itself, that server is headless and creates no workspace, so startup finds nothing to adopt and does nothing, and `up` plans as always. There is no race between the two and `up` does not wait for startup [verified: `up --no-attach` with the plugin linked left one workspace, and startup's log was empty with exit 0]. If herdr ever made a headless server create the initial workspace, `up` would stop planning when it has just started the server with the plugin linked and enabled, and leave the bring-up to startup; that is not built.
 
 **Limits**, both covered by running `herdr-crew up` in the project:
@@ -439,6 +441,25 @@ Content taller than the terminal is cut at the bottom.
   - the terminal was resized.
 - **Keys.** `q`, `Esc` and `Ctrl-C` quit; `r` rereads and redraws.
 - **`--once`.** It draws once to stdout without the alternate screen and exits, for tests and diagnosis.
+
+### 5.5 Operational memory (`[memory] mode = "wiki"`)
+
+Opt-in; `json` (§5.1) stays the default. The board becomes `now.md` (YAML frontmatter checked with the rules of §5.2) in an out-of-repo directory that also holds `SCHEMA.md`, `index.md`, `log.md`, `tasks/`, `decisions/`, `notes/`, `project.json` and `.lock`. Every role gets `--add-dir <dir>`; `{{STATUS}}` and `{{SCHEMA}}` name `now.md` and `SCHEMA.md`, and `{{MEMORY}}`/`{{MEMORY_SCHEMA}}` are a configuration error in json mode.
+
+**Resolution (adapter, once per command).** `load_config` resolves the directory and stores it in `Config`, so the pure core never reads the environment or the disk for it:
+
+1. The pin `<git-common-dir>/herdr-crew-memory-dir` (one absolute path) when it exists. It is shared by linked worktrees and independent of each process's environment, so `up` in the user's shell and `startup` in the server's environment agree. A malformed pin is an error that names the file, never a fallback.
+2. Otherwise the candidate `<base>/<slug>-<8 hex of FNV-1a of the canonical main checkout>`, with `<base>` from `CREW_MEMORY_DIR` (must be absolute), else `$XDG_DATA_HOME/herdr-crew/memory` (when absolute), else `$HOME/.local/share/herdr-crew/memory`. There is no `/tmp` fallback.
+
+`memory::decide` is pure: with a pin whose `project.json` is missing (deleted data) or names this checkout, the pin wins; when it names a root that no longer exists the repository moved and the pin wins (initialization rewrites `project.json`); when it names another existing root this checkout is a copy, so it takes the candidate and the next writer replaces the pin. Only `up` (not with `--dry-run`, before the server starts), `mem init` and `startup` adoption write the pin, and only after the directory initialized: a refused directory is never pinned. The pin is a complete temporary file hard-linked into place, so it is created only if absent and never seen half-written; the loser of a race initializes and adopts the winner's path. If the original checkout is only temporarily missing (an unmounted volume), a copy is taken for a move and adopts the memory, and the original is then treated as the copy. `CREW_MEMORY_DIR` does not override an existing pin; `up`, `check` and `mem` warn when it disagrees, and deleting the pin chooses again. A resolution failure is kept in `Config` and reported only by the commands that use memory (`up`, `add`, `startup`, `board` without `--file`, `check`, `mem`); `up --agent` keeps the resolution across its re-parse.
+
+**Initialization** (`up`, `startup`, `mem init`, `mem mcp --write`) refuses a directory whose `project.json` names another existing checkout, or that holds anything besides herdr-crew's own skeleton (the lock, temporary files, empty subdirectories) without a `project.json`, so an edited pin or variable cannot point agents at arbitrary files. `project.json` is written first, and the ownership check runs before the lock file is created, so a refused directory gets nothing written.
+
+**Writes.** herdr-crew's own read-modify-write of `now.md`, `index.md`, `log.md` and the seed files holds an OS lock on `<dir>/.lock` (5 s wait; zero for `startup`). Lock order is the project lock (§4.2.1), then the memory lock. It serializes herdr-crew processes only: an agent editing the files directly is not serialized, and `--add-dir` lets any role do so.
+
+**Ownership is a convention.** Only `board.writer` should write `now.md`, `index.md` and `log.md`, and `now.md` must say `updatedBy: <writer>`. `mem mcp` is read-only unless started with `--write`, which is meant for the writer; that is a guardrail against accidental writes, not access control, since any caller can pass the flag. `mem_status_update` writes `recent` only when given one, so by default the board's Recent box comes from `log.md`; it keeps the existing Markdown body (the text after the closing `---`, even when the YAML is invalid) unless `focus` replaces it.
+
+**`log.md`.** Newest entry first, directly below the title; headers `## [<RFC 3339>] <type> | <title>`. The legacy local `YYYY-MM-DD HH:MM` form is still read, in the reader's time zone.
 
 ## 6. Rust architecture
 
@@ -689,6 +710,9 @@ A project that runs role sessions with its own scripts migrates in one change:
 | Deferred | Relaunching a role automatically with `claude -r` and the session herdr knows. It would go through `herdr agent start <role> … -- --resume <id>`, never text typed into a shell, and it would change the step-3 rule that a tab without an agent only warns. The recorded id drifts after `/clear` or `/resume` inside the session, and a session without a first request has no transcript (§10). | Tabs without an agent after restarts become frequent                 |
 | Deferred | `up` leaving the bring-up to startup when it has just started the server (§4.4, cold `up`)                                                                                                                                            | herdr's headless server creates an initial workspace                 |
 | Built    | Project lock (2026-10-06): `up`, `add` and `close` wait for each other on an OS file lock in the common Git directory; `startup` skips a locked project (§4.2.1). | —                                                                    |
+| Built    | Wiki memory hardening (0.14.0): pinned memory directory resolved in the adapter, ownership check on initialization, memory write lock, `mem mcp` read-only unless `--write`, `startup` restore tolerating memory failures (§5.5). | —                   |
+| Deferred | Deriving the `mem mcp` caller's role from `HERDR_PANE_ID`, as `send` does, and per-role provenance of memory writes | Several roles need to write memory |
+| Deferred | Owner-only permissions (0700/0600) on the memory directory and symlink checks on its parent directories | A shared machine or a report of foreign files in the base |
 
 ## 12. Open questions
 

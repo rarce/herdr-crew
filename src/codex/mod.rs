@@ -235,10 +235,9 @@ fn pane_context(value: &Value, socket: String) -> Result<Context, String> {
 
 pub fn context_prompt(c: &Config, name: &str, rendered: &str) -> Result<String, String> {
     let board = c.effective_board_path();
-    let schema = if c.uses_wiki_memory() {
-        c.memory_dir().join("SCHEMA.md")
-    } else {
-        c.root.join(crate::prompt::SCHEMA_FILE)
+    let schema = match c.wiki_dir() {
+        Some(dir) => dir.join("SCHEMA.md"),
+        None => c.root.join(crate::prompt::SCHEMA_FILE),
     };
     let context = format!(
         "{rendered}\nCrew runtime paths: the board is {} and its schema is {}. Only {} writes the board. Paths in the role instructions retain their documented meaning relative to the main checkout {}.\n",
@@ -970,13 +969,14 @@ mod tests {
 
         let mut wiki = crate::config::tests::basic();
         wiki.memory.mode = crate::config::MemoryMode::Wiki;
+        wiki.memory.dir = Some(std::path::PathBuf::from("/m/acme-0123abcd"));
         let wiki_prompt = context_prompt(&wiki, "acme-lead", "hello").unwrap();
         assert!(
             wiki_prompt.contains(&wiki.effective_board_path().display().to_string()),
             "{wiki_prompt}"
         );
         assert!(
-            wiki_prompt.contains(&wiki.memory_dir().join("SCHEMA.md").display().to_string()),
+            wiki_prompt.contains("/m/acme-0123abcd/SCHEMA.md"),
             "{wiki_prompt}"
         );
         assert!(!wiki_prompt.contains(".herdr/status.json"), "{wiki_prompt}");

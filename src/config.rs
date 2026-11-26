@@ -78,6 +78,17 @@ pub enum MemoryMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Memory {
     pub mode: MemoryMode,
+    /// The resolved out-of-repo memory directory in wiki mode. Not a `crew.toml` key: the
+    /// adapter (`memory::resolve`) sets it after parsing, so the core never reads the
+    /// environment or the disk to find it.
+    pub dir: Option<PathBuf>,
+    /// Why the adapter could not resolve `dir` (wiki mode only); surfaced only by the
+    /// commands that use memory.
+    pub unresolved: Option<String>,
+    /// The pin the next writing command (`up`, `mem init`) records, when one is due.
+    pub pin: Option<crate::memory::PinWrite>,
+    /// A warning about the resolution (`CREW_MEMORY_DIR` ignored because of the pin).
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -476,24 +487,6 @@ impl Config {
                 }
             });
 
-        // Placeholders are looked up in the source text of each prompt, so that the error points
-        // at its line and column in crew.toml.
-        for (place, span) in prompt_spans(table.get_ref()) {
-            let source = &text[span.clone()];
-            for (offset, name) in prompt::unknown_placeholders(source) {
-                errors.push(at(
-                    Some(span.start + offset..span.start + offset),
-                    format!("{place}: unknown placeholder {{{{{name}}}}}"),
-                ));
-            }
-        }
-
-        for (place, span, value) in string_spans(table.get_ref(), "start_message") {
-            if let Some(why) = start_message_problem(&value) {
-                errors.push(at(Some(span), format!("{place}: {why}")));
-            }
-        }
-
         let memory_mode = match raw.memory.mode.as_deref() {
             None | Some("json") => MemoryMode::Json,
             Some("wiki") => MemoryMode::Wiki,
@@ -505,6 +498,31 @@ impl Config {
                 MemoryMode::Json
             }
         };
+
+        // Placeholders are looked up in the source text of each prompt, so that the error points
+        // at its line and column in crew.toml.
+        for (place, span) in prompt_spans(table.get_ref()) {
+            let source = &text[span.clone()];
+            for (offset, name) in prompt::placeholders(source) {
+                let why = if !prompt::PLACEHOLDERS.contains(&name.as_str()) {
+                    format!("{place}: unknown placeholder {{{{{name}}}}}")
+                } else if memory_mode == MemoryMode::Json
+                    && prompt::WIKI_PLACEHOLDERS.contains(&name.as_str())
+                {
+                    format!("{place}: placeholder {{{{{name}}}}} needs [memory] mode = \"wiki\"")
+                } else {
+                    continue;
+                };
+                errors.push(at(Some(span.start + offset..span.start + offset), why));
+            }
+        }
+
+        for (place, span, value) in string_spans(table.get_ref(), "start_message") {
+            if let Some(why) = start_message_problem(&value) {
+                errors.push(at(Some(span), format!("{place}: {why}")));
+            }
+        }
+
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -526,7 +544,10 @@ impl Config {
                     .unwrap_or_else(|| DEFAULT_BOARD_FILE.to_string()),
                 writer: raw.board.writer,
             },
-            memory: Memory { mode: memory_mode },
+            memory: Memory {
+                mode: memory_mode,
+                ..Memory::default()
+            },
             worktrees,
             common_prompt: raw.common_prompt,
             start_message: raw.start_message,
@@ -606,16 +627,32 @@ impl Config {
         self.memory.mode == MemoryMode::Wiki
     }
 
-    pub fn memory_dir(&self) -> PathBuf {
-        crate::memory::memory_dir(&self.root)
+    /// The resolved memory directory, only in wiki mode. Commands that use memory check
+    /// `memory_ready` first, so the core sees wiki mode with a directory.
+    pub fn wiki_dir(&self) -> Option<&Path> {
+        match self.memory.mode {
+            MemoryMode::Wiki => self.memory.dir.as_deref(),
+            MemoryMode::Json => None,
+        }
+    }
+
+    /// In wiki mode, the resolved directory or why it could not be resolved.
+    pub fn memory_ready(&self) -> Result<Option<&Path>, String> {
+        match self.memory.mode {
+            MemoryMode::Json => Ok(None),
+            MemoryMode::Wiki => match (&self.memory.dir, &self.memory.unresolved) {
+                (Some(dir), _) => Ok(Some(dir)),
+                (None, Some(why)) => Err(why.clone()),
+                (None, None) => Err("the operational memory directory is not resolved".into()),
+            },
+        }
     }
 
     /// The live board file: `<memory_dir>/now.md` in wiki mode, or `<root>/<board.file>` in json mode.
     pub fn effective_board_path(&self) -> PathBuf {
-        if self.uses_wiki_memory() {
-            self.memory_dir().join("now.md")
-        } else {
-            self.board_path()
+        match self.wiki_dir() {
+            Some(dir) => dir.join("now.md"),
+            None => self.board_path(),
         }
     }
 
@@ -834,10 +871,38 @@ prompt = '''You are {{NAME}}.'''
         );
 
         let wiki_text = MIN.replace("[workspace]", "[memory]\nmode = \"wiki\"\n[workspace]");
-        let wiki_cfg = Config::parse(&wiki_text, Path::new("/r/p")).unwrap();
+        let mut wiki_cfg = Config::parse(&wiki_text, Path::new("/r/p")).unwrap();
         assert!(wiki_cfg.uses_wiki_memory());
         assert_eq!(wiki_cfg.memory.mode, MemoryMode::Wiki);
-        assert!(wiki_cfg.effective_board_path().ends_with("now.md"));
+        // The adapter resolves the directory; until then wiki commands refuse to run.
+        assert!(wiki_cfg.wiki_dir().is_none());
+        assert!(wiki_cfg.memory_ready().is_err());
+        wiki_cfg.memory.dir = Some(PathBuf::from("/m/p-0123abcd"));
+        assert_eq!(
+            wiki_cfg.effective_board_path(),
+            Path::new("/m/p-0123abcd/now.md")
+        );
+        assert_eq!(
+            wiki_cfg.memory_ready().unwrap(),
+            Some(Path::new("/m/p-0123abcd"))
+        );
+
+        // `{{MEMORY}}` and `{{MEMORY_SCHEMA}}` only have a value in wiki mode.
+        let json_memory = MIN.replace("You are {{NAME}}.", "Memory {{MEMORY}} {{MEMORY_SCHEMA}}");
+        let errs = errors(&json_memory);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("placeholder {{MEMORY}} needs [memory] mode = \"wiki\"")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("placeholder {{MEMORY_SCHEMA}} needs [memory] mode")),
+            "{errs:?}"
+        );
+        let wiki_memory =
+            json_memory.replace("[workspace]", "[memory]\nmode = \"wiki\"\n[workspace]");
+        assert!(Config::parse(&wiki_memory, Path::new("/r/p")).is_ok());
 
         let bad_mode = MIN.replace("[workspace]", "[memory]\nmode = \"sqlite\"\n[workspace]");
         assert!(

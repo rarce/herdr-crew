@@ -111,6 +111,14 @@ prompt = \"You are {{NAME}} in {{REPO}}. Board: {{STATUS}} Schema: {{SCHEMA}}\"
         self.command().args(args).output().unwrap()
     }
 
+    fn pin(&self) -> PathBuf {
+        self.root.join(".git/herdr-crew-memory-dir")
+    }
+
+    fn mem_path(&self, cmd: &mut Command) -> PathBuf {
+        PathBuf::from(success(cmd.args(["mem", "path"]).output().unwrap()).trim())
+    }
+
     fn run_mcp(&self, extra_args: &[&str], lines: &[String]) -> Vec<Value> {
         let mut child = self
             .command()
@@ -244,9 +252,17 @@ fn mem_mcp_child_process_handles_read_only_and_rw_workflows() {
         mem_dir.display()
     );
 
-    // 2. Default read-write MCP auto-initializes, updates now.md, upserts a page, and reads timeline.
-    let rw = repo.run_mcp(
+    // 2. The default is read-only too.
+    let default = repo.run_mcp(
         &[],
+        &[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string()],
+    );
+    assert_eq!(default[0]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert!(!mem_dir.exists());
+
+    // 3. `--write` auto-initializes, updates now.md, upserts a page, and reads timeline.
+    let rw = repo.run_mcp(
+        &["--write"],
         &[
             json!({"jsonrpc":"2.0","id":1,"method":"initialize"}).to_string(),
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string(),
@@ -359,6 +375,187 @@ fn wiki_up_dry_run_skips_repo_status_and_adds_memory_dir_without_writing() {
         "up --dry-run must not create {}",
         mem_dir.display()
     );
+    assert!(!repo.pin().exists(), "up --dry-run must not pin");
+
+    // `up --agent` re-parses the configuration and must keep the resolved directory.
+    let plan = success(repo.run(&["up", "--agent", "claude", "--dry-run"]));
+    assert!(plan.contains(&mem_dir.display().to_string()), "{plan}");
+    assert!(!repo.pin().exists());
     assert!(!repo.root.join(".herdr/status.json").exists());
     assert!(!Path::new(&repo.root).join(".herdr/prompts").exists());
+}
+
+#[test]
+fn mem_init_pins_the_directory_for_every_environment_and_worktree() {
+    let repo = WikiRepo::new();
+    let first = repo.mem_path(&mut repo.command());
+    assert!(!repo.pin().exists(), "mem path does not pin");
+    success(repo.run(&["mem", "init"]));
+    assert_eq!(
+        fs::read_to_string(repo.pin()).unwrap(),
+        format!("{}\n", first.display())
+    );
+
+    // Another base from the environment: the pin wins, with a warning for CREW_MEMORY_DIR.
+    let other = repo.mem_base.with_extension("other");
+    let out = repo
+        .command()
+        .env("CREW_MEMORY_DIR", &other)
+        .args(["mem", "path"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("CREW_MEMORY_DIR is ignored"),
+        "{out:?}"
+    );
+    assert_eq!(PathBuf::from(success(out).trim()), first);
+    let mut xdg = repo.command();
+    xdg.env_remove("CREW_MEMORY_DIR")
+        .env("XDG_DATA_HOME", repo.root.join("xdg"));
+    assert_eq!(repo.mem_path(&mut xdg), first);
+
+    // A linked worktree shares the main checkout's memory.
+    let wt = repo.root.join("wt");
+    repo.git(&["worktree", "add", "--quiet", wt.to_str().unwrap()]);
+    let mut from_wt = repo.command();
+    from_wt.current_dir(&wt);
+    assert_eq!(repo.mem_path(&mut from_wt), first);
+
+    // An empty pin (e.g. a crash) is an error too.
+    fs::write(repo.pin(), "").unwrap();
+    assert!(!repo.run(&["mem", "path"]).status.success());
+
+    // A malformed pin is an error, not a silent fallback.
+    fs::write(repo.pin(), "not/absolute\n").unwrap();
+    let out = repo.run(&["mem", "path"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("delete it to choose"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn copied_checkouts_get_fresh_memory_and_moved_ones_keep_theirs() {
+    let repo = WikiRepo::new();
+    success(repo.run(&["mem", "init"]));
+    let original = repo.mem_path(&mut repo.command());
+
+    // A copy (the pin comes along) while the original still exists.
+    let copy = repo.root.with_extension("copy");
+    let _ = fs::remove_dir_all(&copy);
+    assert!(
+        Command::new("cp")
+            .arg("-a")
+            .arg(&repo.root)
+            .arg(&copy)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut in_copy = repo.command();
+    in_copy.current_dir(&copy);
+    let fresh = repo.mem_path(&mut in_copy);
+    assert_ne!(fresh, original);
+    let mut init_copy = repo.command();
+    init_copy.current_dir(&copy).args(["mem", "init"]);
+    success(init_copy.output().unwrap());
+    assert_eq!(
+        fs::read_to_string(copy.join(".git/herdr-crew-memory-dir")).unwrap(),
+        format!("{}\n", fresh.display())
+    );
+
+    // A move: the old root is gone, so the moved checkout keeps the pinned memory.
+    let moved = repo.root.with_extension("moved");
+    let _ = fs::remove_dir_all(&moved);
+    fs::rename(&copy, &moved).unwrap();
+    let mut in_moved = repo.command();
+    in_moved.current_dir(&moved);
+    assert_eq!(repo.mem_path(&mut in_moved), fresh);
+    let mut init_moved = repo.command();
+    init_moved.current_dir(&moved).args(["mem", "init"]);
+    let out = success(init_moved.output().unwrap());
+    assert!(out.contains("refreshed: project.json"), "{out}");
+    let project = fs::read_to_string(fresh.join("project.json")).unwrap();
+    assert!(
+        project.contains(moved.canonicalize().unwrap().to_str().unwrap()),
+        "{project}"
+    );
+
+    let _ = fs::remove_dir_all(&moved);
+}
+
+#[test]
+fn memory_commands_refuse_json_mode_and_unusable_environments() {
+    let repo = WikiRepo::new();
+
+    let relative = repo
+        .command()
+        .env("CREW_MEMORY_DIR", "relative/mem")
+        .args(["mem", "path"])
+        .output()
+        .unwrap();
+    assert!(!relative.status.success());
+    assert!(
+        String::from_utf8_lossy(&relative.stderr).contains("must be an absolute path"),
+        "{relative:?}"
+    );
+
+    // No HOME and no override: no /tmp fallback.
+    let none = repo
+        .command()
+        .env_remove("CREW_MEMORY_DIR")
+        .env_remove("HOME")
+        .args(["mem", "path"])
+        .output()
+        .unwrap();
+    assert!(!none.status.success());
+    assert!(
+        String::from_utf8_lossy(&none.stderr).contains("set HOME or CREW_MEMORY_DIR"),
+        "{none:?}"
+    );
+
+    let toml = repo.root.join(".herdr/crew.toml");
+    let text = fs::read_to_string(&toml).unwrap();
+    fs::write(&toml, text.replace("[memory]\nmode = \"wiki\"\n", "")).unwrap();
+    for sub in [&["mem", "path"][..], &["mem", "mcp"]] {
+        let out = repo.run(sub);
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("mode = \"wiki\""),
+            "{out:?}"
+        );
+    }
+    assert!(!repo.pin().exists());
+}
+
+#[test]
+fn a_refused_directory_is_never_pinned_or_written() {
+    let repo = WikiRepo::new();
+    let candidate = repo.mem_path(&mut repo.command());
+    fs::create_dir_all(&candidate).unwrap();
+    fs::write(candidate.join("foreign.txt"), "not ours").unwrap();
+    let out = repo.run(&["mem", "init"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("herdr-crew did not create it"), "{stderr}");
+    assert!(stderr.contains("CREW_MEMORY_DIR"), "{stderr}");
+    assert!(!repo.pin().exists(), "a refused directory is not pinned");
+    let entries: Vec<_> = fs::read_dir(&candidate)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, ["foreign.txt"], "nothing is written into it");
+
+    // Choosing another base then works and pins that one.
+    let other = repo.mem_base.with_extension("other");
+    let mut init = repo.command();
+    init.env("CREW_MEMORY_DIR", &other).args(["mem", "init"]);
+    success(init.output().unwrap());
+    assert!(
+        fs::read_to_string(repo.pin())
+            .unwrap()
+            .starts_with(other.to_str().unwrap())
+    );
+    let _ = fs::remove_dir_all(&other);
 }
