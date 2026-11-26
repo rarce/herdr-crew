@@ -432,6 +432,25 @@ pub struct LogEntry {
     pub title: String,
 }
 
+/// A parsed `log.md` entry including its Markdown body lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogRecord {
+    pub line: usize,
+    pub timestamp_raw: String,
+    pub at: Timestamp,
+    pub kind: String,
+    pub title: String,
+    pub body: Vec<String>,
+}
+
+/// A single entry in `index.md` (or an unindexed page discovered in `tasks/`/`decisions/`/`notes/`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexEntry {
+    pub section: String,
+    pub target: String,
+    pub summary: String,
+}
+
 fn parse_log_header_line(
     line: &str,
     tz: &TimeZone,
@@ -484,29 +503,221 @@ fn parse_log_timestamp(raw: &str, tz: &TimeZone) -> Result<Timestamp, String> {
 
 /// Parses all valid structured `log.md` entries outside fenced code blocks.
 pub fn parse_log_entries(text: &str, tz: &TimeZone) -> Vec<LogEntry> {
-    let mut entries = Vec::new();
+    parse_log_records(text, tz)
+        .into_iter()
+        .map(|r| LogEntry {
+            line: r.line,
+            timestamp_raw: r.timestamp_raw,
+            at: r.at,
+            kind: r.kind,
+            title: r.title,
+        })
+        .collect()
+}
+
+/// Parses all valid structured `log.md` entries along with their Markdown body lines.
+pub fn parse_log_records(text: &str, tz: &TimeZone) -> Vec<LogRecord> {
+    let mut records: Vec<LogRecord> = Vec::new();
     let mut in_fence: Option<(char, usize)> = None;
     for (idx, raw_line) in text.lines().enumerate() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         if update_fence(line, &mut in_fence) {
+            if let Some(current) = records.last_mut() {
+                current.body.push(line.to_string());
+            }
             continue;
         }
         if in_fence.is_some() {
+            if let Some(current) = records.last_mut() {
+                current.body.push(line.to_string());
+            }
             continue;
         }
-        if line.starts_with("## [")
-            && let Ok((timestamp_raw, at, kind, title)) = parse_log_header_line(line, tz)
+        if line.starts_with("## [") {
+            if let Ok((timestamp_raw, at, kind, title)) = parse_log_header_line(line, tz) {
+                records.push(LogRecord {
+                    line: idx + 1,
+                    timestamp_raw,
+                    at,
+                    kind,
+                    title,
+                    body: Vec::new(),
+                });
+            }
+        } else if let Some(current) = records.last_mut() {
+            current.body.push(line.to_string());
+        }
+    }
+    for rec in &mut records {
+        while rec.body.first().is_some_and(|l| l.trim().is_empty()) {
+            rec.body.remove(0);
+        }
+        while rec.body.last().is_some_and(|l| l.trim().is_empty()) {
+            rec.body.pop();
+        }
+    }
+    records
+}
+
+/// Reads and parses `log.md` entries with bodies, sorted newest first.
+pub fn read_log_records(dir: &Path, tz: &TimeZone) -> Result<Vec<LogRecord>, String> {
+    let text = show(dir, "log.md")?;
+    let mut records = parse_log_records(&text, tz);
+    records.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| b.line.cmp(&a.line)));
+    Ok(records)
+}
+
+/// Parses list items in `index.md` into structured entries, appending any unindexed `.md`
+/// pages under an `"Unindexed"` section so nothing is hidden in the UI.
+pub fn parse_index_entries(index_text: &str, subdir_pages: &[String]) -> Vec<IndexEntry> {
+    let mut entries = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut section = "Pages".to_string();
+    let mut in_fence: Option<(char, usize)> = None;
+
+    for raw_line in index_text.lines() {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if update_fence(line, &mut in_fence) || in_fence.is_some() {
+            continue;
+        }
+        let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix("## ") {
+            let h = heading.trim();
+            if !h.is_empty() {
+                section = h.to_string();
+            }
+            continue;
+        }
+        let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        else {
+            continue;
+        };
+        let cleaned = strip_inline_code(item);
+        if let Some((target, summary)) = parse_index_item(item, &cleaned)
+            && seen.insert(target.clone())
         {
-            entries.push(LogEntry {
-                line: idx + 1,
-                timestamp_raw,
-                at,
-                kind,
-                title,
+            entries.push(IndexEntry {
+                section: section.clone(),
+                target,
+                summary,
             });
         }
     }
+
+    for rel in subdir_pages {
+        let stem = rel.strip_suffix(".md").unwrap_or(rel);
+        if seen.insert(stem.to_string()) {
+            entries.push(IndexEntry {
+                section: "Unindexed".to_string(),
+                target: stem.to_string(),
+                summary: "(not listed in index.md)".to_string(),
+            });
+        }
+    }
+
     entries
+}
+
+fn parse_index_item(raw_item: &str, cleaned: &str) -> Option<(String, String)> {
+    if let Some(start) = cleaned.find("[[")
+        && let Some(rel_end) = cleaned[start + 2..].find("]]")
+    {
+        let raw_target = &cleaned[start + 2..start + 2 + rel_end];
+        let mut parts = raw_target.split('|');
+        let target_part = parts
+            .next()
+            .unwrap_or("")
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim();
+        let alias = parts.next().map(str::trim).unwrap_or("");
+        let normalized = target_part
+            .strip_prefix("./")
+            .unwrap_or(target_part)
+            .strip_suffix(".md")
+            .unwrap_or(target_part);
+        if !normalized.is_empty() {
+            let needle = format!("[[{raw_target}]]");
+            let after = raw_item
+                .find(&needle)
+                .map(|pos| &raw_item[pos + needle.len()..])
+                .unwrap_or(&cleaned[start + 2 + rel_end + 2..]);
+            let summary = clean_index_summary(after);
+            let summary = if summary.is_empty() && !alias.is_empty() && alias != normalized {
+                alias.to_string()
+            } else {
+                summary
+            };
+            return Some((normalized.to_string(), summary));
+        }
+    }
+    if let Some(mid) = cleaned.find("](")
+        && let Some(open) = cleaned[..mid].rfind('[')
+        && (open == 0 || cleaned.as_bytes()[open - 1] != b'!')
+        && let Some(rel_close) = cleaned[mid + 2..].find(')')
+    {
+        let label = cleaned[open + 1..mid].trim();
+        let raw_dest = cleaned[mid + 2..mid + 2 + rel_close].trim();
+        let dest = if let Some(inner) = raw_dest.strip_prefix('<') {
+            inner.split('>').next().unwrap_or("")
+        } else {
+            raw_dest.split_whitespace().next().unwrap_or("")
+        };
+        if !dest.is_empty()
+            && !dest.starts_with('#')
+            && !dest.contains("://")
+            && !dest.starts_with("mailto:")
+        {
+            let without_frag = dest
+                .split('#')
+                .next()
+                .unwrap_or("")
+                .split('?')
+                .next()
+                .unwrap_or("");
+            let trimmed = without_frag.strip_prefix("./").unwrap_or(without_frag);
+            let stem = trimmed.strip_suffix(".md").unwrap_or(trimmed);
+            if !stem.is_empty() {
+                let after = raw_item
+                    .find("](")
+                    .and_then(|m| {
+                        raw_item[m + 2..]
+                            .find(')')
+                            .map(|c| &raw_item[m + 2 + c + 1..])
+                    })
+                    .unwrap_or("");
+                let summary = clean_index_summary(after);
+                let summary = if summary.is_empty() && !label.is_empty() && label != stem {
+                    label.to_string()
+                } else {
+                    summary
+                };
+                return Some((stem.to_string(), summary));
+            }
+        }
+    }
+    None
+}
+
+fn clean_index_summary(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches(['—', '–', '-', ':'])
+        .trim()
+        .to_string()
+}
+
+/// Reads `index.md` and combines it with any unindexed `.md` pages under `tasks/`, `decisions/`,
+/// and `notes/`.
+pub fn list_index_entries(dir: &Path) -> Result<Vec<IndexEntry>, String> {
+    let index_text = show(dir, "index.md")?;
+    let mut subdir_pages = Vec::new();
+    for sub in SUBDIRS {
+        collect_subdir_markdown(dir, sub, &mut subdir_pages, None)?;
+    }
+    Ok(parse_index_entries(&index_text, &subdir_pages))
 }
 
 fn update_fence(line: &str, in_fence: &mut Option<(char, usize)>) -> bool {
@@ -1387,5 +1598,42 @@ mod tests {
             Some(PathBuf::from("/abs/mem"))
         );
         assert_eq!(resolve_explicit_base("", Some(cwd)), None);
+    }
+
+    #[test]
+    fn parses_index_entries_with_unindexed_pages_and_log_records_with_bodies() {
+        let index = "\
+# Index
+
+## Active
+- [[now]] — live status board
+
+## Tasks
+- [[tasks/t1]] — implement `board` tabs
+- [Auth](tasks/auth.md) — OAuth flow
+";
+        let entries = parse_index_entries(
+            index,
+            &[
+                "tasks/t1.md".into(),
+                "tasks/auth.md".into(),
+                "notes/unlisted.md".into(),
+            ],
+        );
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].section, "Active");
+        assert_eq!(entries[0].target, "now");
+        assert_eq!(entries[1].summary, "implement `board` tabs");
+        assert_eq!(entries[2].target, "tasks/auth");
+        assert_eq!(entries[2].summary, "OAuth flow");
+        assert_eq!(entries[3].section, "Unindexed");
+        assert_eq!(entries[3].target, "notes/unlisted");
+
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+        let log = "# Log\n\n## [2026-11-26 09:00] init | Seeded\n\nFirst line.\nSecond line.\n\n## [2026-11-26 10:00] task | Next\n\nDetails.\n";
+        let records = parse_log_records(log, &tz);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].body, ["First line.", "Second line."]);
+        assert_eq!(records[1].body, ["Details."]);
     }
 }
