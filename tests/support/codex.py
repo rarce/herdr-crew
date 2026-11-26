@@ -26,9 +26,16 @@ elif args and args[0] == "queue":
         raise SystemExit(1)
     print("Queued message for thread " + args[args.index("--thread") + 1])
 elif "app-server" in args:
-    for flag in ("--add-dir", "--profile"):
-        if flag in args:
-            print(f"error: unexpected argument '{flag}' found", file=sys.stderr)
+    # Real usage: `codex app-server --stdio --config <key=value>`; reject anything else.
+    rest = args[args.index("app-server") + 1:]
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--stdio":
+            i += 1
+        elif rest[i] in ("-c", "--config") and i + 1 < len(rest):
+            i += 2
+        else:
+            print(f"error: unexpected argument '{rest[i]}' found", file=sys.stderr)
             raise SystemExit(2)
     for line in sys.stdin:
         request = json.loads(line)

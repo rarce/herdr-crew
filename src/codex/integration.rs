@@ -134,19 +134,18 @@ pub fn preflight(cwd: &Path, options: &CodexOptions, root: &Path) -> Result<(), 
     preflight_home(cwd, options, root, &home()?)
 }
 
-/// Filters `CodexOptions::args()` for `codex app-server --stdio`, which accepts `-c`
-/// overrides but rejects interactive CLI flags (`--no-daemon`, `--profile`, `--add-dir`).
+/// Keeps only the `-c <key=value>` overrides from `CodexOptions::args()` for
+/// `codex app-server --stdio`, whose usage is `--stdio --config <key=value>`: every
+/// interactive flag (`--no-daemon`, `--profile`, `--add-dir`, and any added later) is dropped.
 fn app_server_args(args: &[String]) -> Vec<&str> {
     let mut out = Vec::with_capacity(args.len());
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--no-daemon" => i += 1,
-            "--profile" | "--add-dir" => i += 2,
-            arg => {
-                out.push(arg);
-                i += 1;
-            }
+        if matches!(args[i].as_str(), "-c" | "--config") && i + 1 < args.len() {
+            out.extend(["-c", args[i + 1].as_str()]);
+            i += 2;
+        } else {
+            i += 1;
         }
     }
     out
@@ -175,9 +174,10 @@ pub fn preflight_home(
         .arg("--stdio")
         .arg("-c")
         .arg("features.hooks=true");
-    // `codex app-server` rejects interactive flags (`--no-daemon`, `--profile`, `--add-dir`).
+    // `codex app-server` accepts only `-c` overrides; `app_server_args` drops everything else.
     // Profile hook overrides are checked above via `validate_profile`, and `--add-dir` only
     // widens workspace access for interactive/resumed sessions, not read-only hook inspection.
+    // The byte bound below still counts every launch argument.
     let args = effective.args();
     let bytes: usize = args
         .iter()

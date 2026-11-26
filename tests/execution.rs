@@ -3077,6 +3077,54 @@ fn codex_wiki_memory_preflight_strips_add_dir_from_app_server_but_keeps_it_for_l
         canonical_mem
     );
 
-    // `check` also succeeds against the stricter `app-server` simulator.
+    // `check` preflights the same options as `up`, memory `--add-dir` included, so it
+    // exercises the app-server filter against the strict simulator too.
     success(f.crew(&["check"]));
+}
+
+#[test]
+fn codex_resume_in_wiki_memory_mode_passes_preflight_and_keeps_add_dir() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(true);
+    let config = format!(
+        "{}\n[memory]\nmode = \"wiki\"\n",
+        f.read(".herdr/crew.toml")
+    );
+    fs::write(f.repo.join(".herdr/crew.toml"), config).unwrap();
+    f.up();
+    let mem_dir = PathBuf::from(success(f.crew(&["mem", "path"])).trim())
+        .canonicalize()
+        .unwrap();
+    let host = RpcHost::new(&f);
+    host.hook(&f, "lead", "startup", "lead-id");
+    let snapshot = f
+        .snapshots()
+        .into_iter()
+        .find(|s| s["name"] == "lead")
+        .unwrap();
+    let token = snapshot["token"].as_str().unwrap();
+    let pane = host.pane("lead");
+    // `codex-resume` re-runs the app-server preflight with the snapshot's memory dir.
+    success(
+        host.command(&f, &pane)
+            .args(["codex-resume", token])
+            .output()
+            .unwrap(),
+    );
+    let resumed: Value =
+        serde_json::from_slice(&fs::read(f.state.join("codex-resume.json")).unwrap()).unwrap();
+    let args = resumed["args"].as_array().unwrap();
+    assert_eq!(args[0], "resume");
+    assert!(
+        args.windows(2).any(|pair| {
+            pair[0] == "--add-dir"
+                && pair[1]
+                    .as_str()
+                    .and_then(|p| Path::new(p).canonicalize().ok())
+                    .is_some_and(|p| p == mem_dir)
+        }),
+        "expected codex resume to keep --add-dir {}: {args:?}",
+        mem_dir.display()
+    );
 }
