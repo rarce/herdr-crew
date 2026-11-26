@@ -138,7 +138,7 @@ pub fn load_markdown(
         && let Ok(log_text) = std::str::from_utf8(log_bytes)
     {
         let mut entries = crate::memory::parse_log_entries(log_text, tz);
-        entries.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| b.line.cmp(&a.line)));
+        entries.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.line.cmp(&b.line)));
         status.recent = entries
             .into_iter()
             .take(5)
@@ -560,6 +560,19 @@ Details.
         assert_eq!(status.recent.len(), 5);
         assert_eq!(status.recent[0].text, "[merge] Merged PR #35");
         assert_eq!(status.recent[4].text, "[task] Started frontmatter parser");
+
+        // Equal timestamps keep the top (prepended) entry first in Recent.
+        let tied_log = "\
+# Log
+
+## [2026-11-26T02:20:00-03:00] task | Prepended newer entry
+
+## [2026-11-26T02:20:00-03:00] init | Older same-second entry
+";
+        let tied = load_markdown(now_md.as_bytes(), Some(tied_log.as_bytes()), &agy, &tz).unwrap();
+        assert_eq!(tied.recent.len(), 2);
+        assert_eq!(tied.recent[0].text, "[task] Prepended newer entry");
+        assert_eq!(tied.recent[1].text, "[init] Older same-second entry");
 
         // Normal (non-tree) mode validates configured roles and rejects unknown workers.
         let basic_cfg = basic();

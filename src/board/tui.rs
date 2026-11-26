@@ -21,13 +21,16 @@ fn is_markdown(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("md")
 }
 
+fn parent_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 fn read(path: &Path, c: &Config, tz: &TimeZone) -> Result<Status, Unavailable> {
     match std::fs::read(path) {
         Ok(bytes) if is_markdown(path) => {
-            let log_bytes = path
-                .parent()
-                .map(|p| p.join("log.md"))
-                .and_then(|p| std::fs::read(p).ok());
+            let log_bytes = std::fs::read(parent_dir(path).join("log.md")).ok();
             model::load_markdown(&bytes, log_bytes.as_deref(), c, tz)
         }
         Ok(bytes) => model::load(&bytes, c),
@@ -58,19 +61,26 @@ fn watched_preview_target(state: &WikiState) -> Option<&str> {
         .map(|p| p.target.as_str())
 }
 
-fn watch_signature_wiki(path: &Path, preview_target: Option<&str>) -> [FileSig; 4] {
-    let dir = path.parent();
-    let index_sig = dir.and_then(|p| signature(&p.join("index.md")));
-    let log_sig = dir.and_then(|p| signature(&p.join("log.md")));
-    let page_sig = preview_target.and_then(|target| {
+fn preview_signature(path: &Path, preview_target: Option<&str>) -> FileSig {
+    let dir = parent_dir(path);
+    preview_target.and_then(|target| {
         let rel = if target.ends_with(".md") {
             target.to_string()
         } else {
             format!("{target}.md")
         };
-        dir.and_then(|p| signature(&p.join(rel)))
-    });
-    [signature(path), index_sig, log_sig, page_sig]
+        signature(&dir.join(rel))
+    })
+}
+
+fn watch_signature_wiki(path: &Path, preview_target: Option<&str>) -> [FileSig; 4] {
+    let dir = parent_dir(path);
+    [
+        signature(path),
+        signature(&dir.join("index.md")),
+        signature(&dir.join("log.md")),
+        preview_signature(path, preview_target),
+    ]
 }
 
 fn project(c: &Config) -> String {
@@ -176,7 +186,7 @@ fn run_wiki(
 ) -> io::Result<()> {
     let project = project(c);
     let tz = TimeZone::system();
-    let mem_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mem_dir = parent_dir(path);
     let mut state = WikiState::default();
     let mut seen = watch_signature_wiki(path, None);
     let mut board = read(path, c, &tz);
@@ -214,11 +224,11 @@ fn run_wiki(
                         WikiAction::OpenPage(target) => {
                             let content = memory::show(mem_dir, &target);
                             state.open_preview(target, content);
-                            seen = watch_signature_wiki(path, watched_preview_target(&state));
+                            seen[3] = preview_signature(path, watched_preview_target(&state));
                             dirty = true;
                         }
                         WikiAction::Redraw => {
-                            seen = watch_signature_wiki(path, watched_preview_target(&state));
+                            seen[3] = preview_signature(path, watched_preview_target(&state));
                             dirty = true;
                         }
                         WikiAction::None => {}
@@ -239,5 +249,50 @@ fn run_wiki(
             }
             dirty = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn parent_dir_and_preview_signature_preserve_board_watch_slots() {
+        assert_eq!(parent_dir(Path::new("now.md")), Path::new("."));
+        assert_eq!(parent_dir(Path::new("/a/b/now.md")), Path::new("/a/b"));
+
+        let dir = PathBuf::from(format!("/tmp/crew-tui-watch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("tasks")).unwrap();
+        let now_path = dir.join("now.md");
+        fs::write(&now_path, "v1").unwrap();
+        fs::write(dir.join("index.md"), "# Index\n").unwrap();
+        fs::write(dir.join("log.md"), "# Log\n").unwrap();
+        fs::write(dir.join("tasks/t1.md"), "# Task 1\n").unwrap();
+
+        let mut seen = watch_signature_wiki(&now_path, None);
+        assert!(seen[3].is_none());
+
+        // Simulate a concurrent edit to now.md followed by opening a preview (updating only seen[3]).
+        fs::write(&now_path, "v2 longer content").unwrap();
+        let mut state = WikiState::default();
+        state.open_preview("tasks/t1".into(), Ok("# Task 1\n".into()));
+        seen[3] = preview_signature(&now_path, watched_preview_target(&state));
+        assert!(seen[3].is_some());
+        assert_ne!(
+            watch_signature_wiki(&now_path, watched_preview_target(&state)),
+            seen,
+            "updating only seen[3] must not swallow concurrent edits to now.md"
+        );
+
+        // Errored previews are not watched.
+        state.open_preview("../outside".into(), Err("invalid path".into()));
+        assert_eq!(watched_preview_target(&state), None);
+        assert!(preview_signature(&now_path, watched_preview_target(&state)).is_none());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -1101,7 +1101,7 @@ mod tests {
             &["tasks/t1.md".into(), "notes/extra.md".into()],
         );
         let mut records = crate::memory::parse_log_records(log_md, &tz);
-        records.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| b.line.cmp(&a.line)));
+        records.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.line.cmp(&b.line)));
         let data = WikiData {
             index: Ok(index_entries),
             log: Ok(records),
