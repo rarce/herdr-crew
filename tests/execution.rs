@@ -3063,6 +3063,10 @@ fn codex_wiki_memory_preflight_strips_add_dir_from_app_server_but_keeps_it_for_l
         "expected Codex launch args to include --add-dir {}: {lead_start:?}",
         canonical_mem.display()
     );
+    assert!(
+        !lead_start.contains(&"features.multi_agent_v2=true".to_string()),
+        "a non-tree crew must not enable multi_agent_v2: {lead_start:?}"
+    );
     let lead_snapshot = f
         .snapshots()
         .into_iter()
@@ -3126,5 +3130,111 @@ fn codex_resume_in_wiki_memory_mode_passes_preflight_and_keeps_add_dir() {
         }),
         "expected codex resume to keep --add-dir {}: {args:?}",
         mem_dir.display()
+    );
+}
+
+#[test]
+fn codex_tree_launches_and_resumes_with_multi_agent_v2_and_needs_codex_0_163() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(true);
+    let config = f.read(".herdr/crew.toml");
+    let config = config
+        .replace("version = 1\n", "version = 1\ncodex_tree = true\n")
+        .replace(
+            "start_message = \"Confirma tu rol «ahora»; it's fine, $HOME `id`.\"\n",
+            "",
+        );
+    let config = config[..config.find("[[roles]]\nname = \"dev\"").unwrap()].to_string();
+    fs::write(f.repo.join(".herdr/crew.toml"), config).unwrap();
+    success(f.crew(&["codex-install"]));
+
+    // Tree mode was tested with Codex 0.163.0; older CLIs stop before any mutation.
+    fs::write(f.state.join("codex-version"), "0.162.9").unwrap();
+    failure(f.crew(&["up", "--no-attach"]), "codex_tree");
+    assert_eq!(f.count(&["workspace", "create"]), 0);
+    assert_eq!(f.count(&["tab", "create"]), 0);
+    let checked = f.crew(&["check"]);
+    assert!(!checked.status.success(), "{checked:?}");
+    assert!(
+        String::from_utf8_lossy(&checked.stdout).contains("codex 0.163.0 or newer")
+            || String::from_utf8_lossy(&checked.stderr).contains("codex 0.163.0 or newer"),
+        "{checked:?}"
+    );
+    fs::write(f.state.join("codex-version"), "0.163.0").unwrap();
+    f.up();
+
+    let feature = "features.multi_agent_v2=true";
+    let lead_start = f
+        .calls()
+        .into_iter()
+        .find(|args| starts_with(args, &["agent", "start", "lead"]))
+        .expect("expected agent start lead call");
+    assert!(
+        lead_start
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == feature),
+        "expected tree launch to enable {feature}: {lead_start:?}"
+    );
+    let snapshot = f
+        .snapshots()
+        .into_iter()
+        .find(|s| s["name"] == "lead")
+        .unwrap();
+    assert_eq!(snapshot["tree"], true);
+
+    let host = RpcHost::new(&f);
+    host.hook(&f, "lead", "startup", "lead-id");
+    let token = snapshot["token"].as_str().unwrap();
+    let pane = host.pane("lead");
+    success(
+        host.command(&f, &pane)
+            .args(["codex-resume", token])
+            .output()
+            .unwrap(),
+    );
+    let resumed: Value =
+        serde_json::from_slice(&fs::read(f.state.join("codex-resume.json")).unwrap()).unwrap();
+    let args = resumed["args"].as_array().unwrap();
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == [json!("-c"), json!(feature)]),
+        "expected codex resume to enable {feature}: {args:?}"
+    );
+
+    // A tree snapshot written before the `tree` field existed is recognised by its prompt.
+    let snapshot_path = f.repo.join(format!(".herdr/codex/snapshots/{token}.json"));
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("tree");
+    fs::write(&snapshot_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    fs::remove_file(f.state.join("codex-resume.json")).unwrap();
+    success(
+        host.command(&f, &pane)
+            .args(["codex-resume", token])
+            .output()
+            .unwrap(),
+    );
+    let resumed: Value =
+        serde_json::from_slice(&fs::read(f.state.join("codex-resume.json")).unwrap()).unwrap();
+    assert!(
+        resumed["args"]
+            .as_array()
+            .unwrap()
+            .windows(2)
+            .any(|pair| pair == [json!("-c"), json!(feature)]),
+        "expected a legacy tree snapshot to resume with {feature}: {resumed}"
+    );
+
+    // `codex-resume` also refuses an older CLI for a tree snapshot.
+    fs::write(f.state.join("codex-version"), "0.162.9").unwrap();
+    let refused = host
+        .command(&f, &pane)
+        .args(["codex-resume", token])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("codex_tree"),
+        "{refused:?}"
     );
 }

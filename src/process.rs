@@ -233,6 +233,25 @@ mod tests {
         path
     }
 
+    /// Another test thread may fork while `script` still has the file open for writing; the
+    /// child holds that descriptor until its own exec, so running the script fails with
+    /// ETXTBSY ("Text file busy"). Retry briefly instead of flaking.
+    fn retry<T>(mut run: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+        for _ in 0..50 {
+            match run() {
+                Err(e) if e.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                other => return other,
+            }
+        }
+        run()
+    }
+
+    fn detect(path: std::path::PathBuf) -> Result<(u32, u32, u32), String> {
+        retry(|| super::detect(&path))
+    }
+
     #[test]
     fn versions_come_from_stdout_or_from_stderr_of_a_successful_run() {
         assert_eq!(detect(script("out", "echo 'tool 0.9.3'")), Ok((0, 9, 3)));
@@ -255,11 +274,11 @@ mod tests {
             "finish-fail",
             "echo 'queued'; echo 'delivery failed' >&2; exit 1",
         );
-        let mut process = Inspector::spawn(&mut Command::new(path)).unwrap();
+        let mut process = retry(|| Inspector::spawn(&mut Command::new(&path))).unwrap();
         assert!(process.finish().unwrap_err().contains("delivery failed"));
 
         let path = script("finish-timeout", "exec sleep 2");
-        let mut process = Inspector::spawn(&mut Command::new(path)).unwrap();
+        let mut process = retry(|| Inspector::spawn(&mut Command::new(&path))).unwrap();
         process.deadline = Instant::now() + Duration::from_millis(50);
         let start = Instant::now();
         assert!(process.finish().is_err());

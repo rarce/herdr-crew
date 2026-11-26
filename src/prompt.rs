@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 
+/// Heading of the Codex tree runtime block; also marks tree snapshots written before 0.13.0.
+pub const CODEX_TREE_HEADING: &str = "Crew runtime communication (Codex native tree):";
+
 pub const PLACEHOLDERS: [&str; 8] = [
     "NAME",
     "REPO",
@@ -93,7 +96,7 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
     };
     if config.codex_tree {
         text.push_str(&format!(
-            "\n\nCrew runtime communication (Codex native tree):\n\
+            "\n\n{CODEX_TREE_HEADING}\n\
              Your crew role is {name}; you are the coordinator of the native role manifest above. \
              This block replaces earlier agent-specific messaging instructions only. Preserve \
              project tasks, ownership rules and permissions. Create manifest workers only on \

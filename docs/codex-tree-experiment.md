@@ -128,6 +128,16 @@ identities differ. The automated experiment configures this flag in a temporary
 `CODEX_HOME`, installs and trusts only that home's exact test crew hook, and calls
 ordinary `herdr-crew up --no-attach` there. Nothing is enabled globally.
 
+Since 0.13.0, herdr-crew itself passes `-c features.multi_agent_v2=true` to the
+coordinator on launch and on `codex-resume` (the snapshot records `tree = true`; older
+tree snapshots are recognised by their tree runtime prompt), so a crew made with
+`init --topology tree` gets the v2 tools without editing `~/.codex/config.toml`. A plain
+`codex resume <id>`, or Herdr's fallback when the crew hook never reported its resume
+command, still needs the global setting. Codex 0.172 still defaults the feature to off and would otherwise
+offer only `multi_agent_v1` (`spawn_agent`, `send_input`, `wait_agent`), which the tree
+prompt does not name. `check`, `up` and `codex-resume` require Codex 0.163.0+ for tree
+crews.
+
 Run the complete experiment from this repository:
 
 ```sh

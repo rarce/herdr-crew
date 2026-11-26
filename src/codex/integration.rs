@@ -130,8 +130,26 @@ pub fn install(remove: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn preflight(cwd: &Path, options: &CodexOptions, root: &Path) -> Result<(), String> {
-    preflight_home(cwd, options, root, &home()?)
+/// Native tree crews use `multi_agent_v2` tools, which the tested Codex 0.163.0 provides.
+pub const TREE_MIN_VERSION: (u32, u32, u32) = (0, 163, 0);
+
+/// The Codex CLI minimum: 0.160.1 for roles, 0.163.0 for native tree crews.
+pub fn require_version(tree: bool) -> Result<(), String> {
+    if tree {
+        process::version("codex", TREE_MIN_VERSION)
+            .map_err(|e| format!("native Codex tree mode (codex_tree): {e}"))
+    } else {
+        process::version("codex", (0, 160, 1))
+    }
+}
+
+pub fn preflight(
+    cwd: &Path,
+    options: &CodexOptions,
+    root: &Path,
+    tree: bool,
+) -> Result<(), String> {
+    preflight_home(cwd, options, root, &home()?, tree)
 }
 
 /// Keeps only the `-c <key=value>` overrides from `CodexOptions::args()` for
@@ -156,8 +174,9 @@ pub fn preflight_home(
     options: &CodexOptions,
     root: &Path,
     codex_home: &Path,
+    tree: bool,
 ) -> Result<(), String> {
-    process::version("codex", (0, 160, 1))?;
+    require_version(tree)?;
     launcher()?;
     let mut effective = options.clone();
     effective.resolve_dirs(root)?;
@@ -169,16 +188,14 @@ pub fn preflight_home(
         validate_profile(codex_home, profile)?;
     }
     let mut command = Command::new("codex");
-    command
-        .arg("app-server")
-        .arg("--stdio")
-        .arg("-c")
-        .arg("features.hooks=true");
+    command.arg("app-server").arg("--stdio");
     // `codex app-server` accepts only `-c` overrides; `app_server_args` drops everything else.
     // Profile hook overrides are checked above via `validate_profile`, and `--add-dir` only
     // widens workspace access for interactive/resumed sessions, not read-only hook inspection.
-    // The byte bound below still counts every launch argument.
-    let args = effective.args();
+    // The app-server gets the same crew overrides as the launch, and the byte bound counts
+    // every launch argument, crew overrides included.
+    let mut args = effective.args();
+    args.extend(super::crew_overrides(tree));
     let bytes: usize = args
         .iter()
         .map(|arg| arg.len() + 3 * arg.matches('\'').count() + 3)
