@@ -1206,7 +1206,12 @@ fn check(c: &Config) -> Result<(), Fail> {
                 } else {
                     c.root.clone()
                 };
-                if let Err(error) = codex::integration::preflight(&cwd, &role.codex, &c.root) {
+                // Same options `up` launches with, including the wiki memory `--add-dir`.
+                let mut options = role.codex.clone();
+                if c.uses_wiki_memory() {
+                    options.add_extra_dir(c.memory_dir());
+                }
+                if let Err(error) = codex::integration::preflight(&cwd, &options, &c.root) {
                     missing.push(format!("herdr-crew: {}: {error}", role.name));
                 }
             }

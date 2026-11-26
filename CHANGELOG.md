@@ -10,6 +10,15 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex preflight no longer passes `--add-dir <memory_dir>` (or other interactive flags) to
+  `codex app-server`, so `up` and `codex-resume` no longer abort with
+  `unexpected argument '--add-dir'` when `[memory] mode = "wiki"`. Interactive Codex launch and
+  resume still receive `--add-dir`.
+- `herdr-crew check` now preflights Codex roles with the same options `up` uses, including the
+  wiki memory directory.
+
 ## [0.12.0] - 2026-11-26
 
 ### Added

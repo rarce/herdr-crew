@@ -3028,3 +3028,103 @@ fn agy_install_launch_hook_and_recovery() {
     assert!(after.get("herdr").is_some());
     assert!(after.get("herdr-crew").is_none());
 }
+
+#[test]
+fn codex_wiki_memory_preflight_strips_add_dir_from_app_server_but_keeps_it_for_launch() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(true);
+    let config = format!(
+        "{}\n[memory]\nmode = \"wiki\"\n",
+        f.read(".herdr/crew.toml")
+    );
+    fs::write(f.repo.join(".herdr/crew.toml"), config).unwrap();
+    success(f.crew(&["codex-install"]));
+
+    let mem_dir = PathBuf::from(success(f.crew(&["mem", "path"])).trim());
+    // `up` attaches `extra_dirs = [mem_dir]` to CodexOptions and runs `codex app-server`
+    // preflight (which rejects `--add-dir`) before starting `codex` (which keeps `--add-dir`).
+    f.up();
+
+    assert!(mem_dir.join("now.md").is_file());
+    let canonical_mem = mem_dir.canonicalize().unwrap();
+    let lead_start = f
+        .calls()
+        .into_iter()
+        .find(|args| starts_with(args, &["agent", "start", "lead"]))
+        .expect("expected agent start lead call");
+    assert!(
+        lead_start.windows(2).any(|pair| {
+            pair[0] == "--add-dir"
+                && Path::new(&pair[1])
+                    .canonicalize()
+                    .is_ok_and(|p| p == canonical_mem)
+        }),
+        "expected Codex launch args to include --add-dir {}: {lead_start:?}",
+        canonical_mem.display()
+    );
+    let lead_snapshot = f
+        .snapshots()
+        .into_iter()
+        .find(|s| s["name"] == "lead")
+        .unwrap();
+    let extra_dirs = lead_snapshot["extra_dirs"].as_array().unwrap();
+    assert_eq!(extra_dirs.len(), 1);
+    assert_eq!(
+        Path::new(extra_dirs[0].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        canonical_mem
+    );
+
+    // `check` preflights the same options as `up`, memory `--add-dir` included, so it
+    // exercises the app-server filter against the strict simulator too.
+    success(f.crew(&["check"]));
+}
+
+#[test]
+fn codex_resume_in_wiki_memory_mode_passes_preflight_and_keeps_add_dir() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(true);
+    let config = format!(
+        "{}\n[memory]\nmode = \"wiki\"\n",
+        f.read(".herdr/crew.toml")
+    );
+    fs::write(f.repo.join(".herdr/crew.toml"), config).unwrap();
+    f.up();
+    let mem_dir = PathBuf::from(success(f.crew(&["mem", "path"])).trim())
+        .canonicalize()
+        .unwrap();
+    let host = RpcHost::new(&f);
+    host.hook(&f, "lead", "startup", "lead-id");
+    let snapshot = f
+        .snapshots()
+        .into_iter()
+        .find(|s| s["name"] == "lead")
+        .unwrap();
+    let token = snapshot["token"].as_str().unwrap();
+    let pane = host.pane("lead");
+    // `codex-resume` re-runs the app-server preflight with the snapshot's memory dir.
+    success(
+        host.command(&f, &pane)
+            .args(["codex-resume", token])
+            .output()
+            .unwrap(),
+    );
+    let resumed: Value =
+        serde_json::from_slice(&fs::read(f.state.join("codex-resume.json")).unwrap()).unwrap();
+    let args = resumed["args"].as_array().unwrap();
+    assert_eq!(args[0], "resume");
+    assert!(
+        args.windows(2).any(|pair| {
+            pair[0] == "--add-dir"
+                && pair[1]
+                    .as_str()
+                    .and_then(|p| Path::new(p).canonicalize().ok())
+                    .is_some_and(|p| p == mem_dir)
+        }),
+        "expected codex resume to keep --add-dir {}: {args:?}",
+        mem_dir.display()
+    );
+}

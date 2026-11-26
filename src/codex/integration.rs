@@ -134,6 +134,23 @@ pub fn preflight(cwd: &Path, options: &CodexOptions, root: &Path) -> Result<(), 
     preflight_home(cwd, options, root, &home()?)
 }
 
+/// Keeps only the `-c <key=value>` overrides from `CodexOptions::args()` for
+/// `codex app-server --stdio`, whose usage is `--stdio --config <key=value>`: every
+/// interactive flag (`--no-daemon`, `--profile`, `--add-dir`, and any added later) is dropped.
+fn app_server_args(args: &[String]) -> Vec<&str> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        if matches!(args[i].as_str(), "-c" | "--config") && i + 1 < args.len() {
+            out.extend(["-c", args[i + 1].as_str()]);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 pub fn preflight_home(
     cwd: &Path,
     options: &CodexOptions,
@@ -157,8 +174,10 @@ pub fn preflight_home(
         .arg("--stdio")
         .arg("-c")
         .arg("features.hooks=true");
-    // app-server cannot select a CLI profile. Profile hook overrides are rejected above;
-    // inspect the base/project hooks with the crew's explicit runtime configuration.
+    // `codex app-server` accepts only `-c` overrides; `app_server_args` drops everything else.
+    // Profile hook overrides are checked above via `validate_profile`, and `--add-dir` only
+    // widens workspace access for interactive/resumed sessions, not read-only hook inspection.
+    // The byte bound below still counts every launch argument.
     let args = effective.args();
     let bytes: usize = args
         .iter()
@@ -167,14 +186,8 @@ pub fn preflight_home(
     if bytes > 8192 {
         return Err("Codex launch options exceed 8192 shell-encoded bytes".into());
     }
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] == "--profile" {
-            i += 2;
-            continue;
-        }
-        command.arg(&args[i]);
-        i += 1;
+    for arg in app_server_args(&args) {
+        command.arg(arg);
     }
     command
         .current_dir(root)
@@ -300,5 +313,36 @@ mod tests {
         value["data"][0]["hooks"][0]["trustStatus"] = json!("trusted");
         value["data"][0]["hooks"][0]["additionalContextLimit"] = json!(2500);
         assert!(validate_hooks(&value, Path::new("/repo"), Path::new("/home/hooks.json")).is_err());
+    }
+
+    #[test]
+    fn app_server_args_strips_interactive_flags_and_preserves_config_overrides() {
+        let mut options = CodexOptions {
+            model: Some("gpt-5".into()),
+            profile: Some("dev".into()),
+            sandbox: Some("workspace-write".into()),
+            additional_dirs: Some(vec![PathBuf::from("/extra/a")]),
+            ..Default::default()
+        };
+        options.add_extra_dir(PathBuf::from("/mem/store-1"));
+        options.add_extra_dir(PathBuf::from("/mem/store-2"));
+
+        let args = options.args();
+        assert!(args.contains(&"--no-daemon".into()));
+        assert!(args.contains(&"--profile".into()));
+        assert!(args.contains(&"--add-dir".into()));
+
+        let filtered = app_server_args(&args);
+        assert_eq!(
+            filtered,
+            [
+                "-c",
+                "model=\"gpt-5\"",
+                "-c",
+                "sandbox_mode=\"workspace-write\"",
+                "-c",
+                "sandbox_workspace_write.writable_roots=[\"/extra/a\"]",
+            ]
+        );
     }
 }
