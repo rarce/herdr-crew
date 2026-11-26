@@ -753,7 +753,7 @@ impl Wizard {
                     ));
                 } else {
                     lines.push(Line::styled(
-                        "tree mode uses one Codex coordinator tab and native subagents in the shared checkout (requires features.multi_agent_v2 = true in Codex).",
+                        "tree mode uses one Codex coordinator tab and native subagents in the shared checkout (Codex 0.163.0+; herdr-crew launches it with features.multi_agent_v2 = true).",
                         dim(),
                     ));
                 }

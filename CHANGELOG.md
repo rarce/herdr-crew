@@ -10,6 +10,16 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- Native Codex tree crews (`codex_tree = true`) now launch and resume the coordinator with
+  `-c features.multi_agent_v2=true`. Codex defaults the feature to off (still in 0.172), so a
+  crew made with `init --topology tree` previously started with the `multi_agent_v1` tools,
+  and every `followup_task` / `list_agents` call named in the tree prompt failed. Existing
+  snapshots without the new `tree` field keep resuming as before.
+- `check`, `up` and `codex-resume` now require Codex 0.163.0+ for tree crews, the version
+  tree mode was tested with (other Codex roles keep the 0.160.1 minimum).
+
 ## [0.12.1] - 2026-11-26
 
 ### Fixed

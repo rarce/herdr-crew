@@ -130,7 +130,7 @@ impl Topology {
         match self {
             Self::Tabs => "independent Herdr tabs per role with optional worktrees (default)",
             Self::Tree => {
-                "1 coordinator + native subagents in shared checkout (needs features.multi_agent_v2 = true)"
+                "1 coordinator + native subagents in shared checkout (Codex 0.163.0+; enables features.multi_agent_v2)"
             }
         }
     }
@@ -1343,7 +1343,7 @@ pub(crate) fn summary(selection: &Selection) -> String {
     }
     if selection.is_codex_tree() {
         return format!(
-            "{}\nWorkspace: {}\nAgent: {}\nTopology: tree (1 Codex coordinator + native subagents; requires features.multi_agent_v2 = true)\nModels: {}\nWorker isolation: shared main checkout (no [worktrees])\nBoard writer: {}-{}",
+            "{}\nWorkspace: {}\nAgent: {}\nTopology: tree (1 Codex coordinator + native subagents; Codex 0.163.0+, launched with features.multi_agent_v2 = true)\nModels: {}\nWorker isolation: shared main checkout (no [worktrees])\nBoard writer: {}-{}",
             selection.preset.description(),
             selection.name,
             selection.agent.as_str(),
@@ -1499,7 +1499,7 @@ pub(crate) fn create(
             if selection.agent == crate::agent::Kind::Codex {
                 writeln!(output, "Codex setup: run herdr-crew codex-install, then review/trust the crew hook in Codex /hooks before launching roles.").map_err(io_fail)?;
                 if selection.is_codex_tree() {
-                    writeln!(output, "Codex tree mode: ensure features.multi_agent_v2 = true in ~/.codex/config.toml (Codex 0.163.0+).").map_err(io_fail)?;
+                    writeln!(output, "Codex tree mode: herdr-crew launches and resumes the coordinator with features.multi_agent_v2 = true (needs Codex 0.163.0+).").map_err(io_fail)?;
                 }
             }
             if selection.agent == crate::agent::Kind::Pi {

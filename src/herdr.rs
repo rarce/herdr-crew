@@ -689,7 +689,7 @@ pub fn execute(
         } else {
             c.root.clone()
         };
-        codex::integration::preflight(&cwd, options, &c.root)?;
+        codex::integration::preflight(&cwd, options, &c.root, c.codex_tree)?;
     }
     let mut workspace = state.workspace.as_ref().map(|w| w.id.clone());
     let mut initial: Option<(String, String)> = None; // initial tab and pane of a new workspace
@@ -941,6 +941,10 @@ fn agent_args(
             effective.resolve_dirs(&c.root)?;
             let mut args = effective.args();
             args.extend(["-c".into(), "features.hooks=true".into()]);
+            if c.codex_tree {
+                // Tree prompts name multi_agent_v2 tools (followup_task, list_agents).
+                args.extend(["-c".into(), crate::codex::TREE_FEATURE.into()]);
+            }
             args
         }
         // The crew's pi extension reads these flags and keeps the prompt in the session. A

@@ -1211,7 +1211,9 @@ fn check(c: &Config) -> Result<(), Fail> {
                 if c.uses_wiki_memory() {
                     options.add_extra_dir(c.memory_dir());
                 }
-                if let Err(error) = codex::integration::preflight(&cwd, &options, &c.root) {
+                if let Err(error) =
+                    codex::integration::preflight(&cwd, &options, &c.root, c.codex_tree)
+                {
                     missing.push(format!("herdr-crew: {}: {error}", role.name));
                 }
             }

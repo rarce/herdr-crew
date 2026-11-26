@@ -3128,3 +3128,64 @@ fn codex_resume_in_wiki_memory_mode_passes_preflight_and_keeps_add_dir() {
         mem_dir.display()
     );
 }
+
+#[test]
+fn codex_tree_launches_and_resumes_with_multi_agent_v2_and_needs_codex_0_163() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(true);
+    let config = f.read(".herdr/crew.toml");
+    let config = config
+        .replace("version = 1\n", "version = 1\ncodex_tree = true\n")
+        .replace(
+            "start_message = \"Confirma tu rol «ahora»; it's fine, $HOME `id`.\"\n",
+            "",
+        );
+    let config = config[..config.find("[[roles]]\nname = \"dev\"").unwrap()].to_string();
+    fs::write(f.repo.join(".herdr/crew.toml"), config).unwrap();
+    success(f.crew(&["codex-install"]));
+
+    // Tree mode was tested with Codex 0.163.0; older CLIs stop before any mutation.
+    fs::write(f.state.join("codex-version"), "0.162.9").unwrap();
+    failure(f.crew(&["up", "--no-attach"]), "0.163.0");
+    fs::write(f.state.join("codex-version"), "0.163.0").unwrap();
+    f.up();
+
+    let feature = "features.multi_agent_v2=true";
+    let lead_start = f
+        .calls()
+        .into_iter()
+        .find(|args| starts_with(args, &["agent", "start", "lead"]))
+        .expect("expected agent start lead call");
+    assert!(
+        lead_start
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == feature),
+        "expected tree launch to enable {feature}: {lead_start:?}"
+    );
+    let snapshot = f
+        .snapshots()
+        .into_iter()
+        .find(|s| s["name"] == "lead")
+        .unwrap();
+    assert_eq!(snapshot["tree"], true);
+
+    let host = RpcHost::new(&f);
+    host.hook(&f, "lead", "startup", "lead-id");
+    let token = snapshot["token"].as_str().unwrap();
+    let pane = host.pane("lead");
+    success(
+        host.command(&f, &pane)
+            .args(["codex-resume", token])
+            .output()
+            .unwrap(),
+    );
+    let resumed: Value =
+        serde_json::from_slice(&fs::read(f.state.join("codex-resume.json")).unwrap()).unwrap();
+    let args = resumed["args"].as_array().unwrap();
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == [json!("-c"), json!(feature)]),
+        "expected codex resume to enable {feature}: {args:?}"
+    );
+}

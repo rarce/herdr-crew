@@ -130,8 +130,16 @@ pub fn install(remove: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn preflight(cwd: &Path, options: &CodexOptions, root: &Path) -> Result<(), String> {
-    preflight_home(cwd, options, root, &home()?)
+/// Native tree crews use `multi_agent_v2` tools, which the tested Codex 0.163.0 provides.
+pub const TREE_MIN_VERSION: (u32, u32, u32) = (0, 163, 0);
+
+pub fn preflight(
+    cwd: &Path,
+    options: &CodexOptions,
+    root: &Path,
+    tree: bool,
+) -> Result<(), String> {
+    preflight_home(cwd, options, root, &home()?, tree)
 }
 
 /// Keeps only the `-c <key=value>` overrides from `CodexOptions::args()` for
@@ -156,8 +164,9 @@ pub fn preflight_home(
     options: &CodexOptions,
     root: &Path,
     codex_home: &Path,
+    tree: bool,
 ) -> Result<(), String> {
-    process::version("codex", (0, 160, 1))?;
+    process::version("codex", if tree { TREE_MIN_VERSION } else { (0, 160, 1) })?;
     launcher()?;
     let mut effective = options.clone();
     effective.resolve_dirs(root)?;
