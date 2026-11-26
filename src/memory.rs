@@ -13,8 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use jiff::Timestamp;
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
-use serde_json::json;
+use serde_json::{Value, json};
 
+use crate::board::frontmatter;
 use crate::board::model::{self, Unavailable};
 use crate::config::Config;
 use crate::files;
@@ -1201,6 +1202,509 @@ pub fn read_timeline(dir: &Path, limit: usize, tz: &TimeZone) -> Result<String, 
     Ok(out)
 }
 
+/// Returns up to `limit` timeline entries from `log.md`, optionally centered around the newest
+/// entry whose header or body matches `around` (case-insensitive).
+pub fn timeline_around(
+    dir: &Path,
+    limit: usize,
+    around: Option<&str>,
+    tz: &TimeZone,
+) -> Result<String, String> {
+    if limit == 0 {
+        return Ok(String::new());
+    }
+    let records = read_log_records(dir, tz)?;
+    if records.is_empty() {
+        return Ok(String::new());
+    }
+    let slice: &[LogRecord] = match around.map(str::trim).filter(|s| !s.is_empty()) {
+        None => &records[..limit.min(records.len())],
+        Some(needle) => {
+            let needle_lc = needle.to_lowercase();
+            let Some(pos) = records.iter().position(|r| {
+                r.timestamp_raw.to_lowercase().contains(&needle_lc)
+                    || r.kind.to_lowercase().contains(&needle_lc)
+                    || r.title.to_lowercase().contains(&needle_lc)
+                    || r.body
+                        .iter()
+                        .any(|line| line.to_lowercase().contains(&needle_lc))
+            }) else {
+                return Ok(String::new());
+            };
+            let half = limit / 2;
+            let start = pos.saturating_sub(half);
+            let end = (start + limit).min(records.len());
+            let start = end.saturating_sub(limit);
+            &records[start..end]
+        }
+    };
+    let mut out = String::new();
+    for rec in slice {
+        out.push_str(&format!(
+            "[{}] {} | {}\n",
+            rec.timestamp_raw, rec.kind, rec.title
+        ));
+        for body_line in &rec.body {
+            out.push_str(&format!("  {body_line}\n"));
+        }
+    }
+    Ok(out)
+}
+
+/// Formats a string as a YAML scalar safe for `board::frontmatter::parse_frontmatter`.
+fn yaml_scalar(s: &str) -> Result<String, String> {
+    if s.chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return Err("string contains unsupported control characters".into());
+    }
+    let needs_quote = s.is_empty()
+        || s.trim() != s
+        || matches!(s, "null" | "~" | "true" | "false")
+        || s.contains(": ")
+        || s.ends_with(':')
+        || s.contains('#')
+        || s.contains('"')
+        || s.contains('\'')
+        || s.contains('\\')
+        || s.contains('\n')
+        || s.contains('\r')
+        || s.contains('\t')
+        || s.starts_with([
+            '[', ']', '{', '}', '-', '?', '!', '&', '*', '|', '>', '%', '@', '`', ',',
+        ])
+        || looks_like_yaml_number(s);
+    if !needs_quote {
+        return Ok(s.to_string());
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    Ok(out)
+}
+
+fn looks_like_yaml_number(s: &str) -> bool {
+    let body = s.strip_prefix('-').unwrap_or(s);
+    if body.is_empty() {
+        return false;
+    }
+    body.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+}
+
+fn write_yaml_string_list(
+    out: &mut String,
+    indent: &str,
+    key: &str,
+    items: &[String],
+) -> Result<(), String> {
+    if items.is_empty() {
+        out.push_str(&format!("{indent}{key}: []\n"));
+        return Ok(());
+    }
+    out.push_str(&format!("{indent}{key}:\n"));
+    for item in items {
+        out.push_str(&format!("{indent}  - {}\n", yaml_scalar(item)?));
+    }
+    Ok(())
+}
+
+/// Validates and atomically writes `now.md` with canonical YAML frontmatter, preserving the
+/// existing Markdown body when `focus` is `None`. Never mutates `now.md` on validation failure.
+pub fn update_status(
+    dir: &Path,
+    c: &Config,
+    sessions: Value,
+    owner: Value,
+    focus: Option<&str>,
+    updated_at: Option<&str>,
+    tz: &TimeZone,
+) -> Result<usize, String> {
+    if !check_dir_not_symlink(dir)? {
+        return Err(format!("memory directory {} does not exist", dir.display()));
+    }
+    let now_path = dir.join("now.md");
+    let existed = check_not_symlink(&now_path)?;
+
+    let updated_at_str = match updated_at {
+        Some(ts) => ts.to_string(),
+        None => Timestamp::now()
+            .to_zoned(tz.clone())
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string(),
+    };
+    let payload = json!({
+        "version": 1,
+        "updatedAt": updated_at_str,
+        "updatedBy": c.board.writer,
+        "sessions": sessions,
+        "owner": owner,
+    });
+    let payload_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+    let status = match model::load(&payload_bytes, c) {
+        Ok(s) => s,
+        Err(Unavailable::Schema(errs)) => {
+            return Err(format!("status validation failed: {}", errs.join("; ")));
+        }
+        Err(Unavailable::Json(e)) => return Err(format!("invalid status payload: {e}")),
+        Err(Unavailable::Missing) => return Err("status payload is missing".into()),
+    };
+
+    let body = match focus {
+        Some(text) => {
+            let trimmed = text.trim_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                String::new()
+            } else {
+                format!("\n{trimmed}\n")
+            }
+        }
+        None => {
+            if existed {
+                let existing = fs::read_to_string(&now_path)
+                    .map_err(|e| format!("cannot read now.md: {e}"))?;
+                match frontmatter::parse_frontmatter(&existing) {
+                    Ok((_, existing_body)) => existing_body.to_string(),
+                    Err(_) => format!(
+                        "\n# {} — Current State\n\nSee [[index]] for the memory catalog and [[log]] for recent activity.\n",
+                        c.label
+                    ),
+                }
+            } else {
+                format!(
+                    "\n# {} — Current State\n\nSee [[index]] for the memory catalog and [[log]] for recent activity.\n",
+                    c.label
+                )
+            }
+        }
+    };
+
+    let mut yaml = String::new();
+    yaml.push_str("---\n");
+    yaml.push_str("version: 1\n");
+    yaml.push_str(&format!("updatedAt: {}\n", yaml_scalar(&updated_at_str)?));
+    yaml.push_str(&format!(
+        "updatedBy: {}\n",
+        yaml_scalar(&status.updated_by)?
+    ));
+    if status.sessions.is_empty() {
+        yaml.push_str("sessions: []\n");
+    } else {
+        yaml.push_str("sessions:\n");
+        for s in &status.sessions {
+            yaml.push_str(&format!("  - role: {}\n", yaml_scalar(&s.role)?));
+            yaml.push_str(&format!("    state: {}\n", s.state.label()));
+            yaml.push_str(&format!("    now: {}\n", yaml_scalar(&s.now)?));
+            write_yaml_string_list(&mut yaml, "    ", "next", &s.next)?;
+            if let Some(note) = &s.note {
+                yaml.push_str(&format!("    note: {}\n", yaml_scalar(note)?));
+            }
+            if let Some(ts) = s.updated_at {
+                let formatted = ts
+                    .to_zoned(tz.clone())
+                    .strftime("%Y-%m-%dT%H:%M:%S%:z")
+                    .to_string();
+                yaml.push_str(&format!("    updatedAt: {}\n", yaml_scalar(&formatted)?));
+            }
+        }
+    }
+    yaml.push_str("owner:\n");
+    write_yaml_string_list(&mut yaml, "  ", "urgent", &status.owner.urgent)?;
+    write_yaml_string_list(&mut yaml, "  ", "beforeMain", &status.owner.before_main)?;
+    write_yaml_string_list(&mut yaml, "  ", "optional", &status.owner.optional)?;
+    yaml.push_str("---\n");
+    yaml.push_str(&body);
+
+    // Round-trip verify the rendered Markdown frontmatter before writing to disk.
+    if let Err(err) = model::load_markdown(yaml.as_bytes(), None, c, tz) {
+        return Err(format!("serialized now.md failed validation: {err:?}"));
+    }
+
+    atomic_write_file(&now_path, &yaml)?;
+    Ok(status.sessions.len())
+}
+
+/// Result of `upsert_page`.
+#[derive(Debug, Clone)]
+pub struct UpsertResult {
+    pub path: String,
+    pub index_updated: bool,
+    pub log_updated: bool,
+    pub lint: LintReport,
+}
+
+/// Creates or updates a Markdown page strictly under `tasks/`, `decisions/`, or `notes/`,
+/// idempotently registers/updates it in `index.md`, optionally prepends a `log.md` entry,
+/// and returns the resulting lint report.
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_page(
+    dir: &Path,
+    c: &Config,
+    page: &str,
+    content: &str,
+    summary: Option<&str>,
+    log_type: Option<&str>,
+    log_title: Option<&str>,
+    tz: &TimeZone,
+) -> Result<UpsertResult, String> {
+    if !check_dir_not_symlink(dir)? {
+        return Err(format!("memory directory {} does not exist", dir.display()));
+    }
+    let page = page.trim();
+    let stem = page.strip_suffix(".md").unwrap_or(page);
+    if !is_safe_relative_target(stem) {
+        return Err(format!(
+            "invalid page path \"{page}\": must be a relative path under tasks/, decisions/, or notes/"
+        ));
+    }
+    let (section, rest) = if let Some(r) = stem.strip_prefix("tasks/") {
+        ("Tasks", r)
+    } else if let Some(r) = stem.strip_prefix("decisions/") {
+        ("Decisions", r)
+    } else if let Some(r) = stem.strip_prefix("notes/") {
+        ("Notes", r)
+    } else {
+        return Err(format!(
+            "page \"{page}\" must be under tasks/, decisions/, or notes/"
+        ));
+    };
+    if rest.is_empty() {
+        return Err(format!("page \"{page}\" must name a file under {section}"));
+    }
+    if content.trim().is_empty() {
+        return Err("page content must not be empty".into());
+    }
+    if let Some(s) = summary
+        && (s.contains('\n') || s.contains('\r'))
+    {
+        return Err("summary must be a single line".into());
+    }
+    let log_entry = match (log_type, log_title) {
+        (None, None) => None,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(
+                "log_type and log_title must either both be provided or both be omitted".into(),
+            );
+        }
+        (Some(lt), Some(title)) => {
+            let lt = lt.trim();
+            let title = title.trim();
+            if lt.is_empty() || lt.contains('|') || lt.chars().any(char::is_whitespace) {
+                return Err("log_type must be a non-empty token without whitespace or '|'".into());
+            }
+            if title.is_empty() || title.contains('\n') || title.contains('\r') {
+                return Err("log_title must be a non-empty single line".into());
+            }
+            Some((lt.to_string(), title.to_string()))
+        }
+    };
+
+    let rel = format!("{stem}.md");
+    let rel_path = Path::new(&rel);
+    if let Some(parent_rel) = rel_path.parent().and_then(|p| p.to_str())
+        && !parent_rel.is_empty()
+    {
+        ensure_safe_subdir(dir, parent_rel)?;
+    }
+    let target_path = dir.join(&rel);
+    let _ = check_not_symlink(&target_path)?;
+    let canonical_dir = dir
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", dir.display()))?;
+    let canonical_parent = target_path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", target_path.display()))?
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve parent of {rel}: {e}"))?;
+    if !canonical_parent.starts_with(&canonical_dir) {
+        return Err(format!("page \"{rel}\" escapes the memory directory"));
+    }
+
+    let normalized_content = if content.ends_with('\n') {
+        content.to_string()
+    } else {
+        format!("{content}\n")
+    };
+    atomic_write_file(&target_path, &normalized_content)?;
+
+    // Idempotently insert or update the page entry in `index.md`.
+    let index_path = dir.join("index.md");
+    let mut index_updated = false;
+    if check_not_symlink(&index_path)? {
+        let existing_index =
+            fs::read_to_string(&index_path).map_err(|e| format!("cannot read index.md: {e}"))?;
+        let updated_index = upsert_index_entry(&existing_index, section, stem, summary);
+        if updated_index != existing_index {
+            atomic_write_file(&index_path, &updated_index)?;
+            index_updated = true;
+        }
+    }
+
+    // Optionally prepend a structured entry to `log.md`.
+    let mut log_updated = false;
+    if let Some((lt, title)) = log_entry {
+        let log_path = dir.join("log.md");
+        let existing_log = if check_not_symlink(&log_path)? {
+            fs::read_to_string(&log_path).map_err(|e| format!("cannot read log.md: {e}"))?
+        } else {
+            format!("# {} Activity Log\n", c.label)
+        };
+        let ts = Timestamp::now()
+            .to_zoned(tz.clone())
+            .strftime("%Y-%m-%d %H:%M")
+            .to_string();
+        let header = format!("## [{ts}] {lt} | {title}");
+        let updated_log = prepend_log_entry(&existing_log, &header);
+        atomic_write_file(&log_path, &updated_log)?;
+        log_updated = true;
+    }
+
+    let lint_report = lint(dir, c, tz);
+    Ok(UpsertResult {
+        path: rel,
+        index_updated,
+        log_updated,
+        lint: lint_report,
+    })
+}
+
+fn upsert_index_entry(
+    index_text: &str,
+    section: &str,
+    stem: &str,
+    summary: Option<&str>,
+) -> String {
+    let formatted = match summary.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => format!("- [[{stem}]] — {s}"),
+        None => format!("- [[{stem}]]"),
+    };
+
+    let mut lines: Vec<String> = index_text
+        .lines()
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+        .collect();
+    let mut in_fence: Option<(char, usize)> = None;
+
+    // 1. Check if an entry for `stem` already exists; if so, update only when `summary` is Some.
+    for line in &mut lines {
+        if update_fence(line, &mut in_fence) || in_fence.is_some() {
+            continue;
+        }
+        let trimmed = line.trim();
+        let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        else {
+            continue;
+        };
+        let cleaned = strip_inline_code(item);
+        if let Some((target, _)) = parse_index_item(item, &cleaned)
+            && target == stem
+        {
+            if summary.is_some() {
+                *line = formatted;
+            }
+            let mut out = lines.join("\n");
+            out.push('\n');
+            return out;
+        }
+    }
+
+    // 2. Otherwise insert into the matching `## <section>` heading (or append the section).
+    let wanted_heading = format!("## {section}");
+    let mut in_fence: Option<(char, usize)> = None;
+    let mut section_start: Option<usize> = None;
+    let mut section_end: usize = lines.len();
+    for (idx, line) in lines.iter().enumerate() {
+        if update_fence(line, &mut in_fence) || in_fence.is_some() {
+            continue;
+        }
+        let trimmed = line.trim();
+        if section_start.is_none() {
+            if trimmed == wanted_heading {
+                section_start = Some(idx);
+            }
+        } else if trimmed.starts_with("## ") {
+            section_end = idx;
+            break;
+        }
+    }
+
+    if let Some(start) = section_start {
+        let mut insert_at = start + 1;
+        while insert_at < section_end && lines[insert_at].trim().is_empty() {
+            insert_at += 1;
+        }
+        if insert_at < section_end {
+            // Append after the last non-empty line in this section.
+            let mut last_non_empty = section_end;
+            while last_non_empty > start + 1 && lines[last_non_empty - 1].trim().is_empty() {
+                last_non_empty -= 1;
+            }
+            lines.insert(last_non_empty, formatted);
+        } else {
+            // Section had only blank lines (or was empty at EOF).
+            if start + 1 < lines.len() && lines[start + 1].trim().is_empty() {
+                lines.insert(start + 2, formatted);
+                if start + 3 < lines.len() && !lines[start + 3].trim().is_empty() {
+                    lines.insert(start + 3, String::new());
+                }
+            } else {
+                lines.insert(start + 1, String::new());
+                lines.insert(start + 2, formatted);
+            }
+        }
+    } else {
+        if lines.last().is_some_and(|l| !l.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(wanted_heading);
+        lines.push(String::new());
+        lines.push(formatted);
+    }
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+fn prepend_log_entry(log_text: &str, header: &str) -> String {
+    let mut lines: Vec<String> = log_text
+        .lines()
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+        .collect();
+    let insert_at = if lines.first().is_some_and(|l| l.starts_with("# ")) {
+        let mut pos = 1;
+        while pos < lines.len() && lines[pos].trim().is_empty() {
+            pos += 1;
+        }
+        pos
+    } else {
+        0
+    };
+    let mut prefix = Vec::new();
+    if insert_at == 1 {
+        prefix.push(String::new());
+    }
+    prefix.push(header.to_string());
+    if insert_at < lines.len() {
+        prefix.push(String::new());
+    }
+    lines.splice(insert_at..insert_at, prefix);
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
 /// Case-insensitive search across all `.md` operational memory files (skipping `SCHEMA.md`),
 /// returning compact `relpath:line: snippet` hits.
 pub fn search(dir: &Path, query: &str) -> Result<Vec<String>, String> {
@@ -1635,5 +2139,65 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].body, ["First line.", "Second line."]);
         assert_eq!(records[1].body, ["Details."]);
+    }
+
+    #[test]
+    fn timeline_around_centers_window_and_upsert_rejects_partial_log_args() {
+        let dir = temp_dir("timeline-around");
+        let mem = dir.join("store");
+        let c = basic();
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+        ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00").unwrap();
+        fs::write(
+            mem.join("log.md"),
+            "# Log\n\n\
+             ## [2026-11-26 09:00] init | One\n\nFirst body.\n\n\
+             ## [2026-11-26 09:10] task | Two\n\nSecond body.\n\n\
+             ## [2026-11-26 09:20] review | Three Target\n\nMiddle match.\n\n\
+             ## [2026-11-26 09:30] fix | Four\n\nFourth body.\n\n\
+             ## [2026-11-26 09:40] merge | Five\n\nFifth body.\n",
+        )
+        .unwrap();
+
+        let around = timeline_around(&mem, 3, Some("target"), &tz).unwrap();
+        assert!(around.contains("Four"), "{around}");
+        assert!(around.contains("Three Target"), "{around}");
+        assert!(around.contains("Two"), "{around}");
+        assert!(!around.contains("Five"), "{around}");
+        assert!(!around.contains("One"), "{around}");
+
+        // Partial log args fail before writing anything to disk.
+        let err = upsert_page(
+            &mem,
+            &c,
+            "decisions/d1",
+            "# Decision 1\n",
+            Some("Use zero-daemon stdio"),
+            Some("decision"),
+            None,
+            &tz,
+        )
+        .unwrap_err();
+        assert!(err.contains("both"), "{err}");
+        assert!(!mem.join("decisions/d1.md").exists());
+
+        // Focus override replaces body cleanly.
+        update_status(
+            &mem,
+            &c,
+            json!([]),
+            json!({"urgent": [], "beforeMain": [], "optional": []}),
+            Some("# Custom Focus\n\nNew body."),
+            Some("2026-11-26T09:45:00-03:00"),
+            &tz,
+        )
+        .unwrap();
+        let now_text = fs::read_to_string(mem.join("now.md")).unwrap();
+        assert!(
+            now_text.contains("# Custom Focus\n\nNew body.\n"),
+            "{now_text}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

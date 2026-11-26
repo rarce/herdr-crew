@@ -16,6 +16,7 @@ mod hc;
 mod herdr;
 mod init;
 mod lock;
+mod mcp;
 mod memory;
 mod models;
 mod pi;
@@ -67,6 +68,7 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   mem timeline [--limit N]       print Layer 2 recent log.md entries (default 20)
   mem search <query>             search operational memory pages
   mem show <page>                show a single operational memory page
+  mem mcp [--read-only]          run a zero-daemon stdio MCP server for operational memory
   codex-install                  install the crew hook; review it in Codex /hooks
   codex-uninstall                remove only the crew hook
   codex-list                     list saved role bindings and Codex session IDs
@@ -121,6 +123,7 @@ struct Args {
     file: Option<PathBuf>,
     interval: Option<Duration>,
     limit: Option<usize>,
+    read_only: bool,
     init: init::Options,
 }
 
@@ -197,6 +200,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
                 })?;
                 a.limit = Some(n);
             }
+            "--read-only" => a.read_only = true,
             s if s.starts_with('-') => return Err(Fail::usage(format!("unknown option {s}"))),
             _ if a.command.is_empty() => a.command = arg,
             _ => a.positional.push(arg),
@@ -237,7 +241,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         | "pi-install" | "pi-uninstall" | "agy-install" | "agy-uninstall" | "agy-hook"
         | "app-install" | "app-uninstall" => &[],
         "board" => &["file", "once", "interval"],
-        "mem" => &["limit"],
+        "mem" => &["limit", "read_only"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
     };
@@ -249,6 +253,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ("file", a.file.is_some()),
         ("interval", a.interval.is_some()),
         ("limit", a.limit.is_some()),
+        ("read_only", a.read_only),
         ("agent", a.agent.is_some()),
         ("preset", a.init.preset.is_some()),
         ("topology", a.init.topology.is_some()),
@@ -270,20 +275,23 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
     if a.command == "mem" {
         let Some(sub) = a.positional.first().map(String::as_str) else {
             return Err(Fail::usage(
-                "mem requires a subcommand: path, init, lint, index, timeline, search or show",
+                "mem requires a subcommand: path, init, lint, index, timeline, search, show or mcp",
             ));
         };
         let expected = match sub {
-            "path" | "init" | "lint" | "index" | "timeline" => 1,
+            "path" | "init" | "lint" | "index" | "timeline" | "mcp" => 1,
             "search" | "show" => 2,
             other => {
                 return Err(Fail::usage(format!(
-                    "unknown mem subcommand \"{other}\" (expected path, init, lint, index, timeline, search or show)"
+                    "unknown mem subcommand \"{other}\" (expected path, init, lint, index, timeline, search, show or mcp)"
                 )));
             }
         };
         if a.limit.is_some() && sub != "timeline" {
             return Err(Fail::usage(format!("mem {sub} does not take --limit")));
+        }
+        if a.read_only && sub != "mcp" {
+            return Err(Fail::usage(format!("mem {sub} does not take --read-only")));
         }
         if a.positional.len() != expected {
             return Err(Fail::usage(format!(
@@ -1012,6 +1020,7 @@ fn mem(c: &Config, a: &Args) -> Result<(), Fail> {
             );
             Ok(())
         }
+        "mcp" => mcp::serve(c, dir, a.read_only).map_err(Fail::run),
         _ => unreachable!("validated in parse_args"),
     }
 }
@@ -1545,6 +1554,12 @@ mod tests {
             args("mem show tasks/poc").unwrap().positional,
             ["show", "tasks/poc"]
         );
+        let mcp_rw = args("mem mcp").unwrap();
+        assert_eq!(mcp_rw.positional, ["mcp"]);
+        assert!(!mcp_rw.read_only);
+        let mcp_ro = args("mem mcp --read-only").unwrap();
+        assert_eq!(mcp_ro.positional, ["mcp"]);
+        assert!(mcp_ro.read_only);
     }
 
     #[test]
@@ -1662,6 +1677,11 @@ mod tests {
             "mem timeline --limit 0",
             "mem timeline --limit abc",
             "up --limit 5",
+            "up --read-only",
+            "board --read-only",
+            "mem path --read-only",
+            "mem mcp extra",
+            "mem mcp --limit 5",
         ] {
             assert_eq!(args(bad).err(), Some(2), "{bad}");
         }
