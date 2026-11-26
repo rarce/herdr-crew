@@ -328,7 +328,11 @@ fn create_pin(
                         .write_all(content.as_bytes())
                         .and_then(|()| file.sync_all());
                     if let Err(e) = filled {
-                        let _ = fs::remove_file(pin_path);
+                        // Remove the pin only while it is still the file created here, never one
+                        // another writer has since put in its place.
+                        if same_file(&file, pin_path) {
+                            let _ = fs::remove_file(pin_path);
+                        }
                         return Err(format!("cannot write {}: {e}", pin_path.display()));
                     }
                     Ok(())
@@ -349,14 +353,24 @@ fn create_pin(
     }
 }
 
-/// Reads the pin, waiting up to a second while it is empty: a pin created without hard links is
-/// empty until its writer fills it.
+fn same_file(file: &fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), fs::symlink_metadata(path)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// Reads the pin, waiting up to a second while it does not end with a newline: a pin created
+/// without hard links is empty or partial until its writer fills it, and every pin herdr-crew
+/// writes ends with one. After the wait the text is returned as it is, so a hand-written pin
+/// without a newline still parses.
 fn read_pin(pin_path: &Path) -> Result<String, String> {
     let mut attempts = 0;
     loop {
         let text = fs::read_to_string(pin_path)
             .map_err(|e| format!("cannot read {}: {e}", pin_path.display()))?;
-        if !text.is_empty() || attempts == 50 {
+        if text.ends_with('\n') || attempts == 50 {
             return Ok(text);
         }
         attempts += 1;
@@ -2762,6 +2776,26 @@ mod tests {
             .filter(|n| n != PIN_FILE)
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        fs::remove_dir_all(&common).unwrap();
+    }
+
+    #[test]
+    fn reading_the_pin_waits_for_a_writer_that_has_not_filled_it() {
+        let common = temp_dir("pin-partial");
+        let pin = common.join(PIN_FILE);
+        fs::write(&pin, "/m/acme").unwrap();
+        let writer = {
+            let pin = pin.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                fs::write(&pin, "/m/acme-1\n").unwrap();
+            })
+        };
+        assert_eq!(read_pin(&pin).unwrap(), "/m/acme-1\n");
+        writer.join().unwrap();
+        // A hand-written pin without a newline is still read after the wait.
+        fs::write(&pin, "/m/acme-2").unwrap();
+        assert_eq!(read_pin(&pin).unwrap(), "/m/acme-2");
         fs::remove_dir_all(&common).unwrap();
     }
 
