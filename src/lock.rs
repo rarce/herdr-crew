@@ -30,27 +30,34 @@ impl ProjectLock {
     /// `on_wait` runs once, the first time the lock is found busy.
     pub fn acquire(root: &Path, wait: Duration, on_wait: impl FnOnce()) -> Result<Self, Busy> {
         let path = git::common_dir(root).map_err(Busy::Error)?.join(FILE);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(|e| Busy::Error(format!("cannot open {}: {e}", path.display())))?;
-        let start = Instant::now();
-        let mut on_wait = Some(on_wait);
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { _file: file }),
-                Err(TryLockError::WouldBlock) if start.elapsed() < wait => {
-                    if let Some(f) = on_wait.take() {
-                        f();
-                    }
-                    sleep(Duration::from_millis(100));
+        lock_file(&path, wait, on_wait).map(|file| Self { _file: file })
+    }
+}
+
+/// Opens (creating it if needed) and exclusively locks the file at `path`, waiting up to `wait`
+/// while another process holds it. The returned file holds the lock until it is dropped.
+/// The caller makes sure `path` is not a symlink it should refuse.
+pub fn lock_file(path: &Path, wait: Duration, on_wait: impl FnOnce()) -> Result<File, Busy> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|e| Busy::Error(format!("cannot open {}: {e}", path.display())))?;
+    let start = Instant::now();
+    let mut on_wait = Some(on_wait);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if start.elapsed() < wait => {
+                if let Some(f) = on_wait.take() {
+                    f();
                 }
-                Err(TryLockError::WouldBlock) => return Err(Busy::Held),
-                Err(TryLockError::Error(e)) => {
-                    return Err(Busy::Error(format!("cannot lock {}: {e}", path.display())));
-                }
+                sleep(Duration::from_millis(100));
+            }
+            Err(TryLockError::WouldBlock) => return Err(Busy::Held),
+            Err(TryLockError::Error(e)) => {
+                return Err(Busy::Error(format!("cannot lock {}: {e}", path.display())));
             }
         }
     }

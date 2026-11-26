@@ -452,7 +452,8 @@ herdr-crew [--root DIR] <command>
   mem timeline [--limit N]       print Layer 2 recent log.md entries (default 20)
   mem search <query>             search operational memory pages
   mem show <page>                show a single operational memory page
-  mem mcp [--read-only]          run a zero-daemon stdio MCP server for operational memory
+  mem mcp [--write]              run a zero-daemon stdio MCP server for operational memory
+                                 (read-only unless --write; give --write to the board writer)
   codex-install                  install the crew hook; review it in Codex /hooks
   codex-uninstall                remove only the crew hook
   codex-list                     list saved role bindings and Codex session IDs
@@ -648,7 +649,7 @@ When the file is missing, has invalid JSON or does not match the schema, the boa
 
 ## Operational memory (llmwiki)
 
-For crews that need durable multi-session context without cluttering the Git working tree, `herdr-crew` supports an out-of-repo Markdown operational wiki (`llmwiki`) that replaces `.herdr/status.json`.
+For crews that need durable multi-session context without cluttering the Git working tree, `herdr-crew` supports an opt-in, out-of-repo Markdown operational wiki (`llmwiki`) that replaces `.herdr/status.json` for that project.
 
 ### Enabling it
 
@@ -669,13 +670,18 @@ Operational memory is stored outside the repository at:
 $XDG_DATA_HOME/herdr-crew/memory/<slug>-<hash>/
 ```
 
-If `XDG_DATA_HOME` is unset, it falls back to `~/.local/share/herdr-crew/memory/<slug>-<hash>/`. Set `CREW_MEMORY_DIR` to override the base directory (relative values resolve against the current working directory). The `<slug>-<hash>` folder is derived deterministically from the canonical main Git checkout path, so all linked worktrees share one operational memory with zero repository clutter:
+If `XDG_DATA_HOME` is unset (or relative), it falls back to `~/.local/share/herdr-crew/memory/<slug>-<hash>/`. Set `CREW_MEMORY_DIR` to an absolute path to override the base directory; a relative value is an error. With neither `HOME` nor `CREW_MEMORY_DIR` there is no fallback. The `<slug>-<hash>` folder is derived from the canonical main Git checkout path.
+
+The first `herdr-crew up` (not `--dry-run`) or `herdr-crew mem init` records the chosen directory in `herdr-crew-memory-dir` in the repository's common Git directory (`.git/`). Every later command, every linked worktree and herdr's `startup` hook (which runs with the herdr server's environment) then use that directory, whatever their `XDG_DATA_HOME`, `CREW_MEMORY_DIR` or working directory. A moved repository keeps its memory; a copy of a checkout that still exists gets a fresh one. `CREW_MEMORY_DIR` does not override an existing pin (`up`, `check` and `mem` warn when it disagrees); delete `.git/herdr-crew-memory-dir` to choose again. Initialization refuses a directory that belongs to another checkout (see its `project.json`) or that herdr-crew did not create.
+
+The directory holds:
 
 - `project.json` — machine metadata linking the directory back to the main checkout
 - `SCHEMA.md` — generated contract refreshed by `herdr-crew up` and `herdr-crew mem init`
 - `now.md` — live status board (YAML frontmatter parsed by `herdr-crew board`) plus short working notes
 - `index.md` — Layer 1 catalog linking active tasks, decisions, and notes
-- `log.md` — Layer 2 chronological activity log
+- `log.md` — Layer 2 activity log, newest entry first
+- `.lock` — herdr-crew's write lock (serializes its own writes; agents editing files directly are not serialized)
 - `tasks/` — per-task operational pages (objective, acceptance, provenance, validation, blockers)
 - `decisions/` — architectural and workflow decisions with rationale
 - `notes/` — bounded investigation notes and environment facts
@@ -709,7 +715,9 @@ owner:
 See [[index]] for the memory catalog and [[log]] for recent activity.
 ```
 
-Structured headings in `log.md` use `## [YYYY-MM-DD HH:MM] <type> | <title>` or RFC 3339 timestamps (`## [YYYY-MM-DDTHH:MM:SS±HH:MM] <type> | <title>`). When `recent` is omitted or empty in `now.md`, `herdr-crew board` automatically populates the **Recent** box with the 5 newest entries from `log.md`.
+New entries go directly below the `log.md` title, newest first, with RFC 3339 headings (`## [YYYY-MM-DDTHH:MM:SS±HH:MM] <type> | <title>`). The legacy local form `## [YYYY-MM-DD HH:MM] <type> | <title>` is still read, in the reader's time zone. When `recent` is omitted or empty in `now.md`, `herdr-crew board` automatically populates the **Recent** box with the 5 newest entries from `log.md`.
+
+If herdr restores a session while the memory directory is unusable, `startup` logs a warning and still repairs the board; when herdr adopts a fresh workspace the same problem stops the bring-up. `{{MEMORY}}` and `{{MEMORY_SCHEMA}}` are a configuration error outside wiki mode, and `herdr-crew mem` refuses to run in json mode.
 
 ### Interactive wiki board views
 
@@ -745,12 +753,25 @@ herdr-crew mem show tasks/issue-36   # Layer 3: print a single page safely
 - **`mem_search`** *(read)* — case-insensitive search across operational memory pages (skipping `SCHEMA.md`)
 - **`mem_timeline`** *(read)* — read newest `log.md` entries, or entries centered around an `around` match
 - **`mem_get`** *(read)* — read a single page safely (rejects path traversal and symlinks)
-- **`mem_status_update`** *(write)* — validates against the board schema and atomically rewrites `now.md` (preserving the Markdown body when `focus` is omitted; never mutates `now.md` on validation failure)
+- **`mem_status_update`** *(write)* — validates against the board schema and atomically rewrites `now.md`; keeps the Markdown body when `focus` is omitted (even when the existing YAML is invalid) and clears it for `focus: ""`; writes `recent` only when given one, so by default the board's Recent box follows `log.md`; never mutates `now.md` on validation failure
 - **`mem_upsert`** *(write)* — atomically creates or updates a page under `tasks/`, `decisions/`, or `notes/`, idempotently updates `index.md`, optionally prepends a timestamped entry to `log.md`, and runs `mem lint`
 
-Pass `--read-only` for worker or reviewer roles: it advertises and allows only the three read tools (`mem_search`, `mem_timeline`, `mem_get`), rejects write calls, and never creates or modifies files on startup.
+The server is read-only by default: it advertises and allows only the three read tools (`mem_search`, `mem_timeline`, `mem_get`), rejects write calls, and never creates or modifies files. Start it with `--write` for the board writer only (`--read-only` is accepted as the explicit default; both together are a usage error). This is a guardrail against accidental writes, not access control: any agent can pass `--write`, and every role can edit the directory through `--add-dir`.
 
-Example MCP client configuration:
+Example MCP client configuration for the writer:
+
+```json
+{
+  "mcpServers": {
+    "herdr-crew-memory": {
+      "command": "herdr-crew",
+      "args": ["--root", "/path/to/repo", "mem", "mcp", "--write"]
+    }
+  }
+}
+```
+
+For other roles, leave out `"--write"`:
 
 ```json
 {
@@ -763,24 +784,13 @@ Example MCP client configuration:
 }
 ```
 
-For read-only access, append `"--read-only"` to `"args"`:
-
-```json
-{
-  "mcpServers": {
-    "herdr-crew-memory": {
-      "command": "herdr-crew",
-      "args": ["--root", "/path/to/repo", "mem", "mcp", "--read-only"]
-    }
-  }
-}
-```
-
 ### Migrating from `.herdr/status.json`
 
 1. Add `[memory]` with `mode = "wiki"` to `.herdr/crew.toml` (`{{STATUS}}` and `{{SCHEMA}}` automatically switch to `<memory_dir>/now.md` and `<memory_dir>/SCHEMA.md`).
 2. Run `herdr-crew mem init`, restart the board tab (`q` then `herdr-crew up`) so the board watches `<memory_dir>/now.md`, and optionally remove the old unversioned `.herdr/status.json`, `.herdr/status.json.tmp`, and `.herdr/status.schema.json`.
 3. Already-running agent sessions keep the prompt and `--add-dir` flags they started with; restart those sessions (or connect `herdr-crew mem mcp`) so they pick up the out-of-repo memory directory.
+
+Upgrading from 0.13.0: memory created by 0.13.0 keeps its directory, and the next `herdr-crew up` or `herdr-crew mem init` pins it. Add `--write` to the writer's `mem mcp` configuration, since the server is now read-only by default.
 
 ## Development
 

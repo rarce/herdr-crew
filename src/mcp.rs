@@ -13,16 +13,29 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::memory;
 
-const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
+const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const ERR_PARSE: i64 = -32700;
 const ERR_INVALID_REQUEST: i64 = -32600;
 const ERR_METHOD_NOT_FOUND: i64 = -32601;
 const ERR_INVALID_PARAMS: i64 = -32602;
 
-/// Initializes `<dir>` if absent (when writable) and runs the newline-delimited JSON-RPC 2.0 MCP
-/// server on stdio. In `--read-only` mode, never creates or modifies files on disk.
-pub fn serve(config: &Config, dir: PathBuf, read_only: bool) -> Result<(), String> {
+/// Initializes `<dir>` if absent (with `--write`) and runs the newline-delimited JSON-RPC 2.0 MCP
+/// server on stdio. Read-only by default: without `--write` it never creates or modifies files.
+/// `--write` is a guardrail against accidental writes, not access control: any process that can
+/// run `mem mcp --write` (or edit the directory, which `--add-dir` allows) can write.
+pub fn serve(config: &Config, dir: PathBuf, write: bool) -> Result<(), String> {
+    let read_only = !write;
+    eprintln!(
+        "herdr-crew: memory MCP server for {} ({})",
+        dir.display(),
+        if write {
+            "read-write: --write"
+        } else {
+            "read-only; pass --write to enable mem_status_update and mem_upsert"
+        }
+    );
     let tz = TimeZone::system();
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -42,7 +55,7 @@ fn serve_with_io<R: BufRead, W: Write>(
             .to_zoned(tz.clone())
             .strftime("%Y-%m-%dT%H:%M:%S%:z")
             .to_string();
-        memory::ensure_initialized(&dir, config, &now)?;
+        memory::ensure_initialized(&dir, config, &now, memory::LOCK_WAIT)?;
     }
     serve_io(config, dir, read_only, tz, reader, writer)
 }
@@ -184,10 +197,12 @@ impl Server<'_> {
 
         match method {
             "initialize" => {
+                // Answer with the client's version when supported, else the newest we speak.
                 let version = params
                     .get("protocolVersion")
                     .and_then(Value::as_str)
-                    .unwrap_or(DEFAULT_PROTOCOL_VERSION);
+                    .filter(|v| SUPPORTED_PROTOCOL_VERSIONS.contains(v))
+                    .unwrap_or(LATEST_PROTOCOL_VERSION);
                 Some(json_rpc_ok(
                     id,
                     json!({
@@ -247,14 +262,22 @@ impl Server<'_> {
             "mem_get" => self.tool_get(&args),
             "mem_status_update" => {
                 if self.read_only {
-                    Err("write tool mem_status_update is disabled in --read-only mode".into())
+                    Err(
+                        "write tool mem_status_update is disabled: the server is read-only; \
+                         run it as `herdr-crew mem mcp --write` (for the board writer)"
+                            .into(),
+                    )
                 } else {
                     self.tool_status_update(&args)
                 }
             }
             "mem_upsert" => {
                 if self.read_only {
-                    Err("write tool mem_upsert is disabled in --read-only mode".into())
+                    Err(
+                        "write tool mem_upsert is disabled: the server is read-only; \
+                         run it as `herdr-crew mem mcp --write` (for the board writer)"
+                            .into(),
+                    )
                 } else {
                     self.tool_upsert(&args)
                 }
@@ -321,6 +344,11 @@ impl Server<'_> {
             .filter(|v| v.is_object())
             .cloned()
             .ok_or_else(|| "owner must be an object".to_string())?;
+        let recent = match args.get("recent") {
+            None | Some(Value::Null) => None,
+            Some(v) if v.is_array() => Some(v.clone()),
+            Some(_) => return Err("recent must be an array".into()),
+        };
         let focus = optional_str(args, "focus")?;
         let updated_at = optional_str(args, "updatedAt")?;
         let count = memory::update_status(
@@ -328,6 +356,7 @@ impl Server<'_> {
             self.config,
             sessions,
             owner,
+            recent,
             focus,
             updated_at,
             &self.tz,
@@ -492,7 +521,19 @@ fn tool_specs(read_only: bool) -> Vec<Value> {
                         },
                         "required": ["urgent", "beforeMain", "optional"]
                     },
-                    "focus": { "type": "string", "description": "Optional Markdown body below frontmatter; preserves existing body when omitted" },
+                    "recent": {
+                        "type": "array",
+                        "description": "Optional curated Recent box; when omitted the board shows the newest log.md entries",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "at": { "type": "string", "description": "RFC 3339 timestamp with offset" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["at", "text"]
+                        }
+                    },
+                    "focus": { "type": "string", "description": "Optional Markdown body below frontmatter; preserves the existing body when omitted, and an empty string clears it" },
                     "updatedAt": { "type": "string", "description": "Optional RFC 3339 timestamp with offset; defaults to now" }
                 },
                 "required": ["sessions", "owner"]
@@ -565,7 +606,8 @@ mod tests {
         let root = temp_mem("lifecycle");
         let mem = root.join("store");
         let c = basic();
-        memory::ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00").unwrap();
+        memory::ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", memory::LOCK_WAIT)
+            .unwrap();
 
         let responses = run_session(
             &c,
@@ -586,6 +628,19 @@ mod tests {
         assert_eq!(responses.len(), 6, "{responses:?}");
         assert_eq!(responses[0]["id"], 1);
         assert_eq!(responses[0]["result"]["protocolVersion"], "2025-03-26");
+        // An unknown client version gets the newest supported one, not an echo.
+        let negotiated = run_session(
+            &c,
+            &mem,
+            true,
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
+            ],
+        );
+        assert_eq!(
+            negotiated[0]["result"]["protocolVersion"],
+            LATEST_PROTOCOL_VERSION
+        );
         assert_eq!(
             responses[0]["result"]["serverInfo"]["name"],
             "herdr-crew-memory"
@@ -638,7 +693,7 @@ mod tests {
             ro_responses[1]["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("--read-only")
+                .contains("mem mcp --write")
         );
         assert_eq!(ro_responses[2]["result"]["isError"], true);
 
@@ -651,7 +706,8 @@ mod tests {
         let mem = root.join("store");
         let c = basic();
         let tz = TimeZone::fixed(jiff::tz::offset(-3));
-        memory::ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00").unwrap();
+        memory::ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", memory::LOCK_WAIT)
+            .unwrap();
 
         let status_update = json!({
             "jsonrpc": "2.0",

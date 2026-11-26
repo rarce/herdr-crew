@@ -3238,3 +3238,80 @@ fn codex_tree_launches_and_resumes_with_multi_agent_v2_and_needs_codex_0_163() {
         "{refused:?}"
     );
 }
+
+/// Switches the fixture crew to `[memory] mode = "wiki"` (memory under `$HOME/.local/share`).
+fn use_wiki_memory(f: &Fixture) {
+    let path = f.repo.join(".herdr/crew.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replace("[workspace]", "[memory]\nmode = \"wiki\"\n[workspace]"),
+    )
+    .unwrap();
+}
+
+fn memory_pin(f: &Fixture) -> PathBuf {
+    f.repo.join(".git/herdr-crew-memory-dir")
+}
+
+#[test]
+fn wiki_up_pins_memory_and_startup_restore_repairs_the_board_despite_memory_problems() {
+    let f = Fixture::new();
+    use_wiki_memory(&f);
+    f.up();
+    assert_eq!(f.agents(), ["dev", "lead"]);
+    assert!(!f.repo.join(".herdr/status.json").exists());
+    let pinned = PathBuf::from(fs::read_to_string(memory_pin(&f)).unwrap().trim_end());
+    assert!(
+        pinned.starts_with(f.root.join(".local/share/herdr-crew/memory")),
+        "{}",
+        pinned.display()
+    );
+    assert!(pinned.join("now.md").is_file());
+    assert!(pinned.join("project.json").is_file());
+    // A second `up` changes nothing.
+    assert!(f.up().contains("nothing to do"));
+
+    let id = f.workspace();
+    let startup = || {
+        f.command(CREW)
+            .arg("startup")
+            .env("HERDR_PLUGIN_ID", "herdr-crew")
+            .env(
+                "HERDR_PLUGIN_CONTEXT_JSON",
+                json!({"workspace_id": id}).to_string(),
+            )
+            // The server's environment chooses another base; the pin still wins.
+            .env("XDG_DATA_HOME", f.root.join("elsewhere"))
+            .output()
+            .unwrap()
+    };
+
+    // Restore with a broken memory directory: warn in the log, still repair the board.
+    fs::remove_dir(pinned.join("tasks")).unwrap();
+    std::os::unix::fs::symlink("/tmp", pinned.join("tasks")).unwrap();
+    fs::remove_file(f.tab("status").join("running")).unwrap();
+    let runs = f.count(&["pane", "run"]);
+    let out = success(startup());
+    assert!(out.contains("warning"), "{out}");
+    assert_eq!(f.count(&["pane", "run"]), runs + 1, "the board is repaired");
+    assert_eq!(
+        f.count(&["notification", "show"]),
+        0,
+        "a restore stays silent"
+    );
+    assert!(!f.root.join("elsewhere").exists());
+
+    // Restore with an unusable pin: the board path is unknown, so warn and leave it.
+    fs::write(memory_pin(&f), "relative/dir\n").unwrap();
+    fs::remove_file(f.tab("status").join("running")).unwrap();
+    let runs = f.count(&["pane", "run"]);
+    let out = success(startup());
+    assert!(out.contains("operational memory unavailable"), "{out}");
+    assert_eq!(f.count(&["pane", "run"]), runs);
+    assert_eq!(f.count(&["notification", "show"]), 0);
+
+    // `up` refuses with the reason instead of choosing another directory.
+    let out = f.crew(&["up", "--no-attach"]);
+    failure(out, "delete it to choose the memory directory again");
+}

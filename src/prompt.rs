@@ -20,18 +20,18 @@ pub const PLACEHOLDERS: [&str; 8] = [
 pub const SCHEMA_FILE: &str = ".herdr/status.schema.json";
 pub const PROMPTS_DIR: &str = ".herdr/prompts";
 
-/// Byte offset and content of every `{{…}}` in `text` that is not a known placeholder.
-pub fn unknown_placeholders(text: &str) -> Vec<(usize, String)> {
+/// Placeholders that only have a value in wiki memory mode.
+pub const WIKI_PLACEHOLDERS: [&str; 2] = ["MEMORY", "MEMORY_SCHEMA"];
+
+/// Byte offset and content of every `{{…}}` in `text`.
+pub fn placeholders(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut from = 0;
     while let Some(start) = text[from..].find("{{").map(|i| from + i) {
         let Some(end) = text[start + 2..].find("}}").map(|i| start + 2 + i) else {
             break;
         };
-        let inner = &text[start + 2..end];
-        if !PLACEHOLDERS.contains(&inner) {
-            out.push((start, inner.to_string()));
-        }
+        out.push((start, text[start + 2..end].to_string()));
         from = end + 2;
     }
     out
@@ -53,15 +53,18 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
     let root = config.root.display().to_string();
     let peers = crate::send::peers(config, name, launcher);
     let launcher = launcher.display().to_string();
-    let memory_dir = config.memory_dir().display().to_string();
-    let memory_schema = config.memory_dir().join("SCHEMA.md").display().to_string();
-    let (status_value, schema_value) = if config.uses_wiki_memory() {
-        (
-            config.memory_dir().join("now.md").display().to_string(),
+    // `{{MEMORY}}` and `{{MEMORY_SCHEMA}}` are a config error outside wiki mode (config.rs).
+    let wiki = config.wiki_dir();
+    let memory_dir = wiki.map(|d| d.display().to_string()).unwrap_or_default();
+    let memory_schema = wiki
+        .map(|d| d.join("SCHEMA.md").display().to_string())
+        .unwrap_or_default();
+    let (status_value, schema_value) = match wiki {
+        Some(dir) => (
+            dir.join("now.md").display().to_string(),
             memory_schema.clone(),
-        )
-    } else {
-        (config.board.file.clone(), SCHEMA_FILE.to_string())
+        ),
+        None => (config.board.file.clone(), SCHEMA_FILE.to_string()),
     };
     let values = [
         ("NAME", name),
@@ -80,7 +83,7 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
         text = text.replace(&format!("{{{{{placeholder}}}}}"), value);
     }
     text = text.trim_end_matches('\n').to_string();
-    let memory_note = if config.uses_wiki_memory() {
+    let memory_note = if wiki.is_some() {
         format!(
             "\nOperational memory (out-of-repo wiki at {memory_dir}; schema in {memory_schema}):\n\
              Read with progressive disclosure: Layer 1 `index.md` (`{launcher} mem index`), \
@@ -219,12 +222,26 @@ mod tests {
 
     #[test]
     fn unknown() {
+        let unknown = |text: &str| -> Vec<(usize, String)> {
+            placeholders(text)
+                .into_iter()
+                .filter(|(_, name)| !PLACEHOLDERS.contains(&name.as_str()))
+                .collect()
+        };
         assert_eq!(
-            unknown_placeholders("a {{NAME}} b {{LAUNCH}} {{}} {{REPO"),
+            placeholders("a {{NAME}} b {{LAUNCH}} {{}} {{REPO"),
+            [
+                (2, "NAME".to_string()),
+                (13, "LAUNCH".to_string()),
+                (24, String::new())
+            ]
+        );
+        assert_eq!(
+            unknown("a {{NAME}} b {{LAUNCH}} {{}} {{REPO"),
             [(13, "LAUNCH".to_string()), (24, String::new())]
         );
         assert!(
-            unknown_placeholders(
+            unknown(
                 "{{NAME}}{{REPO}}{{STATUS}}{{SCHEMA}}{{LAUNCHER}}{{PEERS}}{{MEMORY}}{{MEMORY_SCHEMA}}"
             )
             .is_empty()
@@ -449,10 +466,11 @@ mod tests {
     fn wiki_memory_maps_status_schema_placeholders_and_appends_operational_note() {
         let mut c = worktrees();
         c.memory.mode = crate::config::MemoryMode::Wiki;
+        let mem = PathBuf::from("/m/globex-0123abcd");
+        c.memory.dir = Some(mem.clone());
         c.roles[0].prompt = "Memory {{MEMORY}} ({{MEMORY_SCHEMA}}).".into();
         c.common_prompt = Some("Board {{STATUS}} ({{SCHEMA}}).".into());
         let text = render(&c, "globex-lead", Path::new("/bin/crew"));
-        let mem = c.memory_dir();
         assert!(text.contains(&format!(
             "Memory {} ({})",
             mem.display(),

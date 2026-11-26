@@ -731,7 +731,7 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
         agent_steps(c, e, &mut p.steps, name);
     }
 
-    if !c.uses_wiki_memory() {
+    if c.wiki_dir().is_none() {
         let schema = schema::generate(c);
         if e.current_schema.as_deref() != Some(schema.as_str()) {
             p.steps.push(Step::WriteSchema {
@@ -834,10 +834,9 @@ fn tab_steps(
 
 fn role_agent(c: &Config, name: &str) -> AgentOptions {
     let agent = c.session_role(name).unwrap().agent();
-    if c.uses_wiki_memory() {
-        agent.with_extra_dir(c.memory_dir())
-    } else {
-        agent
+    match c.wiki_dir() {
+        Some(dir) => agent.with_extra_dir(dir.to_path_buf()),
+        None => agent,
     }
 }
 
@@ -2080,7 +2079,8 @@ mod tests {
         c.roles[1].kind = Kind::Codex;
         c.roles[2].kind = Kind::Agy;
         c.roles[3].kind = Kind::Pi;
-        let mem_dir = c.memory_dir();
+        let mem_dir = PathBuf::from("/m/acme-0123abcd");
+        c.memory.dir = Some(mem_dir.clone());
         let mem_str = mem_dir.display().to_string();
 
         let p = plan(

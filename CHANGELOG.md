@@ -10,6 +10,39 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Changed
+
+- Wiki memory (`[memory] mode = "wiki"`): the first `up` or `mem init` records the memory
+  directory in `herdr-crew-memory-dir` in the repository's common Git directory, and every later
+  command, linked worktree and the `startup` hook use it whatever their environment, so `up` in
+  the user's shell and `startup` in the herdr server's environment can no longer pick different
+  directories. `CREW_MEMORY_DIR` no longer overrides an existing pin (commands warn when it
+  disagrees; delete the pin to choose again), a relative `CREW_MEMORY_DIR` is now an error
+  instead of being resolved against the working directory, and the `/tmp/herdr-crew-memory`
+  fallback is gone. Memory created by 0.13.0 keeps its directory and is pinned on the next `up`.
+- `herdr-crew mem mcp` is read-only by default; start the board writer's server with `--write`.
+  It is a guardrail against accidental writes, not access control.
+- `{{MEMORY}}` and `{{MEMORY_SCHEMA}}` are a configuration error outside wiki mode, and
+  `herdr-crew mem` refuses to run in json mode.
+- `log.md` is documented as newest-first with RFC 3339 headings, matching `mem_upsert`; the
+  local `YYYY-MM-DD HH:MM` form is still read.
+
+### Fixed
+
+- `startup` no longer aborts a restore when the memory directory is unusable: it logs a warning
+  and still repairs the board (an adopted workspace still fails, since agents would use it).
+  `startup` never waits on the memory lock.
+- Concurrent `mem mcp --write` servers no longer lose `index.md`/`log.md` updates: herdr-crew's
+  memory writes hold a lock on `<memory_dir>/.lock`.
+- `mem_status_update` accepts an optional curated `recent` list (omitted, the board keeps
+  following `log.md`), and keeps the existing `now.md` body when the frontmatter is invalid
+  instead of silently replacing it with the seed text.
+- Memory initialization refuses a directory that belongs to another existing checkout or that
+  herdr-crew did not create, and adopts the memory of a moved repository.
+- The memory directory is resolved in the adapter; the pure core no longer reads environment
+  variables or the disk to find it.
+- `mem mcp` answers `initialize` with a supported protocol version instead of echoing any.
+
 ## [0.13.0] - 2026-11-26
 
 ### Changed
