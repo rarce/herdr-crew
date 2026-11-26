@@ -105,7 +105,7 @@ impl Editor {
     }
 
     fn duty(&self, i: usize) -> Duty {
-        if self.config.agy_tree || self.config.experimental_codex_tree {
+        if self.config.is_tree() {
             return Duty::Lead;
         }
         let role = &self.config.roles[i];
@@ -700,19 +700,43 @@ mod tests {
         assert!(screen.contains("lead"), "{screen}");
         assert!(!screen.contains("solo"), "{screen}");
 
-        let codex_tree = r#"version = 1
-kind = "codex"
-experimental_codex_tree = true
-[workspace]
-label = "cx"
-[board]
-tab = "cx-status"
-writer = "cx-lead"
-[[roles]]
-name = "cx-lead"
-prompt = "Lead."
-"#;
-        let e = Editor::new(Path::new("/r/cx"), codex_tree).unwrap();
-        assert_eq!(e.duty(0), Duty::Lead);
+        for key in ["codex_tree", "experimental_codex_tree"] {
+            let codex_tree = format!(
+                "version = 1\nkind = \"codex\"\n{key} = true\n[workspace]\nlabel = \"cx\"\n[board]\ntab = \"cx-status\"\nwriter = \"cx-lead\"\n[[roles]]\nname = \"cx-lead\"\nprompt = \"Lead.\"\n"
+            );
+            let e = Editor::new(Path::new("/r/cx"), &codex_tree).unwrap();
+            assert_eq!(e.duty(0), Duty::Lead, "{key}");
+        }
+    }
+
+    #[test]
+    fn config_editor_rejects_changing_agent_while_codex_tree_is_active() {
+        let root = Path::new("/r/cx");
+        for key in ["codex_tree", "experimental_codex_tree"] {
+            let text = format!(
+                "version = 1\nkind = \"codex\"\n{key} = true\n[workspace]\nlabel = \"cx\"\n[board]\ntab = \"cx-status\"\nwriter = \"cx-lead\"\n[[roles]]\nname = \"cx-lead\"\nprompt = \"Lead.\"\n"
+            );
+            let mut editor = Editor::new(root, &text).unwrap();
+            // Defaults row (row 0, col 0 = Agent): try switching from codex to claude (index 0).
+            send(&mut editor, "{enter}1{enter}");
+            let screen = draw(&mut editor, 120, 30);
+            assert!(
+                screen.contains("not applied: codex_tree requires exactly one Codex coordinator"),
+                "{key}: {screen}"
+            );
+            assert!(!screen.contains("unsaved"), "{key}: {screen}");
+            // Coordinator row (row 1, col 0 = Agent): try overriding role agent to agy (index 4).
+            send(&mut editor, "{down}{enter}5{enter}");
+            let screen = draw(&mut editor, 120, 30);
+            assert!(
+                screen.contains("not applied: codex_tree requires exactly one Codex coordinator"),
+                "{key}: {screen}"
+            );
+            assert!(!screen.contains("unsaved"), "{key}: {screen}");
+            // Changing the coordinator's reasoning_effort still works normally.
+            send(&mut editor, "{right}{right}{enter}4{enter}");
+            let screen = draw(&mut editor, 120, 30);
+            assert!(screen.contains("unsaved"), "{key}: {screen}");
+        }
     }
 }

@@ -102,15 +102,81 @@ impl Preset {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Topology {
+    Tabs,
+    Tree,
+}
+
+impl Topology {
+    pub(crate) const ALL: [Self; 2] = [Self::Tabs, Self::Tree];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "tabs" => Some(Self::Tabs),
+            "tree" => Some(Self::Tree),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Tabs => "tabs",
+            Self::Tree => "tree",
+        }
+    }
+
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Tabs => "independent Herdr tabs per role with optional worktrees (default)",
+            Self::Tree => {
+                "1 coordinator + native subagents in shared checkout (needs features.multi_agent_v2 = true)"
+            }
+        }
+    }
+}
+
 pub(crate) const AGY_TREE_BASE_ERROR: &str =
     "--base does not apply to multi-role agy crews (agy uses native tree mode without [worktrees])";
+pub(crate) const AGY_TABS_ERROR: &str =
+    "--topology tabs does not apply to multi-role agy crews (agy uses native tree mode)";
+pub(crate) const TREE_PRESET_ERROR: &str =
+    "--topology tree applies only to multi-role presets (review, parallel, research)";
+pub(crate) const TREE_AGENT_ERROR: &str =
+    "--topology tree applies only to multi-role codex or agy crews";
+pub(crate) const TREE_BASE_ERROR: &str =
+    "--base does not apply with --topology tree (tree mode does not use [worktrees])";
+pub(crate) const TREE_BASE_INTERACTIVE_ERROR: &str =
+    "--base does not apply with --topology tree; choose tabs or omit --base";
 
 pub(crate) fn uses_agy_tree(agent: Kind, preset: Preset) -> bool {
     agent == Kind::Agy && preset != Preset::Solo
 }
 
-pub(crate) fn configured_roles(agent: Kind, preset: Preset) -> &'static [(&'static str, Duty)] {
+pub(crate) fn supports_codex_tree(agent: Kind, preset: Preset) -> bool {
+    agent == Kind::Codex && preset != Preset::Solo
+}
+
+pub(crate) fn effective_topology(agent: Kind, preset: Preset, chosen: Topology) -> Topology {
     if uses_agy_tree(agent, preset) {
+        Topology::Tree
+    } else if supports_codex_tree(agent, preset) {
+        chosen
+    } else {
+        Topology::Tabs
+    }
+}
+
+pub(crate) fn is_codex_tree(agent: Kind, preset: Preset, topology: Topology) -> bool {
+    supports_codex_tree(agent, preset) && topology == Topology::Tree
+}
+
+pub(crate) fn configured_roles(
+    agent: Kind,
+    preset: Preset,
+    topology: Topology,
+) -> &'static [(&'static str, Duty)] {
+    if effective_topology(agent, preset, topology) == Topology::Tree {
         &preset.roles()[..1]
     } else {
         preset.roles()
@@ -121,6 +187,7 @@ pub(crate) fn configured_roles(agent: Kind, preset: Preset) -> &'static [(&'stat
 pub struct Options {
     pub agent: Option<crate::agent::Kind>,
     pub preset: Option<Preset>,
+    pub topology: Option<Topology>,
     pub models: Option<Profile>,
     pub name: Option<String>,
     pub base: Option<String>,
@@ -144,6 +211,7 @@ pub struct Selection {
     pub agent: crate::agent::Kind,
     pub name: String,
     pub preset: Preset,
+    pub topology: Topology,
     pub profile: Profile,
     pub overrides: BTreeMap<String, RoleModelOverride>,
     pub base: Option<String>,
@@ -154,13 +222,21 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub(crate) fn is_tree(&self) -> bool {
+    pub(crate) fn is_agy_tree(&self) -> bool {
         uses_agy_tree(self.agent, self.preset)
+    }
+
+    pub(crate) fn is_codex_tree(&self) -> bool {
+        is_codex_tree(self.agent, self.preset, self.topology)
+    }
+
+    pub(crate) fn is_tree(&self) -> bool {
+        self.is_agy_tree() || self.is_codex_tree()
     }
 
     /// Whether any configured role's effective model or effort differs from the selected profile.
     pub fn is_customized(&self) -> bool {
-        configured_roles(self.agent, self.preset)
+        configured_roles(self.agent, self.preset, self.topology)
             .iter()
             .any(|(suffix, duty)| {
                 role_options(self.agent, self.profile, *duty, self.overrides.get(*suffix))
@@ -251,6 +327,8 @@ pub(crate) fn validate_role_options(options: &AgentOptions) -> Result<(), String
 struct Template {
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<crate::agent::Kind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_tree: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agy_tree: Option<bool>,
     version: i64,
@@ -392,6 +470,23 @@ fn validate_options(root: &Path, options: &Options) -> Result<(), Fail> {
             "--shared-checkout applies only to the review preset; parallel requires worktrees",
         ));
     }
+    if options.topology == Some(Topology::Tree) {
+        if effective_agent.is_some_and(|a| !matches!(a, Kind::Codex | Kind::Agy)) {
+            return Err(Fail::usage(TREE_AGENT_ERROR));
+        }
+        if effective_preset == Some(Preset::Solo) {
+            return Err(Fail::usage(TREE_PRESET_ERROR));
+        }
+        if options.base.is_some() {
+            return Err(Fail::usage(TREE_BASE_ERROR));
+        }
+    }
+    if options.topology == Some(Topology::Tabs)
+        && effective_agent == Some(Kind::Agy)
+        && effective_preset.is_some_and(|p| p != Preset::Solo)
+    {
+        return Err(Fail::usage(AGY_TABS_ERROR));
+    }
     if options.base.is_some() {
         if options.shared_checkout
             || effective_preset.is_some_and(|p| !matches!(p, Preset::Review | Preset::Parallel))
@@ -417,6 +512,8 @@ fn choose(
     output: &mut impl Write,
 ) -> Result<Selection, Fail> {
     validate_options(root, options)?;
+    let explicit_tree = options.topology == Some(Topology::Tree);
+    let explicit_tabs = options.topology == Some(Topology::Tabs);
     let default_name = suggested_name(root);
     let name = if let Some(name) = &options.name {
         name.clone()
@@ -459,8 +556,9 @@ fn choose(
         for (i, preset) in Preset::ALL.iter().enumerate() {
             writeln!(output, "  {}. {}", i + 1, preset.description()).map_err(io_fail)?;
         }
+        let default_workflow = if explicit_tree { "2" } else { "1" };
         loop {
-            let choice = ask(input, output, "Workflow", Some("1"))?;
+            let choice = ask(input, output, "Workflow", Some(default_workflow))?;
             if let Some(preset) = Preset::parse(&choice).or_else(|| {
                 choice
                     .parse::<usize>()
@@ -468,6 +566,14 @@ fn choose(
                     .and_then(|i| i.checked_sub(1))
                     .and_then(|i| Preset::ALL.get(i).copied())
             }) {
+                if explicit_tree && preset == Preset::Solo {
+                    writeln!(output, "{TREE_PRESET_ERROR}.").map_err(io_fail)?;
+                    continue;
+                }
+                if explicit_tabs && options.agent == Some(Kind::Agy) && preset != Preset::Solo {
+                    writeln!(output, "{AGY_TABS_ERROR}.").map_err(io_fail)?;
+                    continue;
+                }
                 break preset;
             }
             writeln!(output, "Enter 1-4 or solo, review, parallel, research.").map_err(io_fail)?;
@@ -478,6 +584,12 @@ fn choose(
             "--shared-checkout applies only to the review preset; parallel requires worktrees",
         ));
     }
+    if explicit_tree && preset == Preset::Solo {
+        return Err(Fail::usage(TREE_PRESET_ERROR));
+    }
+    if explicit_tabs && options.agent == Some(Kind::Agy) && preset != Preset::Solo {
+        return Err(Fail::usage(AGY_TABS_ERROR));
+    }
     if options.base.is_some()
         && (options.shared_checkout || !matches!(preset, Preset::Review | Preset::Parallel))
     {
@@ -486,9 +598,13 @@ fn choose(
         ));
     }
     // Check remote before asking for the agent when flags already require git worktrees.
-    let known_tabs = options.agent.is_some_and(|a| a != Kind::Agy)
-        || (options.yes && options.agent.is_none())
-        || options.base.is_some();
+    let known_tabs = !explicit_tree
+        && (options
+            .agent
+            .is_some_and(|a| matches!(a, Kind::Claude | Kind::Pi))
+            || (options.agent == Some(Kind::Codex) && (explicit_tabs || options.yes))
+            || (options.yes && options.agent.is_none())
+            || options.base.is_some());
     let flags_need_worktrees = known_tabs
         && (preset == Preset::Parallel
             || (preset == Preset::Review
@@ -504,10 +620,22 @@ fn choose(
     } else {
         let names = crate::agent::Kind::ALL.map(crate::agent::Kind::as_str);
         let label = format!("Agent ({})", names.join(", "));
-        let default_agent = crate::agent::Kind::default().as_str();
+        let default_agent = if explicit_tree {
+            Kind::Codex.as_str()
+        } else {
+            crate::agent::Kind::default().as_str()
+        };
         loop {
             let choice = ask(input, output, &label, Some(default_agent))?;
             if let Some(agent) = crate::agent::Kind::parse(&choice.to_ascii_lowercase()) {
+                if explicit_tree && !matches!(agent, Kind::Codex | Kind::Agy) {
+                    writeln!(output, "{TREE_AGENT_ERROR}.").map_err(io_fail)?;
+                    continue;
+                }
+                if explicit_tabs && uses_agy_tree(agent, preset) {
+                    writeln!(output, "{AGY_TABS_ERROR}.").map_err(io_fail)?;
+                    continue;
+                }
                 if options.base.is_some() && uses_agy_tree(agent, preset) {
                     writeln!(output, "{AGY_TREE_BASE_ERROR}.").map_err(io_fail)?;
                     continue;
@@ -517,11 +645,61 @@ fn choose(
             writeln!(output, "Enter one of: {}.", names.join(", ")).map_err(io_fail)?;
         }
     };
-    let is_tree = uses_agy_tree(agent, preset);
-    if is_tree && options.base.is_some() {
+    if explicit_tree && !matches!(agent, Kind::Codex | Kind::Agy) {
+        return Err(Fail::usage(TREE_AGENT_ERROR));
+    }
+    if explicit_tabs && uses_agy_tree(agent, preset) {
+        return Err(Fail::usage(AGY_TABS_ERROR));
+    }
+    if options.base.is_some() && uses_agy_tree(agent, preset) {
         return Err(Fail::usage(AGY_TREE_BASE_ERROR));
     }
-    if !is_tree {
+    let topology = if uses_agy_tree(agent, preset) {
+        Topology::Tree
+    } else if supports_codex_tree(agent, preset) {
+        if let Some(topology) = options.topology {
+            topology
+        } else if options.yes {
+            Topology::Tabs
+        } else {
+            writeln!(output, "\nChoose a topology for Codex roles:").map_err(io_fail)?;
+            for (i, topology) in Topology::ALL.iter().enumerate() {
+                writeln!(
+                    output,
+                    "  {}. {}: {}",
+                    i + 1,
+                    topology.as_str(),
+                    topology.description()
+                )
+                .map_err(io_fail)?;
+            }
+            loop {
+                let choice = ask(input, output, "Topology", Some("1"))?;
+                if let Some(topology) =
+                    Topology::parse(&choice.to_ascii_lowercase()).or_else(|| {
+                        choice
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|i| i.checked_sub(1))
+                            .and_then(|i| Topology::ALL.get(i).copied())
+                    })
+                {
+                    if topology == Topology::Tree && options.base.is_some() {
+                        writeln!(output, "{TREE_BASE_INTERACTIVE_ERROR}.").map_err(io_fail)?;
+                        continue;
+                    }
+                    break topology;
+                }
+                writeln!(output, "Enter 1-2 or tabs, tree.").map_err(io_fail)?;
+            }
+        }
+    } else {
+        Topology::Tabs
+    };
+    if topology == Topology::Tree && options.base.is_some() {
+        return Err(Fail::usage(TREE_BASE_ERROR));
+    }
+    if topology == Topology::Tabs {
         let tabs_need_worktrees = preset == Preset::Parallel
             || (preset == Preset::Review
                 && !options.shared_checkout
@@ -578,7 +756,7 @@ fn choose(
     {
         let efforts_hint = models::efforts(agent).join(", ");
         let effort_key = models::effort_key(agent);
-        for (suffix, duty) in configured_roles(agent, preset) {
+        for (suffix, duty) in configured_roles(agent, preset, topology) {
             let (default_model, default_effort) =
                 options_model_effort(&profile.options(agent, *duty));
             writeln!(output, "\nRole {name}-{suffix} ({}):", duty.as_str()).map_err(io_fail)?;
@@ -626,7 +804,7 @@ fn choose(
             }
         }
     }
-    let (base, tree_isolated) = if is_tree {
+    let (base, tree_isolated) = if uses_agy_tree(agent, preset) {
         let tree_isolated = match preset {
             Preset::Parallel => true,
             Preset::Review if options.shared_checkout => false,
@@ -640,6 +818,8 @@ fn choose(
             _ => false,
         };
         (None, tree_isolated)
+    } else if is_codex_tree(agent, preset, topology) {
+        (None, false)
     } else {
         let suggested_base = git::default_base(root);
         let isolated = match preset {
@@ -709,6 +889,7 @@ fn choose(
         agent,
         name,
         preset,
+        topology,
         profile,
         overrides,
         base,
@@ -788,22 +969,63 @@ fn render_agy_tree_manifest(selection: &Selection, coordinator: &str) -> String 
     lines.join("\n")
 }
 
+fn render_codex_tree_manifest(selection: &Selection, coordinator: &str) -> String {
+    let mut lines = vec![
+        "Manifest workers (spawn only on explicit delegation via spawn_agent with fork_turns = \"none\" and these full role instructions; reuse returned canonical paths via followup_task and inspect loaded threads with list_agents):".to_string(),
+    ];
+    for (suffix, duty) in &selection.preset.roles()[1..] {
+        let task_name = suffix.replace('-', "_");
+        let responsibilities = duty_responsibilities(selection.preset, *duty);
+        let isolation = match duty {
+            Duty::Developer if selection.preset == Preset::Parallel => {
+                "Shares the main checkout with other workers. Preserve the user's changes, edit only your agreed disjoint files, and never switch or reset branches while other sessions use the checkout. Coordinate build or test commands that write shared artifacts with the coordinator."
+            }
+            Duty::Developer => {
+                "Shares the main checkout. Preserve the user's changes and do not switch or reset branches while other sessions use it. Only the assigned implementer edits source files; coordinate validation commands that generate files with the coordinator."
+            }
+            _ => {
+                "Read-only in the shared checkout. Do not edit source files, change Git state, or start shared services."
+            }
+        };
+        lines.push(format!(
+            "- {suffix} (task_name: \"{task_name}\"):\n  \
+             Responsibilities: {responsibilities}\n  \
+             Ownership and isolation: {isolation}\n  \
+             Reporting: Report progress, blockers, evidence, exact commits, validation commands/results and limitations to {coordinator} in your native final response; never edit {{{{STATUS}}}} directly."
+        ));
+    }
+    lines.join("\n")
+}
+
 pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail> {
     let coordinator = format!("{}-{}", selection.name, selection.preset.roles()[0].0);
+    let is_agy_tree = selection.is_agy_tree();
+    let is_codex_tree = selection.is_codex_tree();
     let is_tree = selection.is_tree();
     let mut roles = Vec::new();
     if is_tree {
         let (suffix, kind) = selection.preset.roles()[0];
         let responsibilities = duty_responsibilities(selection.preset, kind);
-        let manifest = render_agy_tree_manifest(selection, &coordinator);
-        let agy = match role_options(
+        let manifest = if is_agy_tree {
+            render_agy_tree_manifest(selection, &coordinator)
+        } else {
+            render_codex_tree_manifest(selection, &coordinator)
+        };
+        let (mut codex, mut agy) = (None, None);
+        match role_options(
             selection.agent,
             selection.profile,
             kind,
             selection.overrides.get(suffix),
         ) {
-            AgentOptions::Agy(o) if o != AgyOptions::default() => Some(o),
-            _ => None,
+            AgentOptions::Codex(o) if o != CodexOptions::default() => codex = Some(o),
+            AgentOptions::Agy(o) if o != AgyOptions::default() => agy = Some(o),
+            _ => {}
+        }
+        let delegation = if is_codex_tree {
+            "Delegate to manifest workers via spawn_agent (fork_turns = \"none\"), reuse returned paths via followup_task, and check loaded threads with list_agents.\n"
+        } else {
+            ""
         };
         roles.push(Role {
             name: format!("{}-{suffix}", selection.name),
@@ -811,13 +1033,14 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
                 "You are {{{{NAME}}}} in {{{{REPO}}}}.\n\
                  {responsibilities}\n\
                  Report progress, blockers and accepted results to the user.\n\
-                 You coordinate in the main checkout and integrate reviewed deliveries. Preserve the user's changes and do not switch or reset branches unexpectedly.\n\n\
+                 You coordinate in the main checkout and integrate reviewed deliveries. Preserve the user's changes and do not switch or reset branches unexpectedly.\n\
+                 {delegation}\n\
                  {manifest}\n"
             ),
             worktree: false,
             extra: false,
             claude: None,
-            codex: None,
+            codex,
             pi: None,
             agy,
         });
@@ -886,7 +1109,8 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
     };
     let template = Template {
         kind: (selection.agent != crate::agent::Kind::Claude).then_some(selection.agent),
-        agy_tree: is_tree.then_some(true),
+        codex_tree: is_codex_tree.then_some(true),
+        agy_tree: is_agy_tree.then_some(true),
         version: config::SUPPORTED_VERSION,
         common_prompt: format!(
             "Workflow: {workflow}\nFollow the repository's contributor instructions and discover its actual build, lint and test commands. Wait for an explicit task before changing files. A handoff includes objective, acceptance criteria, exact base and delivery commits, validation results and limitations. A 'done' report is not acceptance of the integrated result.\nOnly {coordinator} writes {{{{STATUS}}}}, following {{{{SCHEMA}}}}; other roles report status without editing the board. Write the whole board atomically through a .tmp file and rename.\nAdditional sessions cost time and tokens. {expansion}\n{{{{PEERS}}}}\n"
@@ -918,7 +1142,13 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
     } else {
         selection.profile.as_str().to_string()
     };
-    let mode_note = if is_tree { ", agy tree mode" } else { "" };
+    let mode_note = if is_agy_tree {
+        ", agy tree topology"
+    } else if is_codex_tree {
+        ", codex tree topology"
+    } else {
+        ""
+    };
     let text = format!(
         "# Generated by herdr-crew init ({} workflow{mode_note}, {} models). Edit prompts and roles for your project.\n# Workflow guidance: https://github.com/rarce/herdr-crew/blob/main/docs/workflows.md\n# Models and effort: https://github.com/rarce/herdr-crew/blob/main/docs/models.md; change them with herdr-crew config\n{}",
         selection.preset.id(),
@@ -1092,7 +1322,7 @@ pub(crate) fn summary(selection: &Selection) -> String {
             selection.profile.description()
         )
     };
-    if selection.is_tree() {
+    if selection.is_agy_tree() {
         let isolation = match selection.preset {
             Preset::Research => "read-only in main checkout (Workspace: \"inherit\")",
             _ if selection.tree_isolated => {
@@ -1111,8 +1341,24 @@ pub(crate) fn summary(selection: &Selection) -> String {
             selection.preset.roles()[0].0
         );
     }
+    if selection.is_codex_tree() {
+        return format!(
+            "{}\nWorkspace: {}\nAgent: {}\nTopology: tree (1 Codex coordinator + native subagents; requires features.multi_agent_v2 = true)\nModels: {}\nWorker isolation: shared main checkout (no [worktrees])\nBoard writer: {}-{}",
+            selection.preset.description(),
+            selection.name,
+            selection.agent.as_str(),
+            models_summary,
+            selection.name,
+            selection.preset.roles()[0].0
+        );
+    }
+    let topology_line = if supports_codex_tree(selection.agent, selection.preset) {
+        "Topology: tabs (independent Herdr tabs)\n"
+    } else {
+        ""
+    };
     format!(
-        "{}\nWorkspace: {}\nAgent: {}\nModels: {}\nWorktree base: {}\nBoard writer: {}-{}",
+        "{}\nWorkspace: {}\nAgent: {}\n{topology_line}Models: {}\nWorktree base: {}\nBoard writer: {}-{}",
         selection.preset.description(),
         selection.name,
         selection.agent.as_str(),
@@ -1252,6 +1498,9 @@ pub(crate) fn create(
             writeln!(output, "Created {}\nNext: review the prompts, run herdr-crew check, then herdr-crew up --dry-run.\nChange models and effort per role with herdr-crew config.\nStart sessions with herdr or herdr-crew up --no-attach when ready.", path.display()).map_err(io_fail)?;
             if selection.agent == crate::agent::Kind::Codex {
                 writeln!(output, "Codex setup: run herdr-crew codex-install, then review/trust the crew hook in Codex /hooks before launching roles.").map_err(io_fail)?;
+                if selection.is_codex_tree() {
+                    writeln!(output, "Codex tree mode: ensure features.multi_agent_v2 = true in ~/.codex/config.toml (Codex 0.163.0+).").map_err(io_fail)?;
+                }
             }
             if selection.agent == crate::agent::Kind::Pi {
                 writeln!(output, "pi setup: run herdr-crew pi-install once; its extension keeps each role's prompt across herdr restores.").map_err(io_fail)?;
@@ -1324,6 +1573,7 @@ mod tests {
                 agent: crate::agent::Kind::Claude,
                 name: "a".repeat(MAX_PREFIX),
                 preset,
+                topology: Topology::Tabs,
                 profile: Profile::Balanced,
                 overrides: BTreeMap::new(),
                 base,
@@ -1455,6 +1705,13 @@ mod tests {
             Options {
                 preset: Some(Preset::Parallel),
                 agent: Some(Kind::Codex),
+                topology: Some(Topology::Tabs),
+                ..Options::default()
+            },
+            Options {
+                preset: Some(Preset::Parallel),
+                agent: Some(Kind::Codex),
+                yes: true,
                 ..Options::default()
             },
             Options {
@@ -1624,6 +1881,11 @@ mod tests {
                 agent,
                 name: "demo".into(),
                 preset: Preset::Review,
+                topology: if agent == Kind::Agy {
+                    Topology::Tree
+                } else {
+                    Topology::Tabs
+                },
                 profile: Profile::Balanced,
                 overrides,
                 base: None,
@@ -1844,6 +2106,168 @@ mod tests {
         let config = config::Config::parse(&text, &root).unwrap();
         assert!(!config.agy_tree);
         assert_eq!(config.worktrees.as_ref().unwrap().branch, "main");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn codex_tree_presets_render_valid_single_coordinator_manifest_without_remote() {
+        let root = git::test_repo("init-codex-tree");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["remote", "remove", "origin"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        for (preset, shared, expected_workers) in [
+            (
+                Preset::Review,
+                false,
+                vec![
+                    "- dev (task_name: \"dev\"):",
+                    "- reviewer (task_name: \"reviewer\"):",
+                ],
+            ),
+            (
+                Preset::Review,
+                true,
+                vec![
+                    "- dev (task_name: \"dev\"):",
+                    "- reviewer (task_name: \"reviewer\"):",
+                ],
+            ),
+            (
+                Preset::Parallel,
+                false,
+                vec![
+                    "- dev-a (task_name: \"dev_a\"):",
+                    "- dev-b (task_name: \"dev_b\"):",
+                    "- reviewer (task_name: \"reviewer\"):",
+                    "agreed disjoint files",
+                ],
+            ),
+            (
+                Preset::Research,
+                false,
+                vec![
+                    "- research-a (task_name: \"research_a\"):",
+                    "- research-b (task_name: \"research_b\"):",
+                ],
+            ),
+        ] {
+            let options = Options {
+                agent: Some(Kind::Codex),
+                preset: Some(preset),
+                topology: Some(Topology::Tree),
+                name: Some("acme".into()),
+                shared_checkout: shared,
+                yes: true,
+                ..Options::default()
+            };
+            let (selection, _) = choose_with(&root, &options, "");
+            assert!(selection.is_codex_tree());
+            assert!(selection.base.is_none());
+            let text = ok(render(&selection, &root));
+            assert!(text.contains("codex_tree = true"), "{text}");
+            assert!(text.contains("codex tree topology"), "{text}");
+            assert!(!text.contains("[worktrees]"), "{text}");
+            let config = config::Config::parse(&text, &root).unwrap();
+            assert!(config.codex_tree);
+            assert!(!config.agy_tree);
+            assert_eq!(config.kind, Kind::Codex);
+            assert!(config.worktrees.is_none());
+            assert_eq!(config.roles.len(), 1);
+            assert_eq!(config.roles[0].name, "acme-lead");
+            assert!(!config.roles[0].worktree);
+            assert!(!config.roles[0].extra);
+            assert_eq!(config.board.writer, "acme-lead");
+            let full_prompt =
+                crate::prompt::render(&config, "acme-lead", Path::new("/bin/herdr-crew"));
+            assert!(!full_prompt.contains("{{"));
+            assert!(full_prompt.contains("Crew runtime communication (Codex native tree):"));
+            assert!(full_prompt.contains("fork_turns = \"none\""));
+            assert!(full_prompt.contains("followup_task"));
+            assert!(full_prompt.contains("list_agents"));
+            for needle in expected_workers {
+                assert!(
+                    full_prompt.contains(needle),
+                    "missing {needle}\n{full_prompt}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn line_by_line_codex_wizard_offers_topology_defaulting_to_tabs_and_skips_worktrees_in_tree() {
+        let root = git::test_repo("init-codex-topology-wizard");
+        git::test_remote_branch(&root, "origin/main");
+
+        // Multi-role Codex defaults to tabs (empty Enter at Topology).
+        // name=demo, workflow=review(2), agent=codex, topology=default(1=tabs), profile=balanced(3),
+        // customize=n, worktrees=n, ignore=n
+        let (tabs_sel, tabs_out) =
+            choose_with(&root, &Options::default(), "demo\n2\ncodex\n\n3\nn\nn\nn\n");
+        assert_eq!(tabs_sel.topology, Topology::Tabs);
+        assert!(!tabs_sel.is_tree());
+        assert!(
+            tabs_out.contains("Choose a topology for Codex roles:"),
+            "{tabs_out}"
+        );
+        assert!(tabs_out.contains("Use separate worktrees"), "{tabs_out}");
+
+        // Choosing tree (2) skips Worktrees and Base, and only customizes coordinator.
+        // name=demo, workflow=review(2), agent=codex, topology=tree(2), profile=balanced(3),
+        // customize=y -> only lead (gpt-6.2-astra, xhigh), ignore=n
+        let (tree_sel, tree_out) = choose_with(
+            &root,
+            &Options::default(),
+            "demo\n2\ncodex\n2\n3\ny\ngpt-6.2-astra\nxhigh\nn\n",
+        );
+        assert!(tree_sel.is_codex_tree());
+        assert!(tree_sel.base.is_none());
+        assert!(tree_out.contains("Role demo-lead (lead):"), "{tree_out}");
+        assert!(!tree_out.contains("Role demo-dev"), "{tree_out}");
+        assert!(!tree_out.contains("Use separate worktrees"), "{tree_out}");
+        let text = ok(render(&tree_sel, &root));
+        let config = config::Config::parse(&text, &root).unwrap();
+        assert!(config.codex_tree);
+        assert_eq!(config.roles.len(), 1);
+        assert_eq!(
+            config.roles[0].codex.model.as_deref(),
+            Some("gpt-6.2-astra")
+        );
+        assert_eq!(
+            config.roles[0].codex.reasoning_effort.as_deref(),
+            Some("xhigh")
+        );
+
+        // With --base on Codex review, selecting tree at Topology reprompts and accepts tabs.
+        let base_opts = Options {
+            agent: Some(Kind::Codex),
+            preset: Some(Preset::Review),
+            base: Some("origin/main".into()),
+            ..Options::default()
+        };
+        // name=demo, topology=tree(rejected)->tabs(1), profile=default, customize=n, ignore=n
+        let (base_sel, base_out) = choose_with(&root, &base_opts, "demo\ntree\n1\n\n\nn\n");
+        assert_eq!(base_sel.topology, Topology::Tabs);
+        assert_eq!(base_sel.base.as_deref(), Some("origin/main"));
+        assert!(base_out.contains(TREE_BASE_INTERACTIVE_ERROR), "{base_out}");
+
+        // With --topology tree without --agent: interactive defaults to review + codex, reprompting solo/claude.
+        let tree_opts = Options {
+            topology: Some(Topology::Tree),
+            ..Options::default()
+        };
+        let (sel, out) = choose_with(&root, &tree_opts, "demo\nsolo\n\nclaude\n\n\n\nn\n");
+        assert!(sel.is_codex_tree());
+        assert_eq!(sel.preset, Preset::Review);
+        assert_eq!(sel.agent, Kind::Codex);
+        assert!(out.contains(TREE_PRESET_ERROR), "{out}");
+        assert!(out.contains(TREE_AGENT_ERROR), "{out}");
+
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

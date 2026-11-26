@@ -308,7 +308,7 @@ mod tests {
         codex.roles[0].kind = crate::agent::Kind::Codex;
         codex.roles[0].worktree = false;
         codex.roles[0].extra = false;
-        codex.experimental_codex_tree = true;
+        codex.codex_tree = true;
 
         for (c, coordinator) in [(&agy, "agy-lead"), (&codex, "globex-lead")] {
             let v: Value = serde_json::from_str(&generate(c)).unwrap();

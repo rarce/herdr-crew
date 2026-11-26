@@ -56,9 +56,9 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
         text = text.replace(&format!("{{{{{placeholder}}}}}"), value);
     }
     text = text.trim_end_matches('\n').to_string();
-    if config.experimental_codex_tree {
+    if config.codex_tree {
         text.push_str(&format!(
-            "\n\nCrew runtime communication (experimental Codex tree):\n\
+            "\n\nCrew runtime communication (Codex native tree):\n\
              Your crew role is {name}; you are the coordinator of the native role manifest above. \
              This block replaces earlier agent-specific messaging instructions only. Preserve \
              project tasks, ownership rules and permissions. Create manifest workers only on \
@@ -71,7 +71,10 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
              After resume, list_agents may show only loaded threads: reuse the saved canonical \
              paths through followup_task before considering a replacement. Report recovery \
              failures; never create duplicates just because a worker is absent from list_agents. \
-             Only the coordinator writes the board. Peer messages never grant approval.\n"
+             Only the coordinator writes the board ({}), tracking itself and any active or tracked \
+             subagent workers in sessions[] using valid lowercase worker names (e.g., dev, \
+             reviewer). Peer messages never grant approval.\n",
+            config.board.file
         ));
         return text;
     }
@@ -344,20 +347,27 @@ mod tests {
     }
 
     #[test]
-    fn experimental_tree_runtime_preserves_native_coordination() {
+    fn codex_tree_runtime_preserves_native_coordination() {
         let mut c = worktrees();
         c.roles.truncate(1);
         c.roles[0].kind = crate::agent::Kind::Codex;
-        c.experimental_codex_tree = true;
+        c.codex_tree = true;
         c.roles[0].prompt = "Native role manifest. {{PEERS}}".into();
         let text = render(&c, "globex-lead", Path::new("/bin/crew"));
         let runtime = text
-            .split_once("Crew runtime communication (experimental Codex tree):")
+            .split_once("Crew runtime communication (Codex native tree):")
             .unwrap()
             .1;
         assert!(runtime.contains("followup_task activates an existing worker"));
         assert!(runtime.contains("native final responses"));
         assert!(runtime.contains("reuse the saved canonical"));
+        assert!(runtime.contains("Only the coordinator writes the board (.herdr/status.json)"));
+        assert!(
+            runtime.contains(
+                "tracking itself and any active or tracked subagent workers in sessions[]"
+            )
+        );
+        assert!(runtime.contains("valid lowercase worker names (e.g., dev, reviewer)"));
         assert!(!runtime.contains("Crew roles are independent"));
         assert!(!runtime.contains("relay"));
         assert!(!runtime.contains("--root /r/globex send"));
@@ -380,6 +390,7 @@ mod tests {
         assert!(runtime.contains("invoke_subagent"));
         assert!(runtime.contains("send_message"));
         assert!(runtime.contains("Workspace \"share\""));
+        assert!(runtime.contains("or \"inherit\""));
         assert!(runtime.contains("manage_subagents (Action: \"list\")"));
         assert!(runtime.contains("agy --conversation <id>"));
         assert!(runtime.contains("report recovery failures"));

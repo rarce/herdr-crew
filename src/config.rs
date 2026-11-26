@@ -40,8 +40,8 @@ impl fmt::Display for Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub root: PathBuf,
-    /// Prompt topology for the separate single-coordinator Codex experiment; no worker lifecycle.
-    pub experimental_codex_tree: bool,
+    /// Prompt topology for the single-coordinator Codex native-subagent mode.
+    pub codex_tree: bool,
     /// Prompt topology for the single-coordinator Antigravity native-subagent mode.
     pub agy_tree: bool,
     pub kind: Kind,
@@ -106,7 +106,9 @@ impl Role {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
-    experimental_codex_tree: bool,
+    codex_tree: Option<bool>,
+    #[serde(default)]
+    experimental_codex_tree: Option<bool>,
     #[serde(default)]
     agy_tree: Option<bool>,
     #[serde(default)]
@@ -171,6 +173,7 @@ struct RawRole {
 
 /// Known keys per table; checked before `serde` so that all of them are reported at once.
 const ROOT_KEYS: &[&str] = &[
+    "codex_tree",
     "experimental_codex_tree",
     "agy_tree",
     "experimental_agy_tree",
@@ -279,6 +282,17 @@ impl Config {
         if raw.roles.is_empty() {
             err("roles[] is empty: at least one role is needed".to_string());
         }
+        let codex_tree = match (raw.codex_tree, raw.experimental_codex_tree) {
+            (Some(a), Some(b)) if a != b => {
+                err(
+                    "codex_tree and experimental_codex_tree cannot have contradictory values"
+                        .into(),
+                );
+                false
+            }
+            (Some(v), _) | (_, Some(v)) => v,
+            (None, None) => false,
+        };
         let agy_tree = match (raw.agy_tree, raw.experimental_agy_tree) {
             (Some(a), Some(b)) if a != b => {
                 err("agy_tree and experimental_agy_tree cannot have contradictory values".into());
@@ -287,17 +301,20 @@ impl Config {
             (Some(v), _) | (_, Some(v)) => v,
             (None, None) => false,
         };
-        if raw.experimental_codex_tree && agy_tree {
-            err("experimental_codex_tree and agy_tree cannot both be enabled".into());
+        if codex_tree && agy_tree {
+            err("codex_tree and agy_tree cannot both be enabled".into());
         }
-        if raw.experimental_codex_tree
+        if codex_tree
             && (raw.roles.len() != 1
                 || raw
                     .roles
                     .iter()
                     .any(|r| r.kind.unwrap_or(raw.kind) != Kind::Codex || r.worktree || r.extra))
         {
-            err("experimental_codex_tree requires exactly one Codex coordinator without worktree or extra".into());
+            err(
+                "codex_tree requires exactly one Codex coordinator without worktree or extra"
+                    .into(),
+            );
         }
         if agy_tree
             && (raw.roles.len() != 1
@@ -459,7 +476,7 @@ impl Config {
         }
         Ok(Config {
             root: root.to_path_buf(),
-            experimental_codex_tree: raw.experimental_codex_tree,
+            codex_tree,
             agy_tree,
             kind: raw.kind,
             claude: raw.claude.clone(),
@@ -499,7 +516,7 @@ impl Config {
 
     /// Whether this crew runs in single-coordinator native tree mode.
     pub fn is_tree(&self) -> bool {
-        self.agy_tree || self.experimental_codex_tree
+        self.agy_tree || self.codex_tree
     }
 
     pub fn role(&self, name: &str) -> Option<&Role> {
@@ -1215,28 +1232,57 @@ prompt = '''You are {{NAME}}.'''
     }
 
     #[test]
-    fn experimental_tree_requires_one_shared_codex_coordinator() {
-        let text = format!("experimental_codex_tree = true\nkind = \"codex\"\n{MIN}");
+    fn codex_tree_and_legacy_alias_require_one_shared_codex_coordinator() {
         let root = Path::new("/r/p");
-        let parsed_codex = Config::parse(&text, root).unwrap();
-        assert!(parsed_codex.experimental_codex_tree);
-        assert!(parsed_codex.is_tree());
-        assert_eq!(parsed_codex.session_order("dev"), None);
-        assert!(!parsed_codex.is_known_tab("dev"));
-        assert!(Config::select_agent(&text, root, Kind::Pi).is_err());
-        for suffix in [
-            "extra = true\n",
-            "worktree = true\n",
-            "[[roles]]\nname = \"second\"\nprompt = \"Worker\"\n",
+        for key in ["codex_tree", "experimental_codex_tree"] {
+            let text = format!("{key} = true\nkind = \"codex\"\n{MIN}");
+            let parsed = Config::parse(&text, root).unwrap();
+            assert!(parsed.codex_tree, "{key}");
+            assert!(parsed.is_tree(), "{key}");
+            assert_eq!(parsed.session_order("dev"), None);
+            assert!(!parsed.is_known_tab("dev"));
+            assert!(Config::select_agent(&text, root, Kind::Pi).is_err());
+            assert!(Config::select_agent(&text, root, Kind::Claude).is_err());
+            for suffix in [
+                "extra = true\n",
+                "worktree = true\n",
+                "[[roles]]\nname = \"second\"\nprompt = \"Worker\"\n",
+            ] {
+                assert!(
+                    errors(&format!("{text}{suffix}"))
+                        .iter()
+                        .any(|error| error
+                            .contains("codex_tree requires exactly one Codex coordinator")),
+                    "{key} + {suffix}"
+                );
+            }
+            let both = format!("agy_tree = true\n{text}");
+            assert!(
+                errors(&both)
+                    .iter()
+                    .any(|error| error.contains("codex_tree and agy_tree cannot both be enabled")),
+                "{key}"
+            );
+        }
+        // Agreeing values are accepted; contradictory values fail validation.
+        let both_true =
+            format!("codex_tree = true\nexperimental_codex_tree = true\nkind = \"codex\"\n{MIN}");
+        assert!(Config::parse(&both_true, root).unwrap().codex_tree);
+        let both_false = format!("codex_tree = false\nexperimental_codex_tree = false\n{MIN}");
+        assert!(!Config::parse(&both_false, root).unwrap().codex_tree);
+        for conflict in [
+            format!("codex_tree = true\nexperimental_codex_tree = false\nkind = \"codex\"\n{MIN}"),
+            format!("codex_tree = false\nexperimental_codex_tree = true\nkind = \"codex\"\n{MIN}"),
         ] {
             assert!(
-                errors(&format!("{text}{suffix}"))
+                errors(&conflict)
                     .iter()
-                    .any(|error| error.contains("exactly one Codex coordinator"))
+                    .any(|error| error.contains("contradictory")),
+                "{conflict}"
             );
         }
         let plain = Config::parse(MIN, root).unwrap();
-        assert!(!plain.experimental_codex_tree);
+        assert!(!plain.codex_tree);
         assert!(!plain.is_tree());
     }
 
