@@ -694,7 +694,7 @@ updatedBy: globex-lead
 sessions:
   - role: globex-lead
     state: working
-    now: Coordinating review for PR #42
+    now: "Coordinating review for PR #42"
     next:
       - Merge after CI passes
 owner:
@@ -775,6 +775,12 @@ For read-only access, append `"--read-only"` to `"args"`:
   }
 }
 ```
+
+### Migrating from `.herdr/status.json`
+
+1. Add `[memory]` with `mode = "wiki"` to `.herdr/crew.toml` (`{{STATUS}}` and `{{SCHEMA}}` automatically switch to `<memory_dir>/now.md` and `<memory_dir>/SCHEMA.md`).
+2. Run `herdr-crew mem init`, restart the board tab (`q` then `herdr-crew up`) so the board watches `<memory_dir>/now.md`, and optionally remove the old unversioned `.herdr/status.json`, `.herdr/status.json.tmp`, and `.herdr/status.schema.json`.
+3. Already-running agent sessions keep the prompt and `--add-dir` flags they started with; restart those sessions (or connect `herdr-crew mem mcp`) so they pick up the out-of-repo memory directory.
 
 ## Development
 
