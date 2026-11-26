@@ -499,12 +499,14 @@ fn split_flow_items(line_no: usize, text: &str) -> Result<Vec<&str>, String> {
 }
 
 fn parse_double_quoted_prefix(line_no: usize, text: &str) -> Result<(String, &str), String> {
-    let mut chars = text.char_indices();
-    debug_assert_eq!(chars.next().map(|(_, c)| c), Some('"'));
+    let Some(inner) = text.strip_prefix('"') else {
+        return Err(format!("line {line_no}: expected opening double quote"));
+    };
+    let mut chars = inner.char_indices();
     let mut out = String::new();
     while let Some((idx, ch)) = chars.next() {
         match ch {
-            '"' => return Ok((out, &text[idx + 1..])),
+            '"' => return Ok((out, &inner[idx + 1..])),
             '\\' => {
                 let Some((_, esc)) = chars.next() else {
                     return Err(format!(
@@ -531,8 +533,10 @@ fn parse_double_quoted_prefix(line_no: usize, text: &str) -> Result<(String, &st
 }
 
 fn parse_single_quoted_prefix(line_no: usize, text: &str) -> Result<(String, &str), String> {
-    let mut chars = text.char_indices().peekable();
-    debug_assert_eq!(chars.next().map(|(_, c)| c), Some('\''));
+    let Some(inner) = text.strip_prefix('\'') else {
+        return Err(format!("line {line_no}: expected opening single quote"));
+    };
+    let mut chars = inner.char_indices().peekable();
     let mut out = String::new();
     while let Some((idx, ch)) = chars.next() {
         if ch == '\'' {
@@ -540,7 +544,7 @@ fn parse_single_quoted_prefix(line_no: usize, text: &str) -> Result<(String, &st
                 chars.next();
                 out.push('\'');
             } else {
-                return Ok((out, &text[idx + 1..]));
+                return Ok((out, &inner[idx + 1..]));
             }
         } else {
             out.push(ch);
