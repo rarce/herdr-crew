@@ -1,6 +1,6 @@
 [package]
 name = "herdr-crew"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 default-run = "herdr-crew"
 description = "herdr plugin that starts Claude Code, Codex, pi or agy sessions per role and draws their status board"

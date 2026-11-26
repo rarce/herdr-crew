@@ -10,6 +10,34 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-26
+
+### Added
+
+- Opt-in out-of-repo operational `llmwiki` memory (`[memory] mode = "wiki"` in `.herdr/crew.toml`,
+  keeping `mode = "json"` as the default for backward compatibility):
+  - Stores per-project operational state outside the Git repository under
+    `$XDG_DATA_HOME/herdr-crew/memory/<slug>-<hash>/` (falling back to
+    `~/.local/share/herdr-crew/memory/...`, overridable via `CREW_MEMORY_DIR`), keyed by the
+    canonical main checkout so linked worktrees share one operational memory with zero repo
+    clutter.
+  - Replaces `.herdr/status.json` and `.herdr/status.schema.json` with a generated `SCHEMA.md`,
+    strict YAML frontmatter in `now.md`, a Layer-1 catalog (`index.md`), an append-only
+    chronological timeline (`log.md`, feeding the board's *Recent* section), and Layer-3 pages
+    under `tasks/`, `decisions/`, and `notes/`, using a zero-dependency Rust YAML frontmatter
+    parser and symlink/path-traversal confinement.
+  - Adds `{{MEMORY}}` and `{{MEMORY_SCHEMA}}` placeholders (mapping `{{STATUS}}` and `{{SCHEMA}}`
+    to `now.md` and `SCHEMA.md` in wiki mode, including Codex hook context) and automatically
+    passes `--add-dir <memory_dir>` to `claude`, `codex` (including `codex-resume` snapshots),
+    and `agy`.
+- Interactive wiki views in `herdr-crew board` for `.md` boards: top tab bar (`[1] Status`,
+  `[2] Index` with navigable page list and scrollable Markdown preview, `[3] Log` timeline),
+  preserving legacy `.json` board behavior and `board --once` output unchanged.
+- Progressive-disclosure CLI (`herdr-crew mem path|init|lint|index|timeline|search|show`) and a
+  zero-daemon `stdio` JSON-RPC 2.0 MCP server (`herdr-crew mem mcp [--read-only]`) exposing
+  `mem_search`, `mem_timeline`, `mem_get`, `mem_status_update` (pre-write validated + atomic),
+  and `mem_upsert` (idempotent `index.md` update, RFC 3339 `log.md` prepend, and lint summary).
+
 ## [0.11.0] - 2026-11-25
 
 ### Added
@@ -359,7 +387,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/rarce/herdr-crew/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/rarce/herdr-crew/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rarce/herdr-crew/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/rarce/herdr-crew/compare/v0.8.0...v0.9.0
