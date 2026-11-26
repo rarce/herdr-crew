@@ -230,8 +230,7 @@ pub fn resolve(root: &Path, env: &BaseEnv) -> Result<Resolved, String> {
     let pin_path = common.join(PIN_FILE);
     let pin = match check_not_symlink(&pin_path) {
         Ok(true) => {
-            let text = fs::read_to_string(&pin_path)
-                .map_err(|e| format!("cannot read {}: {e}", pin_path.display()))?;
+            let text = read_pin(&pin_path)?;
             let dir = parse_pin(&text).map_err(|why| {
                 format!(
                     "{}: {why}; delete it to choose the memory directory again",
@@ -278,43 +277,90 @@ pub fn write_pin(root: &Path, write: &PinWrite) -> Result<PathBuf, String> {
     let common = crate::git::common_dir(root)?;
     let pin_path = common.join(PIN_FILE);
     match write {
-        PinWrite::Create(dir) => {
-            // Write a complete temporary file, then hard-link it into place: the link fails if
-            // the pin exists, and a reader never sees a partial pin.
-            let tmp = common.join(format!(
-                ".{PIN_FILE}.{}.{}.tmp",
-                std::process::id(),
-                NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
-            ));
-            let written = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)
-                .and_then(|mut file| {
-                    file.write_all(format!("{}\n", dir.display()).as_bytes())?;
-                    file.sync_all()
-                });
-            if let Err(e) = written {
-                let _ = fs::remove_file(&tmp);
-                return Err(format!("cannot write {}: {e}", tmp.display()));
-            }
-            let linked = fs::hard_link(&tmp, &pin_path);
-            let _ = fs::remove_file(&tmp);
-            match linked {
-                Ok(()) => Ok(dir.clone()),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    let _ = check_not_symlink(&pin_path)?;
-                    let text = fs::read_to_string(&pin_path)
-                        .map_err(|e| format!("cannot read {}: {e}", pin_path.display()))?;
-                    parse_pin(&text).map_err(|why| format!("{}: {why}", pin_path.display()))
-                }
-                Err(e) => Err(format!("cannot create {}: {e}", pin_path.display())),
-            }
-        }
+        PinWrite::Create(dir) => create_pin(&common, &pin_path, dir, |a, b| fs::hard_link(a, b)),
         PinWrite::Replace(dir) => {
             atomic_write_file(&pin_path, &format!("{}\n", dir.display()))?;
             Ok(dir.clone())
         }
+    }
+}
+
+/// Creates the pin unless it exists, then returns the directory it names. The complete pin is
+/// written to a temporary file and hard-linked into place, so the link fails if the pin exists and
+/// a reader never sees a partial pin. Where `link` fails for another reason (a filesystem without
+/// hard links), the pin is created with `create_new` instead: still exclusive, but a reader may
+/// briefly see it empty, which `read_pin` waits out.
+fn create_pin(
+    common: &Path,
+    pin_path: &Path,
+    dir: &Path,
+    link: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<PathBuf, String> {
+    let content = format!("{}\n", dir.display());
+    let tmp = common.join(format!(
+        ".{PIN_FILE}.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut file| {
+            file.write_all(content.as_bytes())?;
+            file.sync_all()
+        });
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {e}", tmp.display()));
+    }
+    let linked = link(&tmp, pin_path);
+    let _ = fs::remove_file(&tmp);
+    let created = match linked {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(pin_path)
+            {
+                Ok(mut file) => {
+                    let filled = file
+                        .write_all(content.as_bytes())
+                        .and_then(|()| file.sync_all());
+                    if let Err(e) = filled {
+                        let _ = fs::remove_file(pin_path);
+                        return Err(format!("cannot write {}: {e}", pin_path.display()));
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        other => other,
+    };
+    match created {
+        Ok(()) => Ok(dir.to_path_buf()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let _ = check_not_symlink(pin_path)?;
+            let text = read_pin(pin_path)?;
+            parse_pin(&text).map_err(|why| format!("{}: {why}", pin_path.display()))
+        }
+        Err(e) => Err(format!("cannot create {}: {e}", pin_path.display())),
+    }
+}
+
+/// Reads the pin, waiting up to a second while it is empty: a pin created without hard links is
+/// empty until its writer fills it.
+fn read_pin(pin_path: &Path) -> Result<String, String> {
+    let mut attempts = 0;
+    loop {
+        let text = fs::read_to_string(pin_path)
+            .map_err(|e| format!("cannot read {}: {e}", pin_path.display()))?;
+        if !text.is_empty() || attempts == 50 {
+            return Ok(text);
+        }
+        attempts += 1;
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -2693,6 +2739,30 @@ mod tests {
         for bad in ["", "\n", "rel/dir\n", "/a\n/b\n", "/a/../b\n"] {
             assert!(parse_pin(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn creating_the_pin_falls_back_when_hard_links_are_unsupported() {
+        let common = temp_dir("pin-no-links");
+        let pin = common.join(PIN_FILE);
+        let no_links = |_: &Path, _: &Path| -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        };
+        let first = Path::new("/m/acme-1");
+        assert_eq!(create_pin(&common, &pin, first, no_links).unwrap(), first);
+        assert_eq!(fs::read_to_string(&pin).unwrap(), "/m/acme-1\n");
+        // The loser adopts the existing pin, with or without hard links.
+        let second = Path::new("/m/acme-2");
+        assert_eq!(create_pin(&common, &pin, second, no_links).unwrap(), first);
+        let linked = |a: &Path, b: &Path| fs::hard_link(a, b);
+        assert_eq!(create_pin(&common, &pin, second, linked).unwrap(), first);
+        let leftovers: Vec<_> = fs::read_dir(&common)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != PIN_FILE)
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        fs::remove_dir_all(&common).unwrap();
     }
 
     #[test]
