@@ -3,7 +3,7 @@
 //! Exposes read/write tools over the project's out-of-repo operational `llmwiki` memory store
 //! without requiring any background daemon or extra dependencies.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 
 use jiff::Timestamp;
@@ -14,22 +14,37 @@ use crate::config::Config;
 use crate::memory;
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
+const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const ERR_PARSE: i64 = -32700;
 const ERR_INVALID_REQUEST: i64 = -32600;
 const ERR_METHOD_NOT_FOUND: i64 = -32601;
 const ERR_INVALID_PARAMS: i64 = -32602;
 
-/// Initializes `<dir>` if absent and runs the newline-delimited JSON-RPC 2.0 MCP server on stdio.
+/// Initializes `<dir>` if absent (when writable) and runs the newline-delimited JSON-RPC 2.0 MCP
+/// server on stdio. In `--read-only` mode, never creates or modifies files on disk.
 pub fn serve(config: &Config, dir: PathBuf, read_only: bool) -> Result<(), String> {
     let tz = TimeZone::system();
-    let now = Timestamp::now()
-        .to_zoned(tz.clone())
-        .strftime("%Y-%m-%dT%H:%M:%S%:z")
-        .to_string();
-    memory::ensure_initialized(&dir, config, &now)?;
     let stdin = io::stdin();
     let stdout = io::stdout();
-    serve_io(config, dir, read_only, tz, stdin.lock(), stdout.lock())
+    serve_with_io(config, dir, read_only, tz, stdin.lock(), stdout.lock())
+}
+
+fn serve_with_io<R: BufRead, W: Write>(
+    config: &Config,
+    dir: PathBuf,
+    read_only: bool,
+    tz: TimeZone,
+    reader: R,
+    writer: W,
+) -> Result<(), String> {
+    if !read_only {
+        let now = Timestamp::now()
+            .to_zoned(tz.clone())
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string();
+        memory::ensure_initialized(&dir, config, &now)?;
+    }
+    serve_io(config, dir, read_only, tz, reader, writer)
 }
 
 /// Pure `BufRead` + `Write` JSON-RPC 2.0 loop for both live `stdio` and in-memory unit tests.
@@ -38,8 +53,62 @@ pub fn serve_io<R: BufRead, W: Write>(
     dir: PathBuf,
     read_only: bool,
     tz: TimeZone,
+    reader: R,
+    writer: W,
+) -> Result<(), String> {
+    serve_io_with_limit(config, dir, read_only, tz, reader, writer, MAX_LINE_BYTES)
+}
+
+enum BoundedLine {
+    Eof,
+    Line(String),
+    TooLong,
+    InvalidUtf8(String),
+}
+
+fn read_bounded_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> Result<BoundedLine, String> {
+    let mut buf = Vec::new();
+    let n = reader
+        .by_ref()
+        .take((max_bytes + 1) as u64)
+        .read_until(b'\n', &mut buf)
+        .map_err(|e| format!("failed reading MCP input: {e}"))?;
+    if n == 0 {
+        return Ok(BoundedLine::Eof);
+    }
+    if buf.len() > max_bytes {
+        if buf.last() != Some(&b'\n') {
+            loop {
+                let chunk = reader
+                    .fill_buf()
+                    .map_err(|e| format!("failed reading MCP input: {e}"))?;
+                if chunk.is_empty() {
+                    break;
+                }
+                if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+                    reader.consume(pos + 1);
+                    break;
+                }
+                let len = chunk.len();
+                reader.consume(len);
+            }
+        }
+        return Ok(BoundedLine::TooLong);
+    }
+    match String::from_utf8(buf) {
+        Ok(line) => Ok(BoundedLine::Line(line)),
+        Err(e) => Ok(BoundedLine::InvalidUtf8(e.to_string())),
+    }
+}
+
+fn serve_io_with_limit<R: BufRead, W: Write>(
+    config: &Config,
+    dir: PathBuf,
+    read_only: bool,
+    tz: TimeZone,
     mut reader: R,
     mut writer: W,
+    max_line_bytes: usize,
 ) -> Result<(), String> {
     let mut server = Server {
         config,
@@ -47,26 +116,33 @@ pub fn serve_io<R: BufRead, W: Write>(
         read_only,
         tz,
     };
-    let mut line = String::new();
     loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| format!("failed reading MCP input: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let response = match serde_json::from_str::<Value>(trimmed) {
-            Ok(req) => server.handle_message(req),
-            Err(e) => Some(json_rpc_error(
+        let response = match read_bounded_line(&mut reader, max_line_bytes)? {
+            BoundedLine::Eof => break,
+            BoundedLine::TooLong => Some(json_rpc_error(
                 Value::Null,
                 ERR_PARSE,
-                format!("Parse error: {e}"),
+                "request line exceeds maximum size".into(),
             )),
+            BoundedLine::InvalidUtf8(e) => Some(json_rpc_error(
+                Value::Null,
+                ERR_PARSE,
+                format!("Parse error: invalid UTF-8: {e}"),
+            )),
+            BoundedLine::Line(line) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Value>(trimmed) {
+                    Ok(req) => server.handle_message(req),
+                    Err(e) => Some(json_rpc_error(
+                        Value::Null,
+                        ERR_PARSE,
+                        format!("Parse error: {e}"),
+                    )),
+                }
+            }
         };
         if let Some(resp) = response {
             let encoded = serde_json::to_string(&resp).map_err(|e| e.to_string())?;
@@ -776,6 +852,77 @@ mod tests {
 
         let report = memory::lint(&mem, &c, &tz);
         assert!(report.is_ok(), "{:?}", report.issues);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_only_startup_does_not_create_files_and_oversized_lines_return_parse_error() {
+        let root = temp_mem("ro-and-limit");
+        let mem = root.join("uninitialized-store");
+        let c = basic();
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+
+        // 1. `--read-only` startup must not create `mem` or any files inside it.
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mem_search","arguments":{"query":"anything"}}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mem_get","arguments":{"page":"index"}}}"#,
+            "\n",
+        );
+        let mut out = Vec::new();
+        serve_with_io(
+            &c,
+            mem.clone(),
+            true,
+            tz.clone(),
+            Cursor::new(input.as_bytes()),
+            &mut out,
+        )
+        .unwrap();
+        assert!(!mem.exists(), "read-only serve must not create memory dir");
+        let responses: Vec<Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(
+            responses[0]["result"]["content"][0]["text"],
+            "No matches found."
+        );
+        assert_eq!(responses[1]["result"]["isError"], true);
+
+        // 2. Oversized line is discarded cleanly and returns -32700 without breaking next request.
+        let oversized = format!("{{\"padding\":\"{}\"}}\n", "a".repeat(200));
+        let next = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n";
+        let combined = format!("{oversized}{next}");
+        let mut out2 = Vec::new();
+        serve_io_with_limit(
+            &c,
+            mem.clone(),
+            true,
+            tz,
+            Cursor::new(combined.into_bytes()),
+            &mut out2,
+            64,
+        )
+        .unwrap();
+        let res2: Vec<Value> = String::from_utf8(out2)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(res2.len(), 2, "{res2:?}");
+        assert_eq!(res2[0]["error"]["code"], ERR_PARSE);
+        assert!(
+            res2[0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("maximum size")
+        );
+        assert_eq!(res2[1]["id"], 9);
+        assert_eq!(res2[1]["result"], json!({}));
 
         let _ = fs::remove_dir_all(&root);
     }

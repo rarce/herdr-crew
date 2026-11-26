@@ -564,7 +564,7 @@ pub fn parse_log_records(text: &str, tz: &TimeZone) -> Vec<LogRecord> {
 pub fn read_log_records(dir: &Path, tz: &TimeZone) -> Result<Vec<LogRecord>, String> {
     let text = show(dir, "log.md")?;
     let mut records = parse_log_records(&text, tz);
-    records.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| b.line.cmp(&a.line)));
+    records.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.line.cmp(&b.line)));
     Ok(records)
 }
 
@@ -635,11 +635,8 @@ fn parse_index_item(raw_item: &str, cleaned: &str) -> Option<(String, String)> {
             .unwrap_or("")
             .trim();
         let alias = parts.next().map(str::trim).unwrap_or("");
-        let normalized = target_part
-            .strip_prefix("./")
-            .unwrap_or(target_part)
-            .strip_suffix(".md")
-            .unwrap_or(target_part);
+        let without_dot = target_part.strip_prefix("./").unwrap_or(target_part);
+        let normalized = without_dot.strip_suffix(".md").unwrap_or(without_dot);
         if !normalized.is_empty() {
             let needle = format!("[[{raw_target}]]");
             let after = raw_item
@@ -1191,7 +1188,7 @@ pub fn read_index(dir: &Path) -> Result<String, String> {
 pub fn read_timeline(dir: &Path, limit: usize, tz: &TimeZone) -> Result<String, String> {
     let text = show(dir, "log.md")?;
     let mut entries = parse_log_entries(&text, tz);
-    entries.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| b.line.cmp(&a.line)));
+    entries.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.line.cmp(&b.line)));
     let mut out = String::new();
     for entry in entries.into_iter().take(limit) {
         out.push_str(&format!(
@@ -1461,9 +1458,18 @@ pub fn upsert_page(
     }
     let page = page.trim();
     let stem = page.strip_suffix(".md").unwrap_or(page);
-    if !is_safe_relative_target(stem) {
+    if stem.ends_with('/')
+        || stem.contains("//")
+        || stem
+            .chars()
+            .any(|c| matches!(c, '#' | '|' | '[' | ']') || c.is_control())
+        || stem
+            .split('/')
+            .any(|seg| seg.is_empty() || seg.starts_with('.'))
+        || !is_safe_relative_target(stem)
+    {
         return Err(format!(
-            "invalid page path \"{page}\": must be a relative path under tasks/, decisions/, or notes/"
+            "invalid page path \"{page}\": must be a relative path under tasks/, decisions/, or notes/ without dotfiles, trailing slashes, or wikilink-breaking characters"
         ));
     }
     let (section, rest) = if let Some(r) = stem.strip_prefix("tasks/") {
@@ -1560,7 +1566,7 @@ pub fn upsert_page(
         };
         let ts = Timestamp::now()
             .to_zoned(tz.clone())
-            .strftime("%Y-%m-%d %H:%M")
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
             .to_string();
         let header = format!("## [{ts}] {lt} | {title}");
         let updated_log = prepend_log_entry(&existing_log, &header);
@@ -2113,7 +2119,7 @@ mod tests {
 - [[now]] — live status board
 
 ## Tasks
-- [[tasks/t1]] — implement `board` tabs
+- [[./tasks/t1]] — implement `board` tabs
 - [Auth](tasks/auth.md) — OAuth flow
 ";
         let entries = parse_index_entries(
@@ -2127,6 +2133,7 @@ mod tests {
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].section, "Active");
         assert_eq!(entries[0].target, "now");
+        assert_eq!(entries[1].target, "tasks/t1");
         assert_eq!(entries[1].summary, "implement `board` tabs");
         assert_eq!(entries[2].target, "tasks/auth");
         assert_eq!(entries[2].summary, "OAuth flow");
@@ -2197,6 +2204,60 @@ mod tests {
             now_text.contains("# Custom Focus\n\nNew body.\n"),
             "{now_text}"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upsert_rejects_bad_segments_and_sorts_ahead_of_same_minute_init_log() {
+        let dir = temp_dir("upsert-edge");
+        let mem = dir.join("store");
+        let c = basic();
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+        let now = Timestamp::now()
+            .to_zoned(tz.clone())
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string();
+        ensure_initialized(&mem, &c, &now).unwrap();
+        let initial_index = fs::read_to_string(mem.join("index.md")).unwrap();
+
+        for bad in [
+            "tasks/sub/",
+            "tasks/foo#bar",
+            "tasks/a//b",
+            "tasks/.hidden",
+            "tasks/a|b",
+            "tasks/[bad]",
+        ] {
+            assert!(
+                upsert_page(&mem, &c, bad, "# Bad\n", Some("bad"), None, None, &tz).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(mem.join("index.md")).unwrap(),
+            initial_index
+        );
+        assert!(!mem.join("tasks/sub").exists());
+        assert!(!mem.join("tasks/foo#bar.md").exists());
+
+        // Subsequent upsert in the same minute/second must sort ahead of `init`.
+        let res = upsert_page(
+            &mem,
+            &c,
+            "tasks/fresh",
+            "# Fresh\n",
+            Some("Fresh task"),
+            Some("task"),
+            Some("Created fresh task"),
+            &tz,
+        )
+        .unwrap();
+        assert!(res.lint.is_ok(), "{:?}", res.lint.issues);
+        let records = read_log_records(&mem, &tz).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].title, "Created fresh task");
+        assert_eq!(records[1].kind, "init");
 
         let _ = fs::remove_dir_all(&dir);
     }

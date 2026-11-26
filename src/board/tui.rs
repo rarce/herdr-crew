@@ -50,6 +50,14 @@ fn signature(path: &Path) -> Option<(SystemTime, u64)> {
 
 type FileSig = Option<(SystemTime, u64)>;
 
+fn watched_preview_target(state: &WikiState) -> Option<&str> {
+    state
+        .preview
+        .as_ref()
+        .filter(|p| p.content.is_ok())
+        .map(|p| p.target.as_str())
+}
+
 fn watch_signature_wiki(path: &Path, preview_target: Option<&str>) -> [FileSig; 4] {
     let dir = path.parent();
     let index_sig = dir.and_then(|p| signature(&p.join("index.md")));
@@ -200,26 +208,17 @@ fn run_wiki(
                             if let Some(preview) = &mut state.preview {
                                 preview.content = memory::show(mem_dir, &preview.target);
                             }
-                            seen = watch_signature_wiki(
-                                path,
-                                state.preview.as_ref().map(|p| p.target.as_str()),
-                            );
+                            seen = watch_signature_wiki(path, watched_preview_target(&state));
                             dirty = true;
                         }
                         WikiAction::OpenPage(target) => {
                             let content = memory::show(mem_dir, &target);
                             state.open_preview(target, content);
-                            seen = watch_signature_wiki(
-                                path,
-                                state.preview.as_ref().map(|p| p.target.as_str()),
-                            );
+                            seen = watch_signature_wiki(path, watched_preview_target(&state));
                             dirty = true;
                         }
                         WikiAction::Redraw => {
-                            seen = watch_signature_wiki(
-                                path,
-                                state.preview.as_ref().map(|p| p.target.as_str()),
-                            );
+                            seen = watch_signature_wiki(path, watched_preview_target(&state));
                             dirty = true;
                         }
                         WikiAction::None => {}
@@ -229,7 +228,7 @@ fn run_wiki(
                 _ => {}
             }
         }
-        let now = watch_signature_wiki(path, state.preview.as_ref().map(|p| p.target.as_str()));
+        let now = watch_signature_wiki(path, watched_preview_target(&state));
         if now != seen {
             seen = now;
             board = read(path, c, &tz);
