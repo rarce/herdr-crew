@@ -10,6 +10,8 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-26
+
 ### Fixed
 
 - Codex preflight no longer passes `--add-dir <memory_dir>` (or other interactive flags) to
@@ -396,7 +398,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/rarce/herdr-crew/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/rarce/herdr-crew/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/rarce/herdr-crew/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rarce/herdr-crew/compare/v0.9.0...v0.10.0
