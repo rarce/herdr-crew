@@ -672,7 +672,7 @@ $XDG_DATA_HOME/herdr-crew/memory/<slug>-<hash>/
 
 If `XDG_DATA_HOME` is unset (or relative), it falls back to `~/.local/share/herdr-crew/memory/<slug>-<hash>/`. Set `CREW_MEMORY_DIR` to an absolute path to override the base directory; a relative value is an error. With neither `HOME` nor `CREW_MEMORY_DIR` there is no fallback. The `<slug>-<hash>` folder is derived from the canonical main Git checkout path.
 
-The first `herdr-crew up` (not `--dry-run`) or `herdr-crew mem init` records the chosen directory in `herdr-crew-memory-dir` in the repository's common Git directory (`.git/`). Every later command, every linked worktree and herdr's `startup` hook (which runs with the herdr server's environment) then use that directory, whatever their `XDG_DATA_HOME`, `CREW_MEMORY_DIR` or working directory. A moved repository keeps its memory; a copy of a checkout that still exists gets a fresh one. `CREW_MEMORY_DIR` does not override an existing pin (`up`, `check` and `mem` warn when it disagrees); delete `.git/herdr-crew-memory-dir` to choose again. Initialization refuses a directory that belongs to another checkout (see its `project.json`) or that herdr-crew did not create.
+The first `herdr-crew up` (not `--dry-run`), `herdr-crew mem init` or herdr adopting the project's fresh workspace records the chosen directory, once it is initialized, in `herdr-crew-memory-dir` in the repository's common Git directory (`.git/`). Every later command, every linked worktree and herdr's `startup` hook (which runs with the herdr server's environment) then use that directory, whatever their `XDG_DATA_HOME`, `CREW_MEMORY_DIR` or working directory. A moved repository keeps its memory; a copy of a checkout that still exists gets a fresh one. `CREW_MEMORY_DIR` does not override an existing pin (`up`, `check` and `mem` warn when it disagrees); delete `.git/herdr-crew-memory-dir` to choose again. Initialization refuses a directory that belongs to another checkout (see its `project.json`) or that herdr-crew did not create.
 
 The directory holds:
 
@@ -717,7 +717,7 @@ See [[index]] for the memory catalog and [[log]] for recent activity.
 
 New entries go directly below the `log.md` title, newest first, with RFC 3339 headings (`## [YYYY-MM-DDTHH:MM:SS±HH:MM] <type> | <title>`). The legacy local form `## [YYYY-MM-DD HH:MM] <type> | <title>` is still read, in the reader's time zone. When `recent` is omitted or empty in `now.md`, `herdr-crew board` automatically populates the **Recent** box with the 5 newest entries from `log.md`.
 
-If herdr restores a session while the memory directory is unusable, `startup` logs a warning and still repairs the board; when herdr adopts a fresh workspace the same problem stops the bring-up. `{{MEMORY}}` and `{{MEMORY_SCHEMA}}` are a configuration error outside wiki mode, and `herdr-crew mem` refuses to run in json mode.
+If herdr restores a session and initializing the memory directory fails, `startup` logs a warning and still repairs the board; if the directory cannot be resolved at all (for example a malformed pin), the board's path is unknown, so `startup` logs a warning and leaves the project to `herdr-crew up`. A restore of a project that has no pin yet creates no memory directory. When herdr adopts a fresh workspace, `startup` initializes and pins the directory like `up`, and a memory problem stops the bring-up. `{{MEMORY}}` and `{{MEMORY_SCHEMA}}` are a configuration error outside wiki mode, and `herdr-crew mem` refuses to run in json mode.
 
 ### Interactive wiki board views
 

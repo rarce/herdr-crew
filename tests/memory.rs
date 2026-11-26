@@ -376,6 +376,11 @@ fn wiki_up_dry_run_skips_repo_status_and_adds_memory_dir_without_writing() {
         mem_dir.display()
     );
     assert!(!repo.pin().exists(), "up --dry-run must not pin");
+
+    // `up --agent` re-parses the configuration and must keep the resolved directory.
+    let plan = success(repo.run(&["up", "--agent", "claude", "--dry-run"]));
+    assert!(plan.contains(&mem_dir.display().to_string()), "{plan}");
+    assert!(!repo.pin().exists());
     assert!(!repo.root.join(".herdr/status.json").exists());
     assert!(!Path::new(&repo.root).join(".herdr/prompts").exists());
 }
@@ -415,6 +420,10 @@ fn mem_init_pins_the_directory_for_every_environment_and_worktree() {
     let mut from_wt = repo.command();
     from_wt.current_dir(&wt);
     assert_eq!(repo.mem_path(&mut from_wt), first);
+
+    // An empty pin (e.g. a crash) is an error too.
+    fs::write(repo.pin(), "").unwrap();
+    assert!(!repo.run(&["mem", "path"]).status.success());
 
     // A malformed pin is an error, not a silent fallback.
     fs::write(repo.pin(), "not/absolute\n").unwrap();
@@ -518,4 +527,35 @@ fn memory_commands_refuse_json_mode_and_unusable_environments() {
         );
     }
     assert!(!repo.pin().exists());
+}
+
+#[test]
+fn a_refused_directory_is_never_pinned_or_written() {
+    let repo = WikiRepo::new();
+    let candidate = repo.mem_path(&mut repo.command());
+    fs::create_dir_all(&candidate).unwrap();
+    fs::write(candidate.join("foreign.txt"), "not ours").unwrap();
+    let out = repo.run(&["mem", "init"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("herdr-crew did not create it"), "{stderr}");
+    assert!(stderr.contains("CREW_MEMORY_DIR"), "{stderr}");
+    assert!(!repo.pin().exists(), "a refused directory is not pinned");
+    let entries: Vec<_> = fs::read_dir(&candidate)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, ["foreign.txt"], "nothing is written into it");
+
+    // Choosing another base then works and pins that one.
+    let other = repo.mem_base.with_extension("other");
+    let mut init = repo.command();
+    init.env("CREW_MEMORY_DIR", &other).args(["mem", "init"]);
+    success(init.output().unwrap());
+    assert!(
+        fs::read_to_string(repo.pin())
+            .unwrap()
+            .starts_with(other.to_str().unwrap())
+    );
+    let _ = fs::remove_dir_all(&other);
 }

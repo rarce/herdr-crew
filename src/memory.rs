@@ -54,6 +54,10 @@ fn sanitize_slug(name: &str) -> String {
 /// working directory) and every linked worktree resolves the same one.
 pub const PIN_FILE: &str = "herdr-crew-memory-dir";
 
+/// How to choose another memory directory, for errors about the current one.
+const CHOOSE_AGAIN: &str = "choose another directory with CREW_MEMORY_DIR, after deleting \
+                            herdr-crew-memory-dir in the repository's Git directory if it exists";
+
 /// Lock file inside the memory directory that serializes herdr-crew's own writes.
 pub const LOCK_FILE: &str = ".lock";
 
@@ -254,11 +258,15 @@ pub fn resolve(root: &Path, env: &BaseEnv) -> Result<Resolved, String> {
     };
     let decision = decide(pin.as_ref(), &canonical_root, candidate.clone());
     let env_note = match (&pin, &env.crew_memory_dir) {
-        (Some(_), Some(_)) if decision.pin.is_none() && candidate != decision.dir => Some(format!(
-            "CREW_MEMORY_DIR is ignored: {} pins the memory directory {}; delete it to choose again",
-            pin_path.display(),
-            decision.dir.display()
-        )),
+        (Some(_), Some(_))
+            if decision.pin.is_none() && canonical(&candidate) != canonical(&decision.dir) =>
+        {
+            Some(format!(
+                "CREW_MEMORY_DIR is ignored: {} pins the memory directory {}; delete it to choose again",
+                pin_path.display(),
+                decision.dir.display()
+            ))
+        }
         _ => None,
     };
     Ok(Resolved { decision, env_note })
@@ -271,22 +279,29 @@ pub fn write_pin(root: &Path, write: &PinWrite) -> Result<PathBuf, String> {
     let pin_path = common.join(PIN_FILE);
     match write {
         PinWrite::Create(dir) => {
-            let content = format!("{}\n", dir.display());
-            match OpenOptions::new()
+            // Write a complete temporary file, then hard-link it into place: the link fails if
+            // the pin exists, and a reader never sees a partial pin.
+            let tmp = common.join(format!(
+                ".{PIN_FILE}.{}.{}.tmp",
+                std::process::id(),
+                NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let written = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&pin_path)
-            {
-                Ok(mut file) => {
-                    if let Err(e) = file
-                        .write_all(content.as_bytes())
-                        .and_then(|()| file.sync_all())
-                    {
-                        let _ = fs::remove_file(&pin_path);
-                        return Err(format!("cannot write {}: {e}", pin_path.display()));
-                    }
-                    Ok(dir.clone())
-                }
+                .open(&tmp)
+                .and_then(|mut file| {
+                    file.write_all(format!("{}\n", dir.display()).as_bytes())?;
+                    file.sync_all()
+                });
+            if let Err(e) = written {
+                let _ = fs::remove_file(&tmp);
+                return Err(format!("cannot write {}: {e}", tmp.display()));
+            }
+            let linked = fs::hard_link(&tmp, &pin_path);
+            let _ = fs::remove_file(&tmp);
+            match linked {
+                Ok(()) => Ok(dir.clone()),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                     let _ = check_not_symlink(&pin_path)?;
                     let text = fs::read_to_string(&pin_path)
@@ -609,12 +624,10 @@ fn check_owner(dir: &Path, canonical_root: &Path) -> Result<(), String> {
     if check_not_symlink(&path)? {
         match project_root(dir) {
             Some(other) if other != canonical_root && other.is_dir() => Err(format!(
-                "{} belongs to {} (see its project.json), not {}; delete {} in this \
-                 repository's Git directory or set CREW_MEMORY_DIR to choose another directory",
+                "{} belongs to {} (see its project.json), not {}; {CHOOSE_AGAIN}",
                 dir.display(),
                 other.display(),
                 canonical_root.display(),
-                PIN_FILE
             )),
             Some(_) => Ok(()),
             None => Err(format!(
@@ -627,7 +640,7 @@ fn check_owner(dir: &Path, canonical_root: &Path) -> Result<(), String> {
     } else {
         Err(format!(
             "{} is not empty and has no project.json, so herdr-crew did not create it; \
-             choose another directory",
+             {CHOOSE_AGAIN}",
             dir.display()
         ))
     }
@@ -644,6 +657,9 @@ pub fn ensure_initialized(
 ) -> Result<InitResult, String> {
     ensure_safe_dir(dir)?;
     let canonical_root = canonical(&c.root);
+    // Checked before the lock file is created, so a refused directory gets nothing written,
+    // and again under the lock.
+    check_owner(dir, &canonical_root)?;
     let _lock = lock_memory(dir, wait)?;
     check_owner(dir, &canonical_root)?;
 
@@ -2553,12 +2569,14 @@ mod tests {
         let mem = dir.join("store");
         let c = basic();
         ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
-        let held = lock_memory(&mem, Duration::ZERO).unwrap();
+        // Other tests fork processes in parallel; a child briefly shares an open lock file
+        // until its exec closes it, so the uncontended calls allow a short wait.
+        let held = lock_memory(&mem, LOCK_WAIT).unwrap();
         let err =
             ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", Duration::ZERO).unwrap_err();
         assert!(err.contains("another herdr-crew process"), "{err}");
         drop(held);
-        ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", Duration::ZERO).unwrap();
+        ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 

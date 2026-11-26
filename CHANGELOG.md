@@ -12,8 +12,8 @@ change between minor versions.
 
 ### Changed
 
-- Wiki memory (`[memory] mode = "wiki"`): the first `up` or `mem init` records the memory
-  directory in `herdr-crew-memory-dir` in the repository's common Git directory, and every later
+- Wiki memory (`[memory] mode = "wiki"`): the first `up`, `mem init` or `startup` adoption
+  records the memory directory, once it is initialized, in `herdr-crew-memory-dir` in the repository's common Git directory, and every later
   command, linked worktree and the `startup` hook use it whatever their environment, so `up` in
   the user's shell and `startup` in the herdr server's environment can no longer pick different
   directories. `CREW_MEMORY_DIR` no longer overrides an existing pin (commands warn when it
@@ -29,9 +29,14 @@ change between minor versions.
 
 ### Fixed
 
-- `startup` no longer aborts a restore when the memory directory is unusable: it logs a warning
-  and still repairs the board (an adopted workspace still fails, since agents would use it).
-  `startup` never waits on the memory lock.
+- `startup` no longer aborts a restore when initializing the memory directory fails: it logs a
+  warning and still repairs the board. An unresolvable directory (for example a malformed pin)
+  is logged and the project is left to `up`, and a restore without a pin creates no directory.
+  Adoption still fails on a memory problem, since agents would use the directory. A restore
+  never waits on the memory lock.
+- `up --agent <kind>` works in wiki mode (it lost the resolved memory directory), and `add`
+  refuses to start an instance when the directory is unresolved instead of pointing it at
+  `.herdr/status.json`.
 - Concurrent `mem mcp --write` servers no longer lose `index.md`/`log.md` updates: herdr-crew's
   memory writes hold a lock on `<memory_dir>/.lock`.
 - `mem_status_update` accepts an optional curated `recent` list (omitted, the board keeps

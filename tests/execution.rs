@@ -3292,8 +3292,10 @@ fn wiki_up_pins_memory_and_startup_restore_repairs_the_board_despite_memory_prob
     std::os::unix::fs::symlink("/tmp", pinned.join("tasks")).unwrap();
     fs::remove_file(f.tab("status").join("running")).unwrap();
     let runs = f.count(&["pane", "run"]);
-    let out = success(startup());
-    assert!(out.contains("warning"), "{out}");
+    let out = startup();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    success(out);
+    assert!(stderr.contains("warning"), "{stderr}");
     assert_eq!(f.count(&["pane", "run"]), runs + 1, "the board is repaired");
     assert_eq!(
         f.count(&["notification", "show"]),
@@ -3306,12 +3308,97 @@ fn wiki_up_pins_memory_and_startup_restore_repairs_the_board_despite_memory_prob
     fs::write(memory_pin(&f), "relative/dir\n").unwrap();
     fs::remove_file(f.tab("status").join("running")).unwrap();
     let runs = f.count(&["pane", "run"]);
-    let out = success(startup());
-    assert!(out.contains("operational memory unavailable"), "{out}");
+    let out = startup();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    success(out);
+    assert!(
+        stderr.contains("operational memory unavailable"),
+        "{stderr}"
+    );
     assert_eq!(f.count(&["pane", "run"]), runs);
     assert_eq!(f.count(&["notification", "show"]), 0);
 
-    // `up` refuses with the reason instead of choosing another directory.
-    let out = f.crew(&["up", "--no-attach"]);
-    failure(out, "delete it to choose the memory directory again");
+    // `up` and `add` refuse with the reason instead of choosing another directory or falling
+    // back to `.herdr/status.json`.
+    failure(
+        f.crew(&["up", "--no-attach"]),
+        "delete it to choose the memory directory again",
+    );
+    failure(
+        f.crew(&["add", "dev"]),
+        "delete it to choose the memory directory again",
+    );
+    assert!(!f.repo.join(".herdr/status.json").exists());
+}
+
+#[test]
+fn wiki_adoption_pins_memory_and_restore_without_a_pin_creates_none() {
+    // Restore of a project that has no pin yet: nothing is created at the server's candidate.
+    let f = Fixture::new();
+    use_wiki_memory(&f);
+    f.up();
+    let pinned = fs::read_to_string(memory_pin(&f)).unwrap();
+    fs::remove_file(memory_pin(&f)).unwrap();
+    let id = f.workspace();
+    let elsewhere = f.root.join("server-data");
+    let out = f
+        .command(CREW)
+        .arg("startup")
+        .env("HERDR_PLUGIN_ID", "herdr-crew")
+        .env(
+            "HERDR_PLUGIN_CONTEXT_JSON",
+            json!({"workspace_id": id}).to_string(),
+        )
+        .env("XDG_DATA_HOME", &elsewhere)
+        .output()
+        .unwrap();
+    success(out);
+    assert!(!elsewhere.exists(), "a restore creates no unpinned memory");
+    assert!(!memory_pin(&f).exists(), "startup on a restore never pins");
+
+    // Adoption: startup is a writer and pins the directory it gives the agents, so a later
+    // `up` in another environment keeps using it.
+    let f = Fixture::new();
+    use_wiki_memory(&f);
+    let w = f.result(&[
+        "workspace",
+        "create",
+        "--cwd",
+        f.repo.to_str().unwrap(),
+        "--label",
+        "repo",
+        "--no-focus",
+    ]);
+    let id = w["workspace"]["workspace_id"].as_str().unwrap();
+    let server_data = f.root.join("server-data");
+    let out = f
+        .command(CREW)
+        .arg("startup")
+        .env("HERDR_PLUGIN_ID", "herdr-crew")
+        .env(
+            "HERDR_PLUGIN_CONTEXT_JSON",
+            json!({"workspace_id": id}).to_string(),
+        )
+        .env("XDG_DATA_HOME", &server_data)
+        .output()
+        .unwrap();
+    success(out);
+    assert_eq!(f.agents(), ["dev", "lead"]);
+    let adopted = PathBuf::from(fs::read_to_string(memory_pin(&f)).unwrap().trim_end());
+    assert!(adopted.starts_with(&server_data), "{}", adopted.display());
+    assert!(adopted.join("now.md").is_file());
+    assert_ne!(format!("{}\n", adopted.display()), pinned);
+    let status = f.tab("status");
+    fs::remove_file(status.join("running")).unwrap();
+    // `up` from the user's shell (no XDG_DATA_HOME) types the board with the pinned directory.
+    f.up();
+    let board = fs::read_to_string(status.join("command")).unwrap();
+    assert!(
+        board.contains(&adopted.join("now.md").display().to_string()),
+        "{board}"
+    );
+    assert_eq!(
+        fs::read_to_string(memory_pin(&f)).unwrap().trim_end(),
+        adopted.display().to_string()
+    );
 }
