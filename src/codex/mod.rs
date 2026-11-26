@@ -89,6 +89,8 @@ struct Snapshot {
     prompt: String,
     options: CodexOptions,
     codex_home: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra_dirs: Vec<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -216,10 +218,16 @@ fn pane_context(value: &Value, socket: String) -> Result<Context, String> {
 }
 
 pub fn context_prompt(c: &Config, name: &str, rendered: &str) -> Result<String, String> {
+    let board = c.effective_board_path();
+    let schema = if c.uses_wiki_memory() {
+        c.memory_dir().join("SCHEMA.md")
+    } else {
+        c.root.join(crate::prompt::SCHEMA_FILE)
+    };
     let context = format!(
         "{rendered}\nCrew runtime paths: the board is {} and its schema is {}. Only {} writes the board. Paths in the role instructions retain their documented meaning relative to the main checkout {}.\n",
-        c.board_path().display(),
-        c.root.join(crate::prompt::SCHEMA_FILE).display(),
+        board.display(),
+        schema.display(),
         c.board.writer,
         c.root.display()
     );
@@ -266,6 +274,7 @@ pub fn prepare(
     git::verify_checkout(&c.root, &cwd)?;
     let mut options = options.clone();
     options.resolve_dirs(&c.root)?;
+    let extra_dirs = options.extra_dirs.clone();
     let snapshot = Snapshot {
         version: FORMAT,
         token: new_token()?,
@@ -276,6 +285,7 @@ pub fn prepare(
         prompt: context_prompt(c, name, rendered)?,
         options,
         codex_home: integration::home()?,
+        extra_dirs,
     };
     write(
         &c.root,
@@ -308,7 +318,7 @@ fn snapshot(root: &Path, token: &str) -> Result<Snapshot, String> {
     if !token_valid(token) {
         return Err("invalid Codex binding token".into());
     }
-    let snapshot: Snapshot = read(root, &path(root, "snapshots", token))?;
+    let mut snapshot: Snapshot = read(root, &path(root, "snapshots", token))?;
     if snapshot.version != FORMAT
         || snapshot.token != token
         || snapshot.root != root
@@ -316,8 +326,14 @@ fn snapshot(root: &Path, token: &str) -> Result<Snapshot, String> {
         || !crate::config::is_agent_name(&snapshot.name)
         || !snapshot.options.problems().is_empty()
         || !snapshot.codex_home.is_absolute()
+        || snapshot.extra_dirs.iter().any(|dir| {
+            !dir.is_absolute() || dir.to_str().is_none_or(|s| s.chars().any(char::is_control))
+        })
     {
         return Err("Codex snapshot is incompatible with this checkout or crew version".into());
+    }
+    for dir in snapshot.extra_dirs.clone() {
+        snapshot.options.add_extra_dir(dir);
     }
     git::verify_checkout(root, &snapshot.cwd)?;
     Ok(snapshot)
@@ -932,5 +948,52 @@ mod tests {
                 .contains("/r/acme/.herdr/status.json")
         );
         assert!(context_prompt(&config, "acme-lead", &"a".repeat(MAX_CONTEXT)).is_err());
+
+        let mut wiki = crate::config::tests::basic();
+        wiki.memory.mode = crate::config::MemoryMode::Wiki;
+        let wiki_prompt = context_prompt(&wiki, "acme-lead", "hello").unwrap();
+        assert!(
+            wiki_prompt.contains(&wiki.effective_board_path().display().to_string()),
+            "{wiki_prompt}"
+        );
+        assert!(
+            wiki_prompt.contains(&wiki.memory_dir().join("SCHEMA.md").display().to_string()),
+            "{wiki_prompt}"
+        );
+        assert!(!wiki_prompt.contains(".herdr/status.json"), "{wiki_prompt}");
+    }
+
+    #[test]
+    fn snapshot_preserves_extra_dirs_and_stays_legacy_compatible() {
+        let legacy = Snapshot {
+            version: FORMAT,
+            token: "0".repeat(32),
+            root: PathBuf::from("/r/acme"),
+            cwd: PathBuf::from("/r/acme"),
+            name: "acme-lead".into(),
+            workspace: "acme".into(),
+            prompt: "hello".into(),
+            options: CodexOptions::default(),
+            codex_home: PathBuf::from("/home/u/.codex"),
+            extra_dirs: Vec::new(),
+        };
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        assert!(!legacy_json.contains("extra_dirs"), "{legacy_json}");
+        let parsed_legacy: Snapshot = serde_json::from_str(&legacy_json).unwrap();
+        assert!(parsed_legacy.extra_dirs.is_empty());
+
+        let with_mem = Snapshot {
+            extra_dirs: vec![PathBuf::from("/tmp/mem-store")],
+            ..legacy
+        };
+        let mem_json = serde_json::to_string(&with_mem).unwrap();
+        let mut parsed: Snapshot = serde_json::from_str(&mem_json).unwrap();
+        for dir in parsed.extra_dirs.clone() {
+            parsed.options.add_extra_dir(dir);
+        }
+        assert_eq!(
+            parsed.options.args(),
+            ["--no-daemon", "--add-dir", "/tmp/mem-store"]
+        );
     }
 }

@@ -445,6 +445,14 @@ herdr-crew [--root DIR] <command>
   send --check <session>         check the crew delivery route without sending
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
+  mem path                       print the project's out-of-repo operational memory directory
+  mem init                       initialize or refresh SCHEMA.md and seed operational memory
+  mem lint                       validate now.md, index.md orphans, wikilinks and log.md
+  mem index                      print Layer 1 operational memory index (index.md)
+  mem timeline [--limit N]       print Layer 2 recent log.md entries (default 20)
+  mem search <query>             search operational memory pages
+  mem show <page>                show a single operational memory page
+  mem mcp [--read-only]          run a zero-daemon stdio MCP server for operational memory
   codex-install                  install the crew hook; review it in Codex /hooks
   codex-uninstall                remove only the crew hook
   codex-list                     list saved role bindings and Codex session IDs
@@ -537,6 +545,7 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
 | `board.tab`        | yes              | The board tab's label; must differ from every role name.                                                                                                                                           |
 | `board.file`       | no               | The board file, relative to the root. Default `.herdr/status.json`.                                                                                                                                 |
 | `board.writer`     | yes              | The role that writes the board; must be one of `roles`.                                                                                                                                            |
+| `memory.mode`      | no               | `"json"` (default, `.herdr/status.json`) or `"wiki"` for out-of-repo operational `llmwiki` memory (`now.md`, `index.md`, `log.md`, `tasks/`, `decisions/`, `notes/`).                              |
 | `worktrees.dir`    | with worktrees   | Where role worktrees live, relative to the root.                                                                                                                                                    |
 | `worktrees.base`   | with worktrees   | `remote/branch` that new worktrees start from, detached.                                                                                                                                            |
 | `roles[].name`     | yes              | The tab label and the agent name: `[a-z][a-z0-9_-]{0,31}`, at most 29 characters with `extra`. Prefix names with the project's so they don't clash with other projects' agents, which are global in herdr. |
@@ -549,14 +558,16 @@ extra = true                      # allows globex-dev-2, globex-dev-3…
 
 - A session's prompt is its role's `prompt`, then `common_prompt`, with these placeholders replaced:
 
-  | Placeholder    | Value                                   |
-  | -------------- | --------------------------------------- |
-  | `{{NAME}}`     | the session name, such as `globex-dev-2` |
-  | `{{REPO}}`     | the root                                |
-  | `{{STATUS}}`   | `board.file`                            |
-  | `{{SCHEMA}}`   | `.herdr/status.schema.json`             |
-  | `{{LAUNCHER}}` | the binary's absolute path              |
-  | `{{PEERS}}`    | how this session reaches each other role, from its own kind and sandbox (see [messaging](docs/messaging.md)) |
+  | Placeholder         | Value                                   |
+  | ------------------- | --------------------------------------- |
+  | `{{NAME}}`          | the session name, such as `globex-dev-2` |
+  | `{{REPO}}`          | the root                                |
+  | `{{STATUS}}`        | `board.file` (or `<memory_dir>/now.md` when `memory.mode = "wiki"`) |
+  | `{{SCHEMA}}`        | `.herdr/status.schema.json` (or `<memory_dir>/SCHEMA.md` when `memory.mode = "wiki"`) |
+  | `{{MEMORY}}`        | the out-of-repo operational memory directory (`<memory_dir>`) |
+  | `{{MEMORY_SCHEMA}}` | `<memory_dir>/SCHEMA.md`                |
+  | `{{LAUNCHER}}`      | the binary's absolute path              |
+  | `{{PEERS}}`         | how this session reaches each other role, from its own kind and sandbox (see [messaging](docs/messaging.md)) |
 
 - The result is written to `.herdr/prompts/<name>.txt`. Claude receives it with `--append-system-prompt-file`; Codex receives a saved copy through the crew hook as additional developer context; pi receives it through the crew pi extension, which appends it to the system prompt; `agy` receives it through the crew `SessionStart` hook as a persisted `systemMessage`.
 - Use literal strings (`'''…'''`): they keep backslashes as written. Basic strings (`"""…"""`) are accepted too.
@@ -634,6 +645,142 @@ The fields follow these rules:
 - **`owner`** lists what the sessions are waiting on from the user; the board shows it as "Waiting on you".
 
 When the file is missing, has invalid JSON or does not match the schema, the board shows why instead of the content. Keys: `q`/`Esc` quit, `r` redraws.
+
+## Operational memory (llmwiki)
+
+For crews that need durable multi-session context without cluttering the Git working tree, `herdr-crew` supports an out-of-repo Markdown operational wiki (`llmwiki`) that replaces `.herdr/status.json`.
+
+### Enabling it
+
+Add `[memory]` to `.herdr/crew.toml`:
+
+```toml
+[memory]
+mode = "wiki"
+```
+
+When `[memory]` is omitted or `mode = "json"`, legacy `.herdr/status.json` behavior is preserved unchanged.
+
+### Out-of-repo location and layout
+
+Operational memory is stored outside the repository at:
+
+```text
+$XDG_DATA_HOME/herdr-crew/memory/<slug>-<hash>/
+```
+
+If `XDG_DATA_HOME` is unset, it falls back to `~/.local/share/herdr-crew/memory/<slug>-<hash>/`. Set `CREW_MEMORY_DIR` to override the base directory (relative values resolve against the current working directory). The `<slug>-<hash>` folder is derived deterministically from the canonical main Git checkout path, so all linked worktrees share one operational memory with zero repository clutter:
+
+- `project.json` — machine metadata linking the directory back to the main checkout
+- `SCHEMA.md` — generated contract refreshed by `herdr-crew up` and `herdr-crew mem init`
+- `now.md` — live status board (YAML frontmatter parsed by `herdr-crew board`) plus short working notes
+- `index.md` — Layer 1 catalog linking active tasks, decisions, and notes
+- `log.md` — Layer 2 chronological activity log
+- `tasks/` — per-task operational pages (objective, acceptance, provenance, validation, blockers)
+- `decisions/` — architectural and workflow decisions with rationale
+- `notes/` — bounded investigation notes and environment facts
+
+### Replacing `status.json`
+
+In `memory.mode = "wiki"`, `up` initializes `<memory_dir>` instead of creating `.herdr/status.json` and `.herdr/status.schema.json`, automatically passes `--add-dir <memory_dir>` to `claude`, `codex`, and `agy` roles, and resolves `{{STATUS}}` to `<memory_dir>/now.md` and `{{SCHEMA}}` to `<memory_dir>/SCHEMA.md`.
+
+`now.md` uses YAML frontmatter validated with the exact same schema rules as `status.json`:
+
+```markdown
+---
+version: 1
+updatedAt: 2026-11-26T09:10:00-03:00
+updatedBy: globex-lead
+sessions:
+  - role: globex-lead
+    state: working
+    now: "Coordinating review for PR #42"
+    next:
+      - Merge after CI passes
+owner:
+  urgent: []
+  beforeMain:
+    - Approve release notes
+  optional: []
+---
+
+# globex — Current State
+
+See [[index]] for the memory catalog and [[log]] for recent activity.
+```
+
+Structured headings in `log.md` use `## [YYYY-MM-DD HH:MM] <type> | <title>` or RFC 3339 timestamps (`## [YYYY-MM-DDTHH:MM:SS±HH:MM] <type> | <title>`). When `recent` is omitted or empty in `now.md`, `herdr-crew board` automatically populates the **Recent** box with the 5 newest entries from `log.md`.
+
+### Interactive wiki board views
+
+When `herdr-crew board` opens a `.md` wiki board (`now.md`), it renders a top tab bar with three live-reloading views (**Status**, **Index**, and **Log**):
+
+- **`1` / `2` / `3`**, **`Tab` / `Shift+Tab`**, or **`←` / `→`** — switch between **[1] Status**, **[2] Index**, and **[3] Log**
+- **`↑` / `↓`** or **`j` / `k`** — select an entry in **Index**, or scroll in **Log** and page previews
+- **`Enter`** — open a scrollable full-page Markdown preview of the selected entry in **Index**
+- **`PgUp` / `PgDn`** — scroll by page in **Log** and page previews
+- **`Esc` / `Backspace`** — close the open page preview in **Index** (`Esc` quits when no preview is open)
+- **`r`** — force reload; **`q` / `Ctrl-C`** — quit
+
+External edits to `now.md`, `index.md`, `log.md`, or the currently open preview page refresh automatically. `herdr-crew board --once` draws the **Status** view once to stdout.
+
+### CLI progressive disclosure and lint
+
+Agents and operators can query and validate operational memory progressively without loading every page into context:
+
+```sh
+herdr-crew mem path                  # print <memory_dir>
+herdr-crew mem init                  # create/refresh SCHEMA.md and seed missing files
+herdr-crew mem lint                  # validate now.md, index.md orphans, [[wikilinks]], and log.md
+herdr-crew mem index                 # Layer 1: print index.md catalog
+herdr-crew mem timeline --limit 5    # Layer 2: print newest log.md entries
+herdr-crew mem search "frontmatter"  # search across pages (skips SCHEMA.md)
+herdr-crew mem show tasks/issue-36   # Layer 3: print a single page safely
+```
+
+### Zero-daemon `stdio` MCP server (`herdr-crew mem mcp`)
+
+`herdr-crew mem mcp` exposes the project's operational memory over newline-delimited JSON-RPC 2.0 on `stdio` with no background daemon:
+
+- **`mem_search`** *(read)* — case-insensitive search across operational memory pages (skipping `SCHEMA.md`)
+- **`mem_timeline`** *(read)* — read newest `log.md` entries, or entries centered around an `around` match
+- **`mem_get`** *(read)* — read a single page safely (rejects path traversal and symlinks)
+- **`mem_status_update`** *(write)* — validates against the board schema and atomically rewrites `now.md` (preserving the Markdown body when `focus` is omitted; never mutates `now.md` on validation failure)
+- **`mem_upsert`** *(write)* — atomically creates or updates a page under `tasks/`, `decisions/`, or `notes/`, idempotently updates `index.md`, optionally prepends a timestamped entry to `log.md`, and runs `mem lint`
+
+Pass `--read-only` for worker or reviewer roles: it advertises and allows only the three read tools (`mem_search`, `mem_timeline`, `mem_get`), rejects write calls, and never creates or modifies files on startup.
+
+Example MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "herdr-crew-memory": {
+      "command": "herdr-crew",
+      "args": ["--root", "/path/to/repo", "mem", "mcp"]
+    }
+  }
+}
+```
+
+For read-only access, append `"--read-only"` to `"args"`:
+
+```json
+{
+  "mcpServers": {
+    "herdr-crew-memory": {
+      "command": "herdr-crew",
+      "args": ["--root", "/path/to/repo", "mem", "mcp", "--read-only"]
+    }
+  }
+}
+```
+
+### Migrating from `.herdr/status.json`
+
+1. Add `[memory]` with `mode = "wiki"` to `.herdr/crew.toml` (`{{STATUS}}` and `{{SCHEMA}}` automatically switch to `<memory_dir>/now.md` and `<memory_dir>/SCHEMA.md`).
+2. Run `herdr-crew mem init`, restart the board tab (`q` then `herdr-crew up`) so the board watches `<memory_dir>/now.md`, and optionally remove the old unversioned `.herdr/status.json`, `.herdr/status.json.tmp`, and `.herdr/status.schema.json`.
+3. Already-running agent sessions keep the prompt and `--add-dir` flags they started with; restart those sessions (or connect `herdr-crew mem mcp`) so they pick up the out-of-repo memory directory.
 
 ## Development
 

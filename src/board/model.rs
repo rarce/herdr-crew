@@ -1,9 +1,11 @@
 //! `status.json`: types, validation, order and age (design §5.1 and §5.2). Pure.
 
 use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
+use crate::board::frontmatter;
 use crate::config::Config;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -114,6 +116,42 @@ struct RawRecent {
 pub fn load(bytes: &[u8], c: &Config) -> Result<Status, Unavailable> {
     let value: Value =
         serde_json::from_slice(bytes).map_err(|e| Unavailable::Json(e.to_string()))?;
+    load_value(value, c)
+}
+
+/// Reads and validates a Markdown `now.md` board (YAML frontmatter) against the configuration.
+/// When `recent` is absent or empty in frontmatter and `log_bytes` is provided, populates up to
+/// 5 newest entries from structured `log.md` headers.
+pub fn load_markdown(
+    now_bytes: &[u8],
+    log_bytes: Option<&[u8]>,
+    c: &Config,
+    tz: &TimeZone,
+) -> Result<Status, Unavailable> {
+    let text = std::str::from_utf8(now_bytes)
+        .map_err(|e| Unavailable::Schema(vec![format!("frontmatter: invalid UTF-8: {e}")]))?;
+    let (value, _) = frontmatter::parse_frontmatter(text)
+        .map_err(|e| Unavailable::Schema(vec![format!("frontmatter: {e}")]))?;
+    let mut status = load_value(value, c)?;
+    if status.recent.is_empty()
+        && let Some(log_bytes) = log_bytes
+        && let Ok(log_text) = std::str::from_utf8(log_bytes)
+    {
+        let mut entries = crate::memory::parse_log_entries(log_text, tz);
+        entries.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.line.cmp(&b.line)));
+        status.recent = entries
+            .into_iter()
+            .take(5)
+            .map(|entry| Recent {
+                at: entry.at,
+                text: format!("[{}] {}", entry.kind, entry.title),
+            })
+            .collect();
+    }
+    Ok(status)
+}
+
+fn load_value(value: Value, c: &Config) -> Result<Status, Unavailable> {
     let raw: RawStatus = serde_json::from_value(value)
         .map_err(|e| Unavailable::Schema(vec![format!("(root): {e}")]))?;
     let mut errors = Vec::new();
@@ -471,6 +509,118 @@ pub(crate) mod tests {
         // Exactly 32 lowercase characters is accepted.
         let max_len = "a".repeat(32);
         assert!(load(with_sessions_for("agy-lead", &[&max_len]).as_bytes(), &c).is_ok());
+    }
+
+    #[test]
+    fn load_markdown_validates_frontmatter_and_falls_back_to_log_md() {
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+        let agy = agy_tree_config();
+        let now_md = "\
+---
+version: 1
+updatedAt: 2026-11-26T02:24:54-03:00
+updatedBy: agy-lead
+sessions:
+  - role: dev
+    state: working
+    now: Implementing memory module
+    next:
+      - Run cargo test
+  - role: agy-lead
+    state: working
+    now: Coordinating POC
+    next: []
+owner:
+  urgent: []
+  beforeMain: [\"Review POC\"]
+  optional: []
+---
+# Current Focus
+";
+        let log_md = "\
+# Log
+
+## [2026-11-26 01:00] init | Seeded operational memory
+Details.
+
+## [2026-11-26 01:30] task | Started frontmatter parser
+
+## [2026-11-26 02:00] review | Reviewed schema
+
+## [2026-11-26 02:10] fix | Fixed parser edge case
+
+## [2026-11-26 02:15] test | Ran unit tests
+
+## [2026-11-26T02:20:00-03:00] merge | Merged PR #35
+";
+        let status = load_markdown(now_md.as_bytes(), Some(log_md.as_bytes()), &agy, &tz).unwrap();
+        let roles: Vec<_> = status.sessions.iter().map(|s| s.role.as_str()).collect();
+        assert_eq!(roles, ["agy-lead", "dev"]);
+        assert_eq!(status.owner.before_main, ["Review POC"]);
+        assert_eq!(status.recent.len(), 5);
+        assert_eq!(status.recent[0].text, "[merge] Merged PR #35");
+        assert_eq!(status.recent[4].text, "[task] Started frontmatter parser");
+
+        // Equal timestamps keep the top (prepended) entry first in Recent.
+        let tied_log = "\
+# Log
+
+## [2026-11-26T02:20:00-03:00] task | Prepended newer entry
+
+## [2026-11-26T02:20:00-03:00] init | Older same-second entry
+";
+        let tied = load_markdown(now_md.as_bytes(), Some(tied_log.as_bytes()), &agy, &tz).unwrap();
+        assert_eq!(tied.recent.len(), 2);
+        assert_eq!(tied.recent[0].text, "[task] Prepended newer entry");
+        assert_eq!(tied.recent[1].text, "[init] Older same-second entry");
+
+        // Normal (non-tree) mode validates configured roles and rejects unknown workers.
+        let basic_cfg = basic();
+        let basic_now = "\
+---
+version: 1
+updatedAt: 2026-11-26T02:24:54-03:00
+updatedBy: acme-lead
+sessions:
+  - role: acme-dev
+    state: working
+    now: Building feature
+    next: []
+  - role: acme-lead
+    state: idle
+    now: idle
+    next: []
+owner:
+  urgent: []
+  beforeMain: []
+  optional: []
+---
+";
+        let s = load_markdown(basic_now.as_bytes(), None, &basic_cfg, &tz).unwrap();
+        let roles: Vec<_> = s.sessions.iter().map(|s| s.role.as_str()).collect();
+        assert_eq!(roles, ["acme-lead", "acme-dev"]);
+
+        // Invalid worker role, unknown field, and missing frontmatter are rejected.
+        let bad_worker = now_md.replace("role: dev", "role: BadWorker");
+        let Err(Unavailable::Schema(errs)) = load_markdown(bad_worker.as_bytes(), None, &agy, &tz)
+        else {
+            panic!("expected schema error");
+        };
+        assert!(errs[0].contains("must be the coordinator role or a valid worker name"));
+
+        let unknown_field = now_md.replace("version: 1", "version: 1\nextraField: true");
+        let Err(Unavailable::Schema(errs)) =
+            load_markdown(unknown_field.as_bytes(), None, &agy, &tz)
+        else {
+            panic!("expected schema error");
+        };
+        assert!(errs[0].contains("unknown field `extraField`"));
+
+        let Err(Unavailable::Schema(errs)) = load_markdown(b"# No frontmatter", None, &agy, &tz)
+        else {
+            panic!("expected frontmatter error");
+        };
+        assert!(errs[0].contains("frontmatter: line 1"));
     }
 
     #[test]

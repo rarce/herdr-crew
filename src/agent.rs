@@ -55,6 +55,19 @@ impl AgentOptions {
             Self::Agy(_) => Kind::Agy,
         }
     }
+
+    /// Appends an extra runtime `--add-dir` directory (e.g. out-of-repo operational memory) for
+    /// agents that support it (`claude`, `codex`, `agy`), without mutating `crew.toml` or
+    /// duplicating an already-configured path.
+    pub fn with_extra_dir(mut self, dir: PathBuf) -> Self {
+        match &mut self {
+            Self::Claude(o) => o.add_extra_dir(dir),
+            Self::Codex(o) => o.add_extra_dir(dir),
+            Self::Agy(o) => o.add_extra_dir(dir),
+            Self::Pi(_) => {}
+        }
+        self
+    }
 }
 
 /// Claude Code's model selection: `--model`, `--effort` and `--fallback-model`.
@@ -64,6 +77,8 @@ pub struct ClaudeOptions {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub fallback_model: Option<String>,
+    #[serde(skip)]
+    pub extra_dirs: Vec<PathBuf>,
 }
 
 pub const CLAUDE_KEYS: &[&str] = &["model", "effort", "fallback_model"];
@@ -87,6 +102,31 @@ fn plain_value_problem(key: &str, value: &str) -> Option<String> {
     })
 }
 
+fn same_dir(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+fn resolve_extra_dirs(extra_dirs: &mut Vec<PathBuf>, additional_dirs: Option<&[PathBuf]>) {
+    let existing = additional_dirs.unwrap_or(&[]);
+    let mut deduped: Vec<PathBuf> = Vec::with_capacity(extra_dirs.len());
+    for dir in std::mem::take(extra_dirs) {
+        let resolved = dir.canonicalize().unwrap_or(dir);
+        if existing.iter().any(|d| same_dir(d, &resolved))
+            || deduped.iter().any(|d| same_dir(d, &resolved))
+        {
+            continue;
+        }
+        deduped.push(resolved);
+    }
+    *extra_dirs = deduped;
+}
+
 impl ClaudeOptions {
     pub fn inherit(&self, defaults: &Self) -> Self {
         Self {
@@ -96,6 +136,17 @@ impl ClaudeOptions {
                 .fallback_model
                 .clone()
                 .or_else(|| defaults.fallback_model.clone()),
+            extra_dirs: self.extra_dirs.clone(),
+        }
+    }
+
+    pub fn add_extra_dir(&mut self, dir: PathBuf) {
+        if !self
+            .extra_dirs
+            .iter()
+            .any(|existing| same_dir(existing, &dir))
+        {
+            self.extra_dirs.push(dir);
         }
     }
 
@@ -133,6 +184,13 @@ impl ClaudeOptions {
                 args.extend([flag.to_string(), value.clone()]);
             }
         }
+        let mut seen: Vec<&Path> = Vec::new();
+        for dir in &self.extra_dirs {
+            if !seen.iter().any(|existing| same_dir(existing, dir)) {
+                seen.push(dir);
+                args.extend(["--add-dir".into(), dir.display().to_string()]);
+            }
+        }
         args
     }
 }
@@ -147,6 +205,8 @@ pub struct CodexOptions {
     pub approval_policy: Option<String>,
     pub search: Option<String>,
     pub additional_dirs: Option<Vec<PathBuf>>,
+    #[serde(skip)]
+    pub extra_dirs: Vec<PathBuf>,
 }
 
 pub const CODEX_KEYS: &[&str] = &[
@@ -178,6 +238,20 @@ impl CodexOptions {
                 .additional_dirs
                 .clone()
                 .or_else(|| defaults.additional_dirs.clone()),
+            extra_dirs: self.extra_dirs.clone(),
+        }
+    }
+
+    pub fn add_extra_dir(&mut self, dir: PathBuf) {
+        let already = self
+            .additional_dirs
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .chain(self.extra_dirs.iter())
+            .any(|existing| same_dir(existing, &dir));
+        if !already {
+            self.extra_dirs.push(dir);
         }
     }
 
@@ -254,6 +328,7 @@ impl CodexOptions {
                 }
             }
         }
+        resolve_extra_dirs(&mut self.extra_dirs, self.additional_dirs.as_deref());
         Ok(())
     }
 
@@ -286,6 +361,14 @@ impl CodexOptions {
                     serde_json::to_string(dirs).unwrap()
                 ),
             ]);
+        }
+        let configured = self.additional_dirs.as_deref().unwrap_or(&[]);
+        let mut seen: Vec<&Path> = configured.iter().map(PathBuf::as_path).collect();
+        for dir in &self.extra_dirs {
+            if !seen.iter().any(|existing| same_dir(existing, dir)) {
+                seen.push(dir);
+                args.extend(["--add-dir".into(), dir.display().to_string()]);
+            }
         }
         args
     }
@@ -368,6 +451,8 @@ pub struct AgyOptions {
     pub mode: Option<String>,
     pub sandbox: Option<bool>,
     pub additional_dirs: Option<Vec<PathBuf>>,
+    #[serde(skip)]
+    pub extra_dirs: Vec<PathBuf>,
 }
 
 pub const AGY_KEYS: &[&str] = &["model", "effort", "mode", "sandbox", "additional_dirs"];
@@ -383,6 +468,20 @@ impl AgyOptions {
                 .additional_dirs
                 .clone()
                 .or_else(|| defaults.additional_dirs.clone()),
+            extra_dirs: self.extra_dirs.clone(),
+        }
+    }
+
+    pub fn add_extra_dir(&mut self, dir: PathBuf) {
+        let already = self
+            .additional_dirs
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .chain(self.extra_dirs.iter())
+            .any(|existing| same_dir(existing, &dir));
+        if !already {
+            self.extra_dirs.push(dir);
         }
     }
 
@@ -461,6 +560,7 @@ impl AgyOptions {
                 }
             }
         }
+        resolve_extra_dirs(&mut self.extra_dirs, self.additional_dirs.as_deref());
         Ok(())
     }
 
@@ -479,8 +579,18 @@ impl AgyOptions {
         if self.sandbox == Some(true) {
             args.push("--sandbox".into());
         }
+        let mut seen: Vec<&Path> = Vec::new();
         if let Some(dirs) = &self.additional_dirs {
             for dir in dirs {
+                if !seen.iter().any(|existing| same_dir(existing, dir)) {
+                    seen.push(dir);
+                    args.extend(["--add-dir".into(), dir.display().to_string()]);
+                }
+            }
+        }
+        for dir in &self.extra_dirs {
+            if !seen.iter().any(|existing| same_dir(existing, dir)) {
+                seen.push(dir);
                 args.extend(["--add-dir".into(), dir.display().to_string()]);
             }
         }
@@ -598,9 +708,93 @@ mod tests {
             model: Some("--dangerously-skip-permissions".into()),
             effort: Some("ultra".into()),
             fallback_model: Some("opus,".into()),
+            ..Default::default()
         };
         assert_eq!(bad.problems().len(), 3);
         assert!(ClaudeOptions::default().args().is_empty());
+    }
+
+    #[test]
+    fn extra_dir_appends_add_dir_without_duplication_for_claude_codex_and_agy() {
+        let mem = PathBuf::from("/tmp/mem-store");
+        let claude = AgentOptions::Claude(ClaudeOptions::default())
+            .with_extra_dir(mem.clone())
+            .with_extra_dir(mem.clone());
+        let AgentOptions::Claude(c) = claude else {
+            panic!();
+        };
+        assert_eq!(c.args(), ["--add-dir", "/tmp/mem-store"]);
+
+        let codex = AgentOptions::Codex(CodexOptions {
+            additional_dirs: Some(vec![mem.clone()]),
+            ..Default::default()
+        })
+        .with_extra_dir(mem.clone());
+        let AgentOptions::Codex(cx) = codex else {
+            panic!();
+        };
+        assert!(!cx.args().contains(&"--add-dir".to_string()));
+
+        let codex_new = AgentOptions::Codex(CodexOptions::default()).with_extra_dir(mem.clone());
+        let AgentOptions::Codex(cx2) = codex_new else {
+            panic!();
+        };
+        assert_eq!(cx2.args(), ["--no-daemon", "--add-dir", "/tmp/mem-store"]);
+
+        let agy = AgentOptions::Agy(AgyOptions {
+            additional_dirs: Some(vec![mem.clone()]),
+            ..Default::default()
+        })
+        .with_extra_dir(mem.clone());
+        let AgentOptions::Agy(a) = agy else {
+            panic!();
+        };
+        assert_eq!(a.args(), ["--add-dir", "/tmp/mem-store"]);
+    }
+
+    #[test]
+    fn resolve_dirs_and_args_deduplicate_canonical_and_relative_extra_dirs() {
+        let root = PathBuf::from(format!("/tmp/crew-agent-dedup-{}", std::process::id()));
+        let sub = root.join("mem");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&sub).unwrap();
+        let canonical_sub = sub.canonicalize().unwrap();
+
+        let mut claude = ClaudeOptions::default();
+        claude.add_extra_dir(sub.clone());
+        claude.add_extra_dir(canonical_sub.clone());
+        assert_eq!(
+            claude
+                .args()
+                .iter()
+                .filter(|arg| arg.as_str() == "--add-dir")
+                .count(),
+            1
+        );
+
+        let mut codex = CodexOptions {
+            additional_dirs: Some(vec![PathBuf::from("mem")]),
+            ..Default::default()
+        };
+        codex.add_extra_dir(sub.clone());
+        codex.resolve_dirs(&root).unwrap();
+        assert!(!codex.args().contains(&"--add-dir".to_string()));
+
+        let mut agy = AgyOptions {
+            additional_dirs: Some(vec![PathBuf::from("mem")]),
+            ..Default::default()
+        };
+        agy.add_extra_dir(sub.clone());
+        agy.resolve_dirs(&root).unwrap();
+        assert_eq!(
+            agy.args()
+                .iter()
+                .filter(|arg| arg.as_str() == "--add-dir")
+                .count(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

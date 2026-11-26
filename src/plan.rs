@@ -598,7 +598,7 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
                         content: prompt::render(c, &r.name, &e.binary),
                     });
                     p.steps.push(Step::ResumeAgent {
-                        agent: r.agent(),
+                        agent: role_agent(c, &r.name),
                         name: r.name.clone(),
                         pane: pane.id.clone(),
                         prompt: path,
@@ -731,18 +731,20 @@ pub fn plan(c: &Config, s: &HerdrState, e: &Env) -> Plan {
         agent_steps(c, e, &mut p.steps, name);
     }
 
-    let schema = schema::generate(c);
-    if e.current_schema.as_deref() != Some(schema.as_str()) {
-        p.steps.push(Step::WriteSchema {
-            path: c.root.join(prompt::SCHEMA_FILE),
-            content: schema,
-        });
-    }
-    if !e.status_exists {
-        p.steps.push(Step::SeedStatus {
-            path: c.board_path(),
-            content: schema::seed(c, &e.now),
-        });
+    if !c.uses_wiki_memory() {
+        let schema = schema::generate(c);
+        if e.current_schema.as_deref() != Some(schema.as_str()) {
+            p.steps.push(Step::WriteSchema {
+                path: c.root.join(prompt::SCHEMA_FILE),
+                content: schema,
+            });
+        }
+        if !e.status_exists {
+            p.steps.push(Step::SeedStatus {
+                path: c.board_path(),
+                content: schema::seed(c, &e.now),
+            });
+        }
     }
     let command = board_command(c, e);
     match board_tab {
@@ -830,6 +832,15 @@ fn tab_steps(
     }
 }
 
+fn role_agent(c: &Config, name: &str) -> AgentOptions {
+    let agent = c.session_role(name).unwrap().agent();
+    if c.uses_wiki_memory() {
+        agent.with_extra_dir(c.memory_dir())
+    } else {
+        agent
+    }
+}
+
 fn agent_steps(c: &Config, e: &Env, steps: &mut Vec<Step>, name: &str) {
     let path = prompt::prompt_path(c, name);
     steps.push(Step::WritePrompt {
@@ -845,7 +856,7 @@ fn agent_steps(c: &Config, e: &Env, steps: &mut Vec<Step>, name: &str) {
             new_tab: true,
         },
         None => Step::StartAgent {
-            agent: c.session_role(name).unwrap().agent(),
+            agent: role_agent(c, name),
             name: name.to_string(),
             pane,
             prompt: path,
@@ -858,7 +869,7 @@ fn agent_steps(c: &Config, e: &Env, steps: &mut Vec<Step>, name: &str) {
 pub fn board_command(c: &Config, e: &Env) -> String {
     let bin = e.binary.display().to_string();
     let root = c.root.display().to_string();
-    let file = c.board_path().display().to_string();
+    let file = c.effective_board_path().display().to_string();
     let q = |s: &str| shell_quote(s, e.windows);
     format!(
         "{} board --root {} --file {}",
@@ -2059,5 +2070,58 @@ mod tests {
         assert_eq!(shell_quote("it's", true), "'it''s'");
         assert_eq!(shell_program(r"C:\crew.exe", true), r"& 'C:\crew.exe'");
         assert_eq!(shell_program("/crew", false), "'/crew'");
+    }
+
+    #[test]
+    fn wiki_memory_plan_skips_repo_status_files_adds_dir_and_targets_now_md() {
+        let mut c = basic();
+        c.memory.mode = crate::config::MemoryMode::Wiki;
+        c.roles[0].kind = Kind::Claude;
+        c.roles[1].kind = Kind::Codex;
+        c.roles[2].kind = Kind::Agy;
+        c.roles[3].kind = Kind::Pi;
+        let mem_dir = c.memory_dir();
+        let mem_str = mem_dir.display().to_string();
+
+        let p = plan(
+            &c,
+            &HerdrState::default(),
+            &Env {
+                status_exists: false,
+                ..env()
+            },
+        );
+        assert!(
+            !p.steps
+                .iter()
+                .any(|s| matches!(s, Step::WriteSchema { .. } | Step::SeedStatus { .. })),
+            "wiki mode must not write .herdr/status.json or status.schema.json"
+        );
+        let cmd = board_command(&c, &env());
+        assert!(
+            cmd.contains(&mem_dir.join("now.md").display().to_string()),
+            "{cmd}"
+        );
+        for step in &p.steps {
+            if let Step::StartAgent { name, agent, .. } = step {
+                match agent {
+                    AgentOptions::Claude(o) => {
+                        assert!(o.args().contains(&"--add-dir".into()), "{name}");
+                        assert!(o.args().contains(&mem_str), "{name}");
+                    }
+                    AgentOptions::Codex(o) => {
+                        assert!(o.args().contains(&"--add-dir".into()), "{name}");
+                        assert!(o.args().contains(&mem_str), "{name}");
+                    }
+                    AgentOptions::Agy(o) => {
+                        assert!(o.args().contains(&"--add-dir".into()), "{name}");
+                        assert!(o.args().contains(&mem_str), "{name}");
+                    }
+                    AgentOptions::Pi(o) => {
+                        assert!(!o.args().contains(&"--add-dir".into()), "{name}");
+                    }
+                }
+            }
+        }
     }
 }
