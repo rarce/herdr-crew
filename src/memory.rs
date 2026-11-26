@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use jiff::Timestamp;
 use jiff::civil::DateTime;
@@ -16,19 +17,13 @@ use serde_json::json;
 
 use crate::board::model::{self, Unavailable};
 use crate::config::Config;
+use crate::files;
 
 const SUBDIRS: [&str; 3] = ["tasks", "decisions", "notes"];
 const ROOT_MD_FILES: [&str; 3] = ["now.md", "index.md", "log.md"];
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 
-/// Deterministic FNV-1a 64-bit hash (zero extra crates).
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
-}
+static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn sanitize_slug(name: &str) -> String {
     let mut slug = String::new();
@@ -53,14 +48,28 @@ fn sanitize_slug(name: &str) -> String {
     }
 }
 
+fn resolve_explicit_base(explicit: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    if explicit.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(explicit);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        cwd.map(|base| base.join(path))
+    }
+}
+
 /// Resolves the base directory for all project operational memories:
-/// `CREW_MEMORY_DIR` -> `$XDG_DATA_HOME/herdr-crew/memory` (if absolute) ->
+/// `CREW_MEMORY_DIR` (resolved against cwd when relative) ->
+/// `$XDG_DATA_HOME/herdr-crew/memory` (if absolute) ->
 /// `$HOME/.local/share/herdr-crew/memory` -> `/tmp/herdr-crew-memory`.
 pub fn base_dir() -> PathBuf {
     if let Ok(explicit) = std::env::var("CREW_MEMORY_DIR")
-        && !explicit.is_empty()
+        && let Some(resolved) =
+            resolve_explicit_base(&explicit, std::env::current_dir().ok().as_deref())
     {
-        return PathBuf::from(explicit);
+        return resolved;
     }
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
         && !xdg.is_empty()
@@ -73,11 +82,14 @@ pub fn base_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME")
         && !home.is_empty()
     {
-        return PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("herdr-crew")
-            .join("memory");
+        let p = PathBuf::from(home);
+        if p.is_absolute() {
+            return p
+                .join(".local")
+                .join("share")
+                .join("herdr-crew")
+                .join("memory");
+        }
     }
     PathBuf::from("/tmp/herdr-crew-memory")
 }
@@ -90,7 +102,10 @@ pub fn memory_dir_with_base(root: &Path, base: &Path) -> PathBuf {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let slug = sanitize_slug(&folder);
-    let hex = format!("{:016x}", fnv1a64(canonical.to_string_lossy().as_bytes()));
+    let hex = format!(
+        "{:016x}",
+        files::fnv64(FNV_OFFSET_BASIS, canonical.to_string_lossy().as_bytes())
+    );
     base.join(format!("{slug}-{}", &hex[..8]))
 }
 
@@ -172,7 +187,8 @@ pub fn generate_schema(c: &Config, dir: &Path) -> String {
            - `updatedAt` (optional): RFC 3339 timestamp with offset\n\
          - `owner`: object with `urgent`, `beforeMain`, and `optional` lists of non-empty strings\n\
          - `recent` (optional): list of `{{ at, text }}` items; when omitted or empty, `herdr-crew board` \
-           automatically populates the 5 newest entries from `log.md`.\n\n\
+           automatically populates the 5 newest entries from `log.md`.\n\
+         - Quote YAML string values containing `: ` or starting with `[`, `{{`, `'`, or `\"`.\n\n\
          ## `log.md` Header Format\n\n\
          Append structured entries chronologically using either local minute precision or RFC 3339:\n\n\
          ```markdown\n\
@@ -201,7 +217,7 @@ pub fn generate_schema(c: &Config, dir: &Path) -> String {
     )
 }
 
-fn ensure_safe_dir(path: &Path) -> Result<(), String> {
+fn check_dir_not_symlink(path: &Path) -> Result<bool, String> {
     match fs::symlink_metadata(path) {
         Ok(meta) => {
             if meta.file_type().is_symlink() {
@@ -210,20 +226,59 @@ fn ensure_safe_dir(path: &Path) -> Result<(), String> {
             if !meta.is_dir() {
                 return Err(format!("{} exists and is not a directory", path.display()));
             }
-            Ok(())
+            Ok(true)
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(path)
-                .map_err(|err| format!("cannot create {}: {err}", path.display()))?;
-            let meta = fs::symlink_metadata(path)
-                .map_err(|err| format!("cannot inspect {}: {err}", path.display()))?;
-            if meta.file_type().is_symlink() || !meta.is_dir() {
-                return Err(format!("{} is not a real directory", path.display()));
-            }
-            Ok(())
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(format!("cannot inspect {}: {e}", path.display())),
     }
+}
+
+fn ensure_safe_dir(path: &Path) -> Result<(), String> {
+    if check_dir_not_symlink(path)? {
+        return Ok(());
+    }
+    fs::create_dir_all(path).map_err(|err| format!("cannot create {}: {err}", path.display()))?;
+    if !check_dir_not_symlink(path)? {
+        return Err(format!("{} is not a real directory", path.display()));
+    }
+    Ok(())
+}
+
+fn ensure_safe_subdir(dir: &Path, sub: &str) -> Result<(), String> {
+    if !check_dir_not_symlink(dir)? {
+        return Err(format!("{} does not exist", dir.display()));
+    }
+    let canonical_dir = dir
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", dir.display()))?;
+    let mut cursor = dir.to_path_buf();
+    for comp in Path::new(sub).components() {
+        let Component::Normal(part) = comp else {
+            return Err(format!("invalid memory subdirectory \"{sub}\""));
+        };
+        cursor.push(part);
+        if !check_dir_not_symlink(&cursor)? {
+            match fs::create_dir(&cursor) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(format!("cannot create {}: {e}", cursor.display())),
+            }
+            if !check_dir_not_symlink(&cursor)? {
+                return Err(format!("{} is not a real directory", cursor.display()));
+            }
+        }
+    }
+    let canonical_sub = cursor
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", cursor.display()))?;
+    if !canonical_sub.starts_with(&canonical_dir) {
+        return Err(format!(
+            "memory subdirectory {} escapes {}",
+            cursor.display(),
+            dir.display()
+        ));
+    }
+    Ok(())
 }
 
 fn check_not_symlink(path: &Path) -> Result<bool, String> {
@@ -254,13 +309,20 @@ fn atomic_write_file(path: &Path, content: &str) -> Result<(), String> {
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| format!("invalid file name {}", path.display()))?;
-    let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
-    let _ = fs::remove_file(&tmp);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .map_err(|e| format!("cannot create temporary file {}: {e}", tmp.display()))?;
+    let (tmp, mut file) = loop {
+        let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => break (tmp, file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!(
+                    "cannot create temporary file {}: {e}",
+                    tmp.display()
+                ));
+            }
+        }
+    };
     if let Err(e) = file
         .write_all(content.as_bytes())
         .and_then(|()| file.sync_all())
@@ -310,7 +372,7 @@ fn seed_log_md(c: &Config, now: &str) -> String {
 pub fn ensure_initialized(dir: &Path, c: &Config, now: &str) -> Result<InitResult, String> {
     ensure_safe_dir(dir)?;
     for sub in SUBDIRS {
-        ensure_safe_dir(&dir.join(sub))?;
+        ensure_safe_subdir(dir, sub)?;
     }
 
     let mut created_files = Vec::new();
@@ -423,7 +485,7 @@ fn parse_log_timestamp(raw: &str, tz: &TimeZone) -> Result<Timestamp, String> {
 /// Parses all valid structured `log.md` entries outside fenced code blocks.
 pub fn parse_log_entries(text: &str, tz: &TimeZone) -> Vec<LogEntry> {
     let mut entries = Vec::new();
-    let mut in_fence: Option<char> = None;
+    let mut in_fence: Option<(char, usize)> = None;
     for (idx, raw_line) in text.lines().enumerate() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         if update_fence(line, &mut in_fence) {
@@ -447,39 +509,96 @@ pub fn parse_log_entries(text: &str, tz: &TimeZone) -> Vec<LogEntry> {
     entries
 }
 
-fn update_fence(line: &str, in_fence: &mut Option<char>) -> bool {
+fn update_fence(line: &str, in_fence: &mut Option<(char, usize)>) -> bool {
     let trimmed = line.trim_start();
-    let marker = if trimmed.starts_with("```") {
-        Some('`')
-    } else if trimmed.starts_with("~~~") {
-        Some('~')
-    } else {
-        None
+    let first = match trimmed.as_bytes().first() {
+        Some(b'`') => '`',
+        Some(b'~') => '~',
+        _ => return false,
     };
-    match (marker, *in_fence) {
-        (Some(ch), None) => {
-            *in_fence = Some(ch);
+    let len = trimmed.bytes().take_while(|&b| b == first as u8).count();
+    if len < 3 {
+        return false;
+    }
+    let rest = &trimmed[len..];
+    match *in_fence {
+        None => {
+            if rest.contains(first) {
+                return false;
+            }
+            *in_fence = Some((first, len));
             true
         }
-        (Some(ch), Some(open)) if ch == open => {
-            *in_fence = None;
-            true
+        Some((open_ch, open_len)) => {
+            if first == open_ch && len >= open_len && rest.trim().is_empty() {
+                *in_fence = None;
+                true
+            } else {
+                false
+            }
         }
-        _ => false,
     }
 }
 
+/// Replaces inline Markdown code spans (`` `...` ``, ``` ``...`` ```, etc.) on a single line
+/// with spaces so example links inside code spans are ignored.
+fn strip_inline_code(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let mut n = 0;
+            while i + n < bytes.len() && bytes[i + n] == b'`' {
+                n += 1;
+            }
+            let mut search = i + n;
+            let mut matched = None;
+            while search < bytes.len() {
+                if bytes[search] == b'`' {
+                    let mut m = 0;
+                    while search + m < bytes.len() && bytes[search + m] == b'`' {
+                        m += 1;
+                    }
+                    if m == n {
+                        matched = Some(search + m);
+                        break;
+                    }
+                    search += m;
+                } else {
+                    search += 1;
+                }
+            }
+            if let Some(end) = matched {
+                out.push(' ');
+                i = end;
+            } else {
+                out.push_str(&line[i..i + n]);
+                i += n;
+            }
+        } else {
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'`' {
+                i += 1;
+            }
+            out.push_str(&line[start..i]);
+        }
+    }
+    out
+}
+
 /// Extracts `[[target]]` / `[[target|alias]]` wikilink targets with 1-based line numbers,
-/// ignoring fenced code blocks.
+/// ignoring fenced code blocks and inline code spans.
 fn extract_wikilinks(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
-    let mut in_fence: Option<char> = None;
+    let mut in_fence: Option<(char, usize)> = None;
     for (idx, raw_line) in text.lines().enumerate() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         if update_fence(line, &mut in_fence) || in_fence.is_some() {
             continue;
         }
-        let mut rest = line;
+        let cleaned = strip_inline_code(line);
+        let mut rest = cleaned.as_str();
         while let Some(start) = rest.find("[[") {
             let after_open = &rest[start + 2..];
             let Some(end) = after_open.find("]]") else {
@@ -503,22 +622,86 @@ fn extract_wikilinks(text: &str) -> Vec<(usize, String)> {
     out
 }
 
-fn collect_subdir_markdown(dir: &Path, sub: &str, out: &mut Vec<String>) -> Result<(), String> {
+/// Extracts relative Markdown `[label](target)` link destinations (without `.md`), ignoring
+/// fenced code blocks, inline code spans, external URLs, and pure anchor links.
+fn extract_markdown_links(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut in_fence: Option<(char, usize)> = None;
+    for (idx, raw_line) in text.lines().enumerate() {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if update_fence(line, &mut in_fence) || in_fence.is_some() {
+            continue;
+        }
+        let cleaned = strip_inline_code(line);
+        let mut rest = cleaned.as_str();
+        while let Some(mid) = rest.find("](") {
+            let before = &rest[..mid];
+            let after = &rest[mid + 2..];
+            let Some(close) = after.find(')') else {
+                break;
+            };
+            let has_open_bracket = before
+                .rfind('[')
+                .is_some_and(|open| open == 0 || before.as_bytes()[open - 1] != b'!');
+            if has_open_bracket {
+                let raw_dest = after[..close].trim();
+                let dest = if let Some(inner) = raw_dest.strip_prefix('<') {
+                    inner.split('>').next().unwrap_or("")
+                } else {
+                    raw_dest.split_whitespace().next().unwrap_or("")
+                };
+                if !dest.is_empty()
+                    && !dest.starts_with('#')
+                    && !dest.contains("://")
+                    && !dest.starts_with("mailto:")
+                {
+                    let without_frag = dest
+                        .split('#')
+                        .next()
+                        .unwrap_or("")
+                        .split('?')
+                        .next()
+                        .unwrap_or("");
+                    let trimmed = without_frag.strip_prefix("./").unwrap_or(without_frag);
+                    let stem = trimmed.strip_suffix(".md").unwrap_or(trimmed);
+                    if !stem.is_empty() {
+                        out.push((idx + 1, stem.to_string()));
+                    }
+                }
+            }
+            rest = &after[close + 1..];
+        }
+    }
+    out
+}
+
+fn collect_subdir_markdown(
+    dir: &Path,
+    sub: &str,
+    out: &mut Vec<String>,
+    symlink_issues: Option<&mut Vec<String>>,
+) -> Result<(), String> {
     let base = dir.join(sub);
-    if !base.exists() {
-        return Ok(());
+    match fs::symlink_metadata(&base) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(format!("{} is not a real directory", base.display()));
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot inspect {}: {e}", base.display())),
     }
-    let meta = fs::symlink_metadata(&base)
-        .map_err(|e| format!("cannot inspect {}: {e}", base.display()))?;
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        return Err(format!("{} is not a real directory", base.display()));
-    }
-    collect_recursive(&base, Path::new(sub), out)?;
+    collect_recursive(&base, Path::new(sub), out, symlink_issues)?;
     out.sort();
     Ok(())
 }
 
-fn collect_recursive(abs: &Path, rel: &Path, out: &mut Vec<String>) -> Result<(), String> {
+fn collect_recursive(
+    abs: &Path,
+    rel: &Path,
+    out: &mut Vec<String>,
+    mut symlink_issues: Option<&mut Vec<String>>,
+) -> Result<(), String> {
     let mut entries: Vec<_> = fs::read_dir(abs)
         .map_err(|e| format!("cannot read {}: {e}", abs.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -528,12 +711,18 @@ fn collect_recursive(abs: &Path, rel: &Path, out: &mut Vec<String>) -> Result<()
         let path = entry.path();
         let meta = fs::symlink_metadata(&path)
             .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+        let child_rel = rel.join(entry.file_name());
         if meta.file_type().is_symlink() {
+            if let Some(issues) = symlink_issues.as_deref_mut() {
+                issues.push(format!(
+                    "refusing symlink in memory store: {}",
+                    child_rel.to_string_lossy().replace('\\', "/")
+                ));
+            }
             continue;
         }
-        let child_rel = rel.join(entry.file_name());
         if meta.is_dir() {
-            collect_recursive(&path, &child_rel, out)?;
+            collect_recursive(&path, &child_rel, out, symlink_issues.as_deref_mut())?;
         } else if meta.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
             out.push(child_rel.to_string_lossy().replace('\\', "/"));
         }
@@ -564,61 +753,112 @@ impl LintReport {
 pub fn lint(dir: &Path, c: &Config, tz: &TimeZone) -> LintReport {
     let mut report = LintReport::default();
 
+    match check_dir_not_symlink(dir) {
+        Ok(true) => {}
+        Ok(false) => {
+            report
+                .issues
+                .push(format!("memory directory {} is missing", dir.display()));
+            return report;
+        }
+        Err(e) => {
+            report.issues.push(e);
+            return report;
+        }
+    }
+    let canonical_dir = match dir.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            report.issues.push(format!(
+                "memory directory {} is unavailable: {e}",
+                dir.display()
+            ));
+            return report;
+        }
+    };
+
     let log_path = dir.join("log.md");
-    let log_bytes = fs::read(&log_path).ok();
+    let log_bytes = match check_not_symlink(&log_path) {
+        Ok(true) => match fs::read(&log_path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                report.issues.push(format!("log.md: cannot read: {e}"));
+                None
+            }
+        },
+        Ok(false) => None,
+        Err(e) => {
+            report.issues.push(format!("log.md: {e}"));
+            None
+        }
+    };
 
     // 1. Validate now.md frontmatter + schema.
     let now_path = dir.join("now.md");
-    match fs::read(&now_path) {
-        Ok(bytes) => {
-            if let Err(err) = model::load_markdown(&bytes, log_bytes.as_deref(), c, tz) {
-                match err {
-                    Unavailable::Missing => report.issues.push("now.md: missing".into()),
-                    Unavailable::Json(msg) => report.issues.push(format!("now.md: {msg}")),
-                    Unavailable::Schema(errs) => {
-                        for e in errs {
-                            report.issues.push(format!("now.md: {e}"));
+    match check_not_symlink(&now_path) {
+        Ok(true) => match fs::read(&now_path) {
+            Ok(bytes) => {
+                if let Err(err) = model::load_markdown(&bytes, log_bytes.as_deref(), c, tz) {
+                    match err {
+                        Unavailable::Missing => report.issues.push("now.md: missing".into()),
+                        Unavailable::Json(msg) => report.issues.push(format!("now.md: {msg}")),
+                        Unavailable::Schema(errs) => {
+                            for e in errs {
+                                report.issues.push(format!("now.md: {e}"));
+                            }
                         }
                     }
                 }
             }
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            report.issues.push("now.md: missing".into());
-        }
-        Err(e) => report.issues.push(format!("now.md: cannot read: {e}")),
+            Err(e) => report.issues.push(format!("now.md: cannot read: {e}")),
+        },
+        Ok(false) => report.issues.push("now.md: missing".into()),
+        Err(e) => report.issues.push(format!("now.md: {e}")),
     }
 
     // 2. Collect subdir pages and check index.md for orphans.
     let mut subdir_pages = Vec::new();
     for sub in SUBDIRS {
-        if let Err(e) = collect_subdir_markdown(dir, sub, &mut subdir_pages) {
+        if let Err(e) =
+            collect_subdir_markdown(dir, sub, &mut subdir_pages, Some(&mut report.issues))
+        {
             report.issues.push(e);
         }
     }
 
     let index_path = dir.join("index.md");
-    let index_text = match fs::read_to_string(&index_path) {
-        Ok(text) => Some(text),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+    let index_text = match check_not_symlink(&index_path) {
+        Ok(true) => match fs::read_to_string(&index_path) {
+            Ok(text) => Some(text),
+            Err(e) => {
+                report.issues.push(format!("index.md: cannot read: {e}"));
+                None
+            }
+        },
+        Ok(false) => {
             report.issues.push("index.md: missing".into());
             None
         }
         Err(e) => {
-            report.issues.push(format!("index.md: cannot read: {e}"));
+            report.issues.push(format!("index.md: {e}"));
             None
         }
     };
 
     if let Some(index) = &index_text {
-        let linked: BTreeSet<String> = extract_wikilinks(index)
+        let mut referenced: BTreeSet<String> = extract_wikilinks(index)
             .into_iter()
-            .map(|(_, t)| t.strip_suffix(".md").unwrap_or(&t).to_string())
+            .map(|(_, t)| {
+                let t = t.strip_prefix("./").unwrap_or(&t);
+                t.strip_suffix(".md").unwrap_or(t).to_string()
+            })
             .collect();
+        for (_, target) in extract_markdown_links(index) {
+            referenced.insert(target);
+        }
         for rel in &subdir_pages {
             let stem = rel.strip_suffix(".md").unwrap_or(rel);
-            let referenced = linked.contains(stem) || index.contains(rel) || index.contains(stem);
-            if !referenced {
+            if !referenced.contains(stem) {
                 report.issues.push(format!(
                     "index.md: orphan page not referenced in index.md: {rel}"
                 ));
@@ -629,7 +869,7 @@ pub fn lint(dir: &Path, c: &Config, tz: &TimeZone) -> LintReport {
     // 3. Scan all wikilinks across root markdown files + subdir pages.
     let mut all_pages: Vec<String> = Vec::new();
     for root_file in ROOT_MD_FILES {
-        if dir.join(root_file).is_file() {
+        if check_not_symlink(&dir.join(root_file)).unwrap_or(false) {
             all_pages.push(root_file.to_string());
         }
     }
@@ -643,19 +883,10 @@ pub fn lint(dir: &Path, c: &Config, tz: &TimeZone) -> LintReport {
         for (line_no, target) in extract_wikilinks(&text) {
             report.links_checked += 1;
             let normalized = target.strip_suffix(".md").unwrap_or(&target);
-            if !is_safe_relative_target(normalized) {
+            let target_rel = format!("{normalized}.md");
+            if let Err(why) = resolve_safe_page(dir, &canonical_dir, &target_rel) {
                 report.issues.push(format!(
-                    "{rel}:{line_no}: broken wikilink [[{target}]] (invalid path)"
-                ));
-                continue;
-            }
-            let resolved = dir.join(format!("{normalized}.md"));
-            let exists = fs::symlink_metadata(&resolved)
-                .map(|m| !m.file_type().is_symlink() && m.is_file())
-                .unwrap_or(false);
-            if !exists {
-                report.issues.push(format!(
-                    "{rel}:{line_no}: broken wikilink [[{target}]] (missing {normalized}.md)"
+                    "{rel}:{line_no}: broken wikilink [[{target}]] ({why})"
                 ));
             }
         }
@@ -665,7 +896,7 @@ pub fn lint(dir: &Path, c: &Config, tz: &TimeZone) -> LintReport {
     if let Some(bytes) = &log_bytes {
         match std::str::from_utf8(bytes) {
             Ok(text) => {
-                let mut in_fence: Option<char> = None;
+                let mut in_fence: Option<(char, usize)> = None;
                 for (idx, raw_line) in text.lines().enumerate() {
                     let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
                     if update_fence(line, &mut in_fence) || in_fence.is_some() {
@@ -703,6 +934,42 @@ fn is_safe_relative_target(target: &str) -> bool {
     has_normal
 }
 
+/// Validates and resolves `rel` strictly inside `dir` (walking every component to refuse
+/// intermediate or leaf symlinks, then checking `canonicalize().starts_with(canonical_dir)`).
+fn resolve_safe_page(dir: &Path, canonical_dir: &Path, rel: &str) -> Result<PathBuf, String> {
+    if !is_safe_relative_target(rel) {
+        return Err(format!(
+            "invalid memory page path \"{rel}\": must be a relative path inside the memory directory"
+        ));
+    }
+    let mut cursor = dir.to_path_buf();
+    for comp in Path::new(rel).components() {
+        cursor.push(comp);
+        let meta = fs::symlink_metadata(&cursor).map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                format!("missing {rel}")
+            } else {
+                format!("cannot inspect memory page \"{rel}\": {e}")
+            }
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("refusing symlink in memory page path \"{rel}\""));
+        }
+    }
+    let canonical_target = cursor
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve memory page \"{rel}\": {e}"))?;
+    if !canonical_target.starts_with(canonical_dir) {
+        return Err(format!(
+            "memory page \"{rel}\" escapes the memory directory"
+        ));
+    }
+    if !canonical_target.is_file() {
+        return Err(format!("memory page \"{rel}\" is not a regular file"));
+    }
+    Ok(canonical_target)
+}
+
 /// Layer 1 progressive disclosure: reads `index.md`.
 pub fn read_index(dir: &Path) -> Result<String, String> {
     show(dir, "index.md")
@@ -738,7 +1005,7 @@ pub fn search(dir: &Path, query: &str) -> Result<Vec<String>, String> {
         }
     }
     for sub in SUBDIRS {
-        collect_subdir_markdown(dir, sub, &mut pages)?;
+        collect_subdir_markdown(dir, sub, &mut pages, None)?;
     }
     let mut hits = Vec::new();
     for rel in pages {
@@ -767,30 +1034,13 @@ pub fn show(dir: &Path, page: &str) -> Result<String, String> {
     } else {
         format!("{page}.md")
     };
+    if !check_dir_not_symlink(dir)? {
+        return Err(format!("memory directory {} is unavailable", dir.display()));
+    }
     let canonical_dir = dir
         .canonicalize()
         .map_err(|e| format!("memory directory {} is unavailable: {e}", dir.display()))?;
-    // Check every path component inside `dir` for symlinks before reading.
-    let mut cursor = dir.to_path_buf();
-    for comp in Path::new(&rel).components() {
-        cursor.push(comp);
-        let meta = fs::symlink_metadata(&cursor)
-            .map_err(|e| format!("cannot read memory page \"{rel}\": {e}"))?;
-        if meta.file_type().is_symlink() {
-            return Err(format!("refusing symlink in memory page path \"{rel}\""));
-        }
-    }
-    let canonical_target = cursor
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve memory page \"{rel}\": {e}"))?;
-    if !canonical_target.starts_with(&canonical_dir) {
-        return Err(format!(
-            "memory page \"{rel}\" escapes the memory directory"
-        ));
-    }
-    if !canonical_target.is_file() {
-        return Err(format!("memory page \"{rel}\" is not a regular file"));
-    }
+    let canonical_target = resolve_safe_page(dir, &canonical_dir, &rel)?;
     fs::read_to_string(&canonical_target)
         .map_err(|e| format!("cannot read memory page \"{rel}\": {e}"))
 }
@@ -985,5 +1235,157 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_check_uses_exact_links_not_substring_matching() {
+        let dir = temp_dir("orphan");
+        let mem = dir.join("store");
+        let c = basic();
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00").unwrap();
+
+        fs::write(mem.join("tasks/auth-v2.md"), "# Auth v2\n").unwrap();
+        fs::write(mem.join("tasks/auth.md"), "# Auth\n").unwrap();
+        fs::write(mem.join("tasks/md-linked.md"), "# Linked via md\n").unwrap();
+        fs::write(
+            mem.join("index.md"),
+            "# Index\n- [[now]]\n- [[log]]\n- [[tasks/auth-v2]]\n- [MD](tasks/md-linked.md)\n",
+        )
+        .unwrap();
+
+        let report = lint(&mem, &c, &tz);
+        assert!(!report.is_ok(), "{:?}", report.issues);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.contains("orphan page") && i.ends_with("tasks/auth.md")),
+            "{:?}",
+            report.issues
+        );
+        assert!(
+            !report.issues.iter().any(|i| i.contains("auth-v2")),
+            "{:?}",
+            report.issues
+        );
+        assert!(
+            !report.issues.iter().any(|i| i.contains("md-linked")),
+            "{:?}",
+            report.issues
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inline_code_and_single_line_triple_backticks_do_not_corrupt_lint_or_logs() {
+        let dir = temp_dir("code-spans");
+        let mem = dir.join("store");
+        let c = basic();
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00").unwrap();
+
+        fs::write(
+            mem.join("tasks/doc.md"),
+            "# Doc\n\nUse `[[fake]]` and `` `[[also-fake]]` `` in prose.\n\n```foo```\n\nReal link: [[now]] and broken [[missing-after-inline]].\n",
+        )
+        .unwrap();
+        fs::write(
+            mem.join("index.md"),
+            "# Index\n- [[now]]\n- [[log]]\n- [[tasks/doc]]\n",
+        )
+        .unwrap();
+        fs::write(
+            mem.join("log.md"),
+            "# Log\n\n```foo```\n\n## [2026-11-26 02:10] task | After inline triple backticks\n\n````markdown\n```\n## [bad] still inside 4-backtick fence\n````\n",
+        )
+        .unwrap();
+
+        let report = lint(&mem, &c, &tz);
+        assert!(!report.is_ok());
+        assert!(
+            !report.issues.iter().any(|i| i.contains("fake")),
+            "{:?}",
+            report.issues
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.contains("broken wikilink [[missing-after-inline]]")),
+            "{:?}",
+            report.issues
+        );
+        assert_eq!(report.log_entries_checked, 1, "{:?}", report.issues);
+        let entries = parse_log_entries(&fs::read_to_string(mem.join("log.md")).unwrap(), &tz);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "After inline triple backticks");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_checks_reject_symlinked_root_files_and_intermediate_dirs_in_lint_and_show() {
+        let dir = temp_dir("symlinks");
+        let mem = dir.join("store");
+        let outside = dir.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.md"), "# Secret\n").unwrap();
+
+        let c = basic();
+        let tz = TimeZone::fixed(jiff::tz::offset(-3));
+        ensure_initialized(&mem, &c, "2026-11-26T02:00:00-03:00").unwrap();
+
+        std::os::unix::fs::symlink(&outside, mem.join("tasks/linkdir")).unwrap();
+        fs::write(
+            mem.join("index.md"),
+            "# Index\n- [[now]]\n- [[log]]\n- [[tasks/linkdir/secret]]\n",
+        )
+        .unwrap();
+
+        assert!(show(&mem, "tasks/linkdir/secret").is_err());
+        let report = lint(&mem, &c, &tz);
+        assert!(!report.is_ok());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.contains("[[tasks/linkdir/secret]]") && i.contains("symlink")),
+            "{:?}",
+            report.issues
+        );
+
+        // Symlinked root file (`index.md`) is also refused by lint.
+        let outside_index = outside.join("index.md");
+        fs::write(&outside_index, "# Outside\n").unwrap();
+        fs::remove_file(mem.join("index.md")).unwrap();
+        std::os::unix::fs::symlink(&outside_index, mem.join("index.md")).unwrap();
+        let root_report = lint(&mem, &c, &tz);
+        assert!(
+            root_report
+                .issues
+                .iter()
+                .any(|i| i.starts_with("index.md:") && i.contains("symlink")),
+            "{:?}",
+            root_report.issues
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relative_explicit_memory_dir_resolves_against_cwd() {
+        let cwd = Path::new("/work/repo");
+        assert_eq!(
+            resolve_explicit_base("relative/mem", Some(cwd)),
+            Some(PathBuf::from("/work/repo/relative/mem"))
+        );
+        assert_eq!(
+            resolve_explicit_base("/abs/mem", Some(cwd)),
+            Some(PathBuf::from("/abs/mem"))
+        );
+        assert_eq!(resolve_explicit_base("", Some(cwd)), None);
     }
 }

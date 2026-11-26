@@ -109,6 +109,24 @@ fn split_first_line(s: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Whether a `'` or `"` at `bytes[i]` starts a quoted token rather than appearing
+/// inside a plain scalar (such as an apostrophe in `Don't` or `dev's`).
+fn can_open_quote(bytes: &[u8], start: usize, i: usize, allow_dash: bool) -> bool {
+    let mut j = i;
+    while j > start && matches!(bytes[j - 1], b' ' | b'\t') {
+        j -= 1;
+    }
+    if j == start {
+        return true;
+    }
+    match bytes[j - 1] {
+        b'[' | b'{' | b',' => true,
+        b':' => j < i,
+        b'-' if allow_dash => j < i && (j - 1 == start || matches!(bytes[j - 2], b' ' | b'\t')),
+        _ => false,
+    }
+}
+
 /// Removes an unquoted `# ...` comment from a YAML line.
 fn strip_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
@@ -135,8 +153,8 @@ fn strip_comment(line: &str) -> &str {
             }
         } else {
             match b {
-                b'"' => in_double = true,
-                b'\'' => in_single = true,
+                b'"' if can_open_quote(bytes, 0, i, true) => in_double = true,
+                b'\'' if can_open_quote(bytes, 0, i, true) => in_single = true,
                 b'#' if i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t' => {
                     return &line[..i];
                 }
@@ -436,8 +454,8 @@ fn split_flow_items(line_no: usize, text: &str) -> Result<Vec<&str>, String> {
             }
         } else {
             match b {
-                b'"' => in_double = true,
-                b'\'' => in_single = true,
+                b'"' if can_open_quote(bytes, start, i, false) => in_double = true,
+                b'\'' if can_open_quote(bytes, start, i, false) => in_single = true,
                 b'[' => depth_bracket += 1,
                 b']' => {
                     if depth_bracket == 0 {
@@ -670,5 +688,31 @@ Body content here.
         assert!(err.contains("line 3") && err.contains("duplicate"), "{err}");
         let err = parse_frontmatter("---\nnot a mapping\n---\n").unwrap_err();
         assert!(err.contains("line 2"), "{err}");
+    }
+
+    #[test]
+    fn handles_mid_word_apostrophes_in_plain_scalars_and_flow_lists() {
+        let md = "\
+---
+now: Don't merge yet # pending review
+next: [Review dev's commit, Run tests]
+quoted: \"Don't # keep\" # strip trailing
+nested: {a: \"x, y\", b: Don't stop, c: 'dev''s, item'}
+---
+";
+        let (val, _) = parse_frontmatter(md).unwrap();
+        assert_eq!(
+            val,
+            json!({
+                "now": "Don't merge yet",
+                "next": ["Review dev's commit", "Run tests"],
+                "quoted": "Don't # keep",
+                "nested": {
+                    "a": "x, y",
+                    "b": "Don't stop",
+                    "c": "dev's, item"
+                }
+            })
+        );
     }
 }
