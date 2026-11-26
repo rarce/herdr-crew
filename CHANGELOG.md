@@ -10,6 +10,40 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-25
+
+### Added
+
+- First-class single-coordinator native tree mode for Antigravity CLI (`agy_tree = true`,
+  keeping `experimental_agy_tree = true` as a backward-compatible alias):
+  - Multi-role `agy` presets (`review`, `parallel`, `research`) in `herdr-crew init` and
+    first-time `herdr-crew up` automatically configure `agy_tree = true` with a single
+    coordinator tab (`<name>-lead`) and native subagent manifests (`invoke_subagent`,
+    `send_message`, `manage_subagents`), requiring no `[worktrees]` section or Git remote.
+  - `review` offers native isolation (`Workspace: "share"` by default, or `Workspace: "inherit"`
+    via `--shared-checkout`), `parallel` defaults implementers to `Workspace: "share"`, and
+    `Models` customizes `<name>-lead`. Existing or manually authored multi-tab `agy` configs
+    remain supported at runtime.
+- First-class native tree mode and topology choice for Codex (`codex_tree = true`, keeping
+  `experimental_codex_tree = true` as a backward-compatible alias):
+  - Multi-role Codex presets (`review`, `parallel`, `research`) in `herdr-crew init` and
+    first-time `herdr-crew up` offer a `Topology` step (TUI and `--no-tui`) and
+    `--topology tabs|tree`, defaulting to `tabs`.
+  - Selecting `tree` emits `codex_tree = true` with a single `<name>-lead` coordinator and
+    native worker manifests (`spawn_agent`, `followup_task`, `list_agents`) sharing the
+    coordinator's checkout without `[worktrees]` or a Git remote (requires
+    `features.multi_agent_v2 = true` in Codex).
+- Worker-aware status board in tree mode (`agy_tree` and `codex_tree`): `.herdr/status.schema.json`
+  and `herdr-crew board` now accept native subagent worker names (`[a-z][a-z0-9_-]{0,31}`) in
+  `sessions[]` alongside the coordinator, ordering the coordinator first followed by workers in
+  listed order without widening Herdr tab detection.
+
+### Changed
+
+- `herdr-crew config` refuses changing the coordinator's agent away from `agy` or `codex` while
+  `agy_tree` or `codex_tree` is active, and `init`/`up` reject `--base` with tree-mode crews and
+  `--topology tabs` with multi-role `agy`.
+
 ## [0.10.0] - 2026-11-25
 
 ### Added
@@ -325,7 +359,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/rarce/herdr-crew/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rarce/herdr-crew/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/rarce/herdr-crew/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/rarce/herdr-crew/compare/v0.7.1...v0.8.0
