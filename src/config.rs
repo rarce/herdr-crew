@@ -51,6 +51,7 @@ pub struct Config {
     pub agy: AgyOptions,
     pub label: String,
     pub board: Board,
+    pub memory: Memory,
     pub worktrees: Option<Worktrees>,
     /// Appended to every role's prompt.
     pub common_prompt: Option<String>,
@@ -65,6 +66,18 @@ pub struct Board {
     /// Relative to the root.
     pub file: String,
     pub writer: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MemoryMode {
+    #[default]
+    Json,
+    Wiki,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Memory {
+    pub mode: MemoryMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +139,8 @@ struct RawConfig {
     version: i64,
     workspace: RawWorkspace,
     board: RawBoard,
+    #[serde(default)]
+    memory: RawMemory,
     worktrees: Option<RawWorktrees>,
     common_prompt: Option<String>,
     start_message: Option<String>,
@@ -145,6 +160,12 @@ struct RawBoard {
     tab: String,
     file: Option<String>,
     writer: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMemory {
+    mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -185,6 +206,7 @@ const ROOT_KEYS: &[&str] = &[
     "agy",
     "workspace",
     "board",
+    "memory",
     "worktrees",
     "common_prompt",
     "start_message",
@@ -197,6 +219,7 @@ const TABLE_KEYS: &[(&str, &[&str])] = &[
     ("agy", AGY_KEYS),
     ("workspace", &["label"]),
     ("board", &["tab", "file", "writer"]),
+    ("memory", &["mode"]),
     ("worktrees", &["dir", "base"]),
 ];
 const ROLE_KEYS: &[&str] = &[
@@ -471,6 +494,17 @@ impl Config {
             }
         }
 
+        let memory_mode = match raw.memory.mode.as_deref() {
+            None | Some("json") => MemoryMode::Json,
+            Some("wiki") => MemoryMode::Wiki,
+            Some(other) => {
+                errors.push(at(
+                    None,
+                    format!("memory.mode \"{other}\": expected \"json\" or \"wiki\""),
+                ));
+                MemoryMode::Json
+            }
+        };
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -492,6 +526,7 @@ impl Config {
                     .unwrap_or_else(|| DEFAULT_BOARD_FILE.to_string()),
                 writer: raw.board.writer,
             },
+            memory: Memory { mode: memory_mode },
             worktrees,
             common_prompt: raw.common_prompt,
             start_message: raw.start_message,
@@ -565,6 +600,23 @@ impl Config {
 
     pub fn board_path(&self) -> PathBuf {
         self.root.join(&self.board.file)
+    }
+
+    pub fn uses_wiki_memory(&self) -> bool {
+        self.memory.mode == MemoryMode::Wiki
+    }
+
+    pub fn memory_dir(&self) -> PathBuf {
+        crate::memory::memory_dir(&self.root)
+    }
+
+    /// The live board file: `<memory_dir>/now.md` in wiki mode, or `<root>/<board.file>` in json mode.
+    pub fn effective_board_path(&self) -> PathBuf {
+        if self.uses_wiki_memory() {
+            self.memory_dir().join("now.md")
+        } else {
+            self.board_path()
+        }
     }
 
     pub fn worktree_path(&self, session: &str) -> Option<PathBuf> {
@@ -769,6 +821,40 @@ prompt = '''You are {{NAME}}.'''
         assert_eq!((t.remote.as_str(), t.branch.as_str()), ("origin", "main"));
         let dev = w.role("globex-dev").unwrap();
         assert!(dev.extra && dev.worktree);
+    }
+
+    #[test]
+    fn memory_table_defaults_to_json_and_validates_mode() {
+        let default_cfg = Config::parse(MIN, Path::new("/r/p")).unwrap();
+        assert!(!default_cfg.uses_wiki_memory());
+        assert_eq!(default_cfg.memory.mode, MemoryMode::Json);
+        assert_eq!(
+            default_cfg.effective_board_path(),
+            Path::new("/r/p/.herdr/status.json")
+        );
+
+        let wiki_text = MIN.replace("[workspace]", "[memory]\nmode = \"wiki\"\n[workspace]");
+        let wiki_cfg = Config::parse(&wiki_text, Path::new("/r/p")).unwrap();
+        assert!(wiki_cfg.uses_wiki_memory());
+        assert_eq!(wiki_cfg.memory.mode, MemoryMode::Wiki);
+        assert!(wiki_cfg.effective_board_path().ends_with("now.md"));
+
+        let bad_mode = MIN.replace("[workspace]", "[memory]\nmode = \"sqlite\"\n[workspace]");
+        assert!(
+            errors(&bad_mode)
+                .iter()
+                .any(|e| e.contains("memory.mode \"sqlite\": expected \"json\" or \"wiki\""))
+        );
+
+        let unknown_key = MIN.replace(
+            "[workspace]",
+            "[memory]\nmode = \"wiki\"\nbackend = \"local\"\n[workspace]",
+        );
+        assert!(
+            errors(&unknown_key)
+                .iter()
+                .any(|e| e.contains("unknown key \"backend\" in [memory]"))
+        );
     }
 
     #[test]

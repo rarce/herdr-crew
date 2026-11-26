@@ -16,6 +16,7 @@ mod hc;
 mod herdr;
 mod init;
 mod lock;
+mod memory;
 mod models;
 mod pi;
 mod plan;
@@ -59,6 +60,13 @@ const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   send --check <session>         check the crew delivery route without sending
   board [--file PATH] [--once] [--interval S]
                                  draw the status board
+  mem path                       print the project's out-of-repo operational memory directory
+  mem init                       initialize or refresh SCHEMA.md and seed operational memory
+  mem lint                       validate now.md, index.md orphans, wikilinks and log.md
+  mem index                      print Layer 1 operational memory index (index.md)
+  mem timeline [--limit N]       print Layer 2 recent log.md entries (default 20)
+  mem search <query>             search operational memory pages
+  mem show <page>                show a single operational memory page
   codex-install                  install the crew hook; review it in Codex /hooks
   codex-uninstall                remove only the crew hook
   codex-list                     list saved role bindings and Codex session IDs
@@ -112,6 +120,7 @@ struct Args {
     once: bool,
     file: Option<PathBuf>,
     interval: Option<Duration>,
+    limit: Option<usize>,
     init: init::Options,
 }
 
@@ -181,6 +190,13 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "--dry-run" => a.dry_run = true,
             "--check" => a.send_check = true,
             "--once" => a.once = true,
+            "--limit" => {
+                let v = value("--limit")?;
+                let n: usize = v.parse().ok().filter(|n| *n > 0).ok_or_else(|| {
+                    Fail::usage(format!("--limit \"{v}\": must be a positive integer"))
+                })?;
+                a.limit = Some(n);
+            }
             s if s.starts_with('-') => return Err(Fail::usage(format!("unknown option {s}"))),
             _ if a.command.is_empty() => a.command = arg,
             _ => a.positional.push(arg),
@@ -221,6 +237,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         | "pi-install" | "pi-uninstall" | "agy-install" | "agy-uninstall" | "agy-hook"
         | "app-install" | "app-uninstall" => &[],
         "board" => &["file", "once", "interval"],
+        "mem" => &["limit"],
         "" => return Err(Fail::usage("missing command")),
         other => return Err(Fail::usage(format!("unknown command \"{other}\""))),
     };
@@ -231,6 +248,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ("once", a.once),
         ("file", a.file.is_some()),
         ("interval", a.interval.is_some()),
+        ("limit", a.limit.is_some()),
         ("agent", a.agent.is_some()),
         ("preset", a.init.preset.is_some()),
         ("topology", a.init.topology.is_some()),
@@ -249,29 +267,55 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             name.replace('_', "-")
         )));
     }
-    let arity = if matches!(
-        a.command.as_str(),
-        "add" | "close" | "send" | "codex-resume"
-    ) {
-        1
+    if a.command == "mem" {
+        let Some(sub) = a.positional.first().map(String::as_str) else {
+            return Err(Fail::usage(
+                "mem requires a subcommand: path, init, lint, index, timeline, search or show",
+            ));
+        };
+        let expected = match sub {
+            "path" | "init" | "lint" | "index" | "timeline" => 1,
+            "search" | "show" => 2,
+            other => {
+                return Err(Fail::usage(format!(
+                    "unknown mem subcommand \"{other}\" (expected path, init, lint, index, timeline, search or show)"
+                )));
+            }
+        };
+        if a.limit.is_some() && sub != "timeline" {
+            return Err(Fail::usage(format!("mem {sub} does not take --limit")));
+        }
+        if a.positional.len() != expected {
+            return Err(Fail::usage(format!(
+                "mem {sub} takes {} argument(s)",
+                expected - 1
+            )));
+        }
     } else {
-        0
-    };
-    if a.command == "send" && a.positional.len() != arity {
-        return Err(Fail {
-            code: 2,
-            lines: vec![if a.send_check {
-                "herdr-crew: usage: herdr-crew [--root DIR] send --check <session>".into()
-            } else {
-                SEND_USAGE.into()
-            }],
-        });
-    }
-    if a.positional.len() != arity {
-        return Err(Fail::usage(format!(
-            "{} takes {arity} argument(s)",
-            a.command
-        )));
+        let arity = if matches!(
+            a.command.as_str(),
+            "add" | "close" | "send" | "codex-resume"
+        ) {
+            1
+        } else {
+            0
+        };
+        if a.command == "send" && a.positional.len() != arity {
+            return Err(Fail {
+                code: 2,
+                lines: vec![if a.send_check {
+                    "herdr-crew: usage: herdr-crew [--root DIR] send --check <session>".into()
+                } else {
+                    SEND_USAGE.into()
+                }],
+            });
+        }
+        if a.positional.len() != arity {
+            return Err(Fail::usage(format!(
+                "{} takes {arity} argument(s)",
+                a.command
+            )));
+        }
     }
     if a.command == "init" || a.command == "up" {
         a.init.agent = a.agent;
@@ -623,7 +667,20 @@ fn up_inner(
     }
     if a.dry_run {
         print!("{}", p.dry_run());
+        if c.uses_wiki_memory() {
+            println!("memory: initialize/refresh {}", c.memory_dir().display());
+        }
         return Ok(());
+    }
+    if c.uses_wiki_memory() {
+        let init = memory::ensure_initialized(&c.memory_dir(), c, &e.now)
+            .map_err(|err| fail_notify(herdr, err))?;
+        if !init.created_files.is_empty() || !init.refreshed_files.is_empty() {
+            out.step(&format!(
+                "operational memory ready in {}",
+                init.dir.display()
+            ));
+        }
     }
     let ws = herdr::execute(herdr, c, &state, &p, &mut out).map_err(|e| fail_notify(herdr, e))?;
     if p.actions().next().is_none() {
@@ -760,9 +817,13 @@ fn bring_up(
     };
     let adopted = state.adopt.is_some();
     let worktrees = git::existing_worktrees(&c).map_err(Fail::run)?;
-    let p = plan::plan(&c, &state, &env(&c, &state, Some(herdr), worktrees));
+    let e = env(&c, &state, Some(herdr), worktrees);
+    let p = plan::plan(&c, &state, &e);
     // What startup saw, for the plugin log.
     print!("{}", startup_verdicts(&c.label, &p));
+    if c.uses_wiki_memory() {
+        memory::ensure_initialized(&c.memory_dir(), &c, &e.now).map_err(Fail::run)?;
+    }
     let ws = herdr::execute(herdr, &c, &state, &p, &mut out).map_err(Fail::run)?;
     if p.actions().next().is_none() {
         out.step(&format!("{}: nothing to do", c.label));
@@ -875,13 +936,84 @@ fn close(c: &Config, name: &str) -> Result<(), Fail> {
 }
 
 fn board(c: &Config, a: &Args) -> Result<(), Fail> {
-    let path = a.file.clone().unwrap_or_else(|| c.board_path());
+    let path = a.file.clone().unwrap_or_else(|| c.effective_board_path());
     let result = if a.once {
         board::tui::once(&path, c)
     } else {
         board::tui::run(&path, c, a.interval.unwrap_or(Duration::from_millis(1500)))
     };
     result.map_err(|e| Fail::run(format!("board: {e}")))
+}
+
+fn mem(c: &Config, a: &Args) -> Result<(), Fail> {
+    let dir = c.memory_dir();
+    match a.positional[0].as_str() {
+        "path" => {
+            println!("{}", dir.display());
+            Ok(())
+        }
+        "init" => {
+            let now = Timestamp::now()
+                .to_zoned(TimeZone::system())
+                .strftime("%Y-%m-%dT%H:%M:%S%:z")
+                .to_string();
+            let result = memory::ensure_initialized(&dir, c, &now).map_err(Fail::run)?;
+            println!("herdr-crew: memory directory {}", result.dir.display());
+            if !result.created_files.is_empty() {
+                println!("  created: {}", result.created_files.join(", "));
+            }
+            if !result.refreshed_files.is_empty() {
+                println!("  refreshed: {}", result.refreshed_files.join(", "));
+            }
+            Ok(())
+        }
+        "lint" => {
+            let report = memory::lint(&dir, c, &TimeZone::system());
+            if report.is_ok() {
+                println!(
+                    "herdr-crew: memory lint ok ({} pages, {} links, {} log entries)",
+                    report.pages_checked, report.links_checked, report.log_entries_checked
+                );
+                Ok(())
+            } else {
+                Err(Fail {
+                    code: 1,
+                    lines: report
+                        .issues
+                        .into_iter()
+                        .map(|issue| format!("herdr-crew: {issue}"))
+                        .collect(),
+                })
+            }
+        }
+        "index" => {
+            print!("{}", memory::read_index(&dir).map_err(Fail::run)?);
+            Ok(())
+        }
+        "timeline" => {
+            let limit = a.limit.unwrap_or(20);
+            print!(
+                "{}",
+                memory::read_timeline(&dir, limit, &TimeZone::system()).map_err(Fail::run)?
+            );
+            Ok(())
+        }
+        "search" => {
+            let hits = memory::search(&dir, &a.positional[1]).map_err(Fail::run)?;
+            for hit in hits {
+                println!("{hit}");
+            }
+            Ok(())
+        }
+        "show" => {
+            print!(
+                "{}",
+                memory::show(&dir, &a.positional[1]).map_err(Fail::run)?
+            );
+            Ok(())
+        }
+        _ => unreachable!("validated in parse_args"),
+    }
 }
 
 /// Where `program` runs from: `configured` (a path or a bare name, like `HERDR_BIN_PATH`)
@@ -1320,6 +1452,7 @@ fn run() -> Result<(), Fail> {
         "close" => close(&c, &a.positional[0]),
         "send" => send(&c, &a.positional[0], a.send_check),
         "board" => board(&c, &a),
+        "mem" => mem(&c, &a),
         "codex-peers" => {
             println!("{}", codex::peers(&c).map_err(Fail::run)?);
             Ok(())
@@ -1396,6 +1529,21 @@ mod tests {
         assert_eq!(
             args("init --topology tabs").unwrap().init.topology,
             Some(init::Topology::Tabs)
+        );
+        assert_eq!(args("mem path").unwrap().positional, ["path"]);
+        assert_eq!(args("mem init").unwrap().positional, ["init"]);
+        assert_eq!(args("mem lint").unwrap().positional, ["lint"]);
+        assert_eq!(args("mem index").unwrap().positional, ["index"]);
+        let tl = args("mem timeline --limit 5").unwrap();
+        assert_eq!(tl.positional, ["timeline"]);
+        assert_eq!(tl.limit, Some(5));
+        assert_eq!(
+            args("mem search frontmatter").unwrap().positional,
+            ["search", "frontmatter"]
+        );
+        assert_eq!(
+            args("mem show tasks/poc").unwrap().positional,
+            ["show", "tasks/poc"]
         );
     }
 
@@ -1505,6 +1653,15 @@ mod tests {
             "up --preset unknown",
             "check --name acme",
             "board --yes",
+            "mem",
+            "mem unknown",
+            "mem path extra",
+            "mem search",
+            "mem show",
+            "mem path --limit 5",
+            "mem timeline --limit 0",
+            "mem timeline --limit abc",
+            "up --limit 5",
         ] {
             assert_eq!(args(bad).err(), Some(2), "{bad}");
         }

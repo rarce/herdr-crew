@@ -16,8 +16,19 @@ use crate::config::Config;
 
 const REDRAW_EVERY: Duration = Duration::from_secs(30);
 
-fn read(path: &Path, c: &Config) -> Result<Status, Unavailable> {
+fn is_markdown(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("md")
+}
+
+fn read(path: &Path, c: &Config, tz: &TimeZone) -> Result<Status, Unavailable> {
     match std::fs::read(path) {
+        Ok(bytes) if is_markdown(path) => {
+            let log_bytes = path
+                .parent()
+                .map(|p| p.join("log.md"))
+                .and_then(|p| std::fs::read(p).ok());
+            model::load_markdown(&bytes, log_bytes.as_deref(), c, tz)
+        }
         Ok(bytes) => model::load(&bytes, c),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Unavailable::Missing),
         Err(e) => Err(Unavailable::Json(e.to_string())),
@@ -27,6 +38,17 @@ fn read(path: &Path, c: &Config) -> Result<Status, Unavailable> {
 fn signature(path: &Path) -> Option<(SystemTime, u64)> {
     let m = std::fs::metadata(path).ok()?;
     Some((m.modified().ok()?, m.len()))
+}
+
+type WatchSignature = (Option<(SystemTime, u64)>, Option<(SystemTime, u64)>);
+
+fn watch_signature(path: &Path) -> WatchSignature {
+    let log_sig = if is_markdown(path) {
+        path.parent().and_then(|p| signature(&p.join("log.md")))
+    } else {
+        None
+    };
+    (signature(path), log_sig)
 }
 
 fn project(c: &Config) -> String {
@@ -44,16 +66,17 @@ pub fn once(path: &Path, c: &Config) -> io::Result<()> {
         100
     };
     let project = project(c);
+    let tz = TimeZone::system();
     let ctx = ViewCtx {
         now: Timestamp::now(),
-        tz: TimeZone::system(),
+        tz: tz.clone(),
         path,
         project: &project,
         writer: &c.board.writer,
     };
     let area = Rect::new(0, 0, width, 500);
     let mut buf = Buffer::empty(area);
-    view::render(area, &mut buf, read(path, c).as_ref(), &ctx);
+    view::render(area, &mut buf, read(path, c, &tz).as_ref(), &ctx);
     let text = view::buffer_text(&buf);
     writeln!(io::stdout().lock(), "{}", text.trim_end_matches('\n'))
 }
@@ -66,8 +89,8 @@ pub fn run(path: &Path, c: &Config, interval: Duration) -> io::Result<()> {
     let result = (|| -> io::Result<()> {
         let project = project(c);
         let tz = TimeZone::system();
-        let mut seen = signature(path);
-        let mut board = read(path, c);
+        let mut seen = watch_signature(path);
+        let mut board = read(path, c, &tz);
         let mut last_draw: Option<Instant> = None;
         let mut dirty = true;
         loop {
@@ -91,7 +114,7 @@ pub fn run(path: &Path, c: &Config, interval: Duration) -> io::Result<()> {
                             return Ok(());
                         }
                         KeyCode::Char('r') => {
-                            board = read(path, c);
+                            board = read(path, c, &tz);
                             dirty = true;
                         }
                         _ => {}
@@ -100,10 +123,10 @@ pub fn run(path: &Path, c: &Config, interval: Duration) -> io::Result<()> {
                     _ => {}
                 }
             }
-            let now = signature(path);
+            let now = watch_signature(path);
             if now != seen {
                 seen = now;
-                board = read(path, c);
+                board = read(path, c, &tz);
                 dirty = true;
             }
         }
