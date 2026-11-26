@@ -10,6 +10,11 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- Wiki memory: the first `up`, `mem init` or `startup` adoption no longer fails when the Git
+  directory is on a filesystem without hard links; the memory pin is then created directly.
+
 ## [0.14.0] - 2026-11-26
 
 ### Changed
