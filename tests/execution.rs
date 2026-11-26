@@ -3028,3 +3028,55 @@ fn agy_install_launch_hook_and_recovery() {
     assert!(after.get("herdr").is_some());
     assert!(after.get("herdr-crew").is_none());
 }
+
+#[test]
+fn codex_wiki_memory_preflight_strips_add_dir_from_app_server_but_keeps_it_for_launch() {
+    let f = Fixture::new();
+    f.codex_tools();
+    f.codex_config(true);
+    let config = format!(
+        "{}\n[memory]\nmode = \"wiki\"\n",
+        f.read(".herdr/crew.toml")
+    );
+    fs::write(f.repo.join(".herdr/crew.toml"), config).unwrap();
+    success(f.crew(&["codex-install"]));
+
+    let mem_dir = PathBuf::from(success(f.crew(&["mem", "path"])).trim());
+    // `up` attaches `extra_dirs = [mem_dir]` to CodexOptions and runs `codex app-server`
+    // preflight (which rejects `--add-dir`) before starting `codex` (which keeps `--add-dir`).
+    f.up();
+
+    assert!(mem_dir.join("now.md").is_file());
+    let canonical_mem = mem_dir.canonicalize().unwrap();
+    let lead_start = f
+        .calls()
+        .into_iter()
+        .find(|args| starts_with(args, &["agent", "start", "lead"]))
+        .expect("expected agent start lead call");
+    assert!(
+        lead_start.windows(2).any(|pair| {
+            pair[0] == "--add-dir"
+                && Path::new(&pair[1])
+                    .canonicalize()
+                    .is_ok_and(|p| p == canonical_mem)
+        }),
+        "expected Codex launch args to include --add-dir {}: {lead_start:?}",
+        canonical_mem.display()
+    );
+    let lead_snapshot = f
+        .snapshots()
+        .into_iter()
+        .find(|s| s["name"] == "lead")
+        .unwrap();
+    let extra_dirs = lead_snapshot["extra_dirs"].as_array().unwrap();
+    assert_eq!(extra_dirs.len(), 1);
+    assert_eq!(
+        Path::new(extra_dirs[0].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        canonical_mem
+    );
+
+    // `check` also succeeds against the stricter `app-server` simulator.
+    success(f.crew(&["check"]));
+}

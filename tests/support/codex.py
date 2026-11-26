@@ -26,9 +26,10 @@ elif args and args[0] == "queue":
         raise SystemExit(1)
     print("Queued message for thread " + args[args.index("--thread") + 1])
 elif "app-server" in args:
-    if "--profile" in args and args[args.index("--profile") + 1] == "missing":
-        print("configuration profile missing does not exist", file=sys.stderr)
-        raise SystemExit(1)
+    for flag in ("--add-dir", "--profile"):
+        if flag in args:
+            print(f"error: unexpected argument '{flag}' found", file=sys.stderr)
+            raise SystemExit(2)
     for line in sys.stdin:
         request = json.loads(line)
         if request["method"] == "initialize":
