@@ -45,13 +45,14 @@ use plan::{Candidate, Env, Foreground, HerdrState, Initial, Refusal, Tab, Worksp
 const USAGE: &str = "usage: herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi|agy]
        [--topology tabs|tree] [--models inherit|economy|balanced|quality]
-       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
-       [--dry-run]
+       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--memory json|wiki]
+       [--no-tui] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
   config                         edit each role's agent, model and effort in a terminal UI
   up [--agent claude|codex|pi|agy] [--no-attach] [--dry-run]
      [--preset ...] [--topology tabs|tree] [--models ...] [--name NAME]
-     [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
+     [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--memory json|wiki]
+     [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
                                  (setup options as for init); --agent on an existing
                                  crew saves a new default agent
@@ -192,6 +193,13 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "--shared-checkout" => a.init.shared_checkout = true,
             "--yes" => a.init.yes = true,
             "--no-ignore" => a.init.no_ignore = true,
+            "--memory" => {
+                let memory = value("--memory")?;
+                a.init.memory = Some(
+                    config::MemoryMode::parse(&memory)
+                        .ok_or_else(|| Fail::usage("--memory must be json or wiki"))?,
+                );
+            }
             "--dry-run" => a.dry_run = true,
             "--check" => a.send_check = true,
             "--once" => a.once = true,
@@ -220,6 +228,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "base",
             "shared_checkout",
             "no_ignore",
+            "memory",
             "yes",
             "dry_run",
         ],
@@ -236,6 +245,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
             "base",
             "shared_checkout",
             "no_ignore",
+            "memory",
             "yes",
         ],
         "send" => &["check"],
@@ -268,6 +278,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, Fail> {
         ("shared_checkout", a.init.shared_checkout),
         ("yes", a.init.yes),
         ("no_ignore", a.init.no_ignore),
+        ("memory", a.init.memory.is_some()),
     ];
     if let Some((name, _)) = used.iter().find(|(n, on)| *on && !allowed.contains(n)) {
         return Err(Fail::usage(format!(
@@ -1591,10 +1602,11 @@ fn run() -> Result<(), Fail> {
             || i.base.is_some()
             || i.shared_checkout
             || i.no_ignore
+            || i.memory.is_some()
         {
             return Err(Fail::usage(format!(
-                "--preset, --topology, --models, --name, --base, --shared-checkout, --no-ignore \
-                 and --no-tui only apply when up sets up a new crew; {} already exists, so edit \
+                "--preset, --topology, --models, --name, --base, --shared-checkout, --no-ignore, \
+                 --memory and --no-tui only apply when up sets up a new crew; {} already exists, so edit \
                  it instead",
                 path.display()
             )));
@@ -1660,6 +1672,16 @@ mod tests {
         assert_eq!(init.init.name.as_deref(), Some("acme"));
         assert_eq!(init.init.base.as_deref(), Some("upstream/trunk"));
         assert!(init.init.yes && init.init.no_ignore && init.dry_run);
+        assert_eq!(
+            args("init --memory wiki").unwrap().init.memory,
+            Some(config::MemoryMode::Wiki)
+        );
+        assert_eq!(
+            args("up --memory json").unwrap().init.memory,
+            Some(config::MemoryMode::Json)
+        );
+        assert_eq!(args("init --memory sqlite").err(), Some(2));
+        assert_eq!(args("check --memory wiki").err(), Some(2));
         for kind in agent::Kind::ALL {
             let selected = args(&format!("up --agent {} --dry-run", kind.as_str())).unwrap();
             assert_eq!(selected.agent, Some(kind));

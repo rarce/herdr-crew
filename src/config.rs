@@ -87,6 +87,35 @@ pub enum MemoryMode {
     Wiki,
 }
 
+impl MemoryMode {
+    pub const ALL: [Self; 2] = [Self::Json, Self::Wiki];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "json" => Some(Self::Json),
+            "wiki" => Some(Self::Wiki),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Wiki => "wiki",
+        }
+    }
+
+    /// One line for setup choices.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Json => "board in .herdr/status.json inside the project (default)",
+            Self::Wiki => {
+                "out-of-repo Markdown wiki (now.md, index, log, tasks, decisions) that persists across sessions"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Memory {
     pub mode: MemoryMode,

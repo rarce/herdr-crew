@@ -16,6 +16,7 @@ use super::{
     effort_choices, error, hints, model_choices, move_in_list, selected, warn,
 };
 use crate::agent::Kind;
+use crate::config::MemoryMode;
 use crate::git;
 use crate::init::{self, MAX_PREFIX, Options, Preset, RoleModelOverride, Selection, Topology};
 use crate::models::{self, Duty, Profile};
@@ -30,6 +31,7 @@ enum Step {
     Worktrees,
     Base,
     Ignore,
+    Memory,
     Review,
 }
 
@@ -43,6 +45,7 @@ impl Step {
             Self::Models => "Models",
             Self::Worktrees => "Worktrees",
             Self::Base => "Base branch",
+            Self::Memory => "Memory",
             Self::Ignore => "Git ignore",
             Self::Review => "Review",
         }
@@ -103,6 +106,7 @@ pub struct Wizard {
     explicit_base: bool,
     base: TextInput,
     ignore: bool,
+    memory: usize,
     has_remote: bool,
     /// A base that is not fetched, which a second Enter accepts.
     unfetched: Option<String>,
@@ -163,6 +167,7 @@ impl Wizard {
                     .unwrap_or(""),
             ),
             ignore: !options.no_ignore,
+            memory: index_of(&MemoryMode::ALL, options.memory, MemoryMode::Json),
             has_remote,
             unfetched: None,
             message: None,
@@ -230,7 +235,7 @@ impl Wizard {
         if self.uses_worktrees() {
             steps.push(Step::Base);
         }
-        steps.extend([Step::Ignore, Step::Review]);
+        steps.extend([Step::Ignore, Step::Memory, Step::Review]);
         steps
     }
 
@@ -254,6 +259,7 @@ impl Wizard {
                 .then(|| self.base.value.trim().to_string()),
             tree_isolated,
             ignore: self.ignore,
+            memory: MemoryMode::ALL[self.memory],
         }
     }
 
@@ -543,6 +549,7 @@ impl Wizard {
                     if isolated { "separate" } else { "shared" }.into()
                 }
                 Step::Base => self.base.value.clone(),
+                Step::Memory => MemoryMode::ALL[self.memory].as_str().into(),
                 Step::Ignore => if self.ignore { "yes" } else { "no" }.into(),
                 Step::Review => String::new(),
             }
@@ -890,6 +897,27 @@ impl Wizard {
                 ];
                 frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
             }
+            Step::Memory => {
+                let items: Vec<(String, String)> = MemoryMode::ALL
+                    .iter()
+                    .map(|m| (m.as_str().to_string(), m.description().to_string()))
+                    .collect();
+                let mut lines = vec![
+                    question("Where should the crew keep its operational memory?"),
+                    Line::from(""),
+                ];
+                lines.extend(Self::choices(&items, self.memory));
+                lines.push(Line::from(""));
+                lines.push(Line::styled(
+                    if MemoryMode::ALL[self.memory] == MemoryMode::Wiki {
+                        "Stored under ~/.local/share/herdr-crew/memory/ (or $XDG_DATA_HOME, CREW_MEMORY_DIR); up creates it, the board reads now.md, and herdr-crew mem browses it."
+                    } else {
+                        "The board reads .herdr/status.json; switch later with [memory] mode = \"wiki\" in crew.toml."
+                    },
+                    dim(),
+                ));
+                frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+            }
             Step::Ignore => {
                 let items = vec![
                     (
@@ -1158,6 +1186,9 @@ impl Screen for Wizard {
                     *isolated = i == 0;
                 }
             }
+            Step::Memory => {
+                move_in_list(key, &mut self.memory, MemoryMode::ALL.len());
+            }
             Step::Ignore => {
                 let mut i = usize::from(!self.ignore);
                 match key.code {
@@ -1209,12 +1240,52 @@ mod tests {
         let screen = draw(&mut wizard, 100, 24);
         assert!(screen.contains("Project name / role prefix"), "{screen}");
         // Name, workflow, agent, models, ignore, review.
-        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}{enter}{enter}{enter}");
+        let (selection, text) = finish(
+            &mut wizard,
+            "{enter}{enter}{enter}{enter}{enter}{enter}{enter}",
+        );
         assert_eq!(selection.preset, Preset::Solo);
         assert_eq!(selection.profile, Profile::Balanced);
         let config = Config::parse(&text, &root).unwrap();
         assert_eq!(config.roles[0].claude.model.as_deref(), Some("opus"));
         assert_eq!(config.roles[0].claude.effort.as_deref(), Some("high"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn memory_step_chooses_the_wiki_and_writes_it() {
+        let root = git::test_repo("tui-memory");
+        let mut wizard = Wizard::new(&root, &Options::default());
+        // Name, workflow, agent, models, ignore.
+        send(&mut wizard, "{enter}{enter}{enter}{enter}{enter}");
+        assert_eq!(wizard.step, Step::Memory);
+        let screen = draw(&mut wizard, 120, 30);
+        assert!(screen.contains("json"), "{screen}");
+        assert!(screen.contains("wiki"), "{screen}");
+        send(&mut wizard, "2{enter}");
+        assert_eq!(wizard.step, Step::Review);
+        let screen = draw(&mut wizard, 120, 60);
+        assert!(screen.contains("Memory: wiki"), "{screen}");
+        let (selection, text) = finish(&mut wizard, "{enter}");
+        assert_eq!(selection.memory, MemoryMode::Wiki);
+        assert!(text.contains("[memory]\nmode = \"wiki\""), "{text}");
+        assert_eq!(
+            Config::parse(&text, &root).unwrap().memory.mode,
+            MemoryMode::Wiki
+        );
+
+        // --memory prefills the answer; json writes no [memory] table.
+        let options = Options {
+            memory: Some(MemoryMode::Json),
+            ..Options::default()
+        };
+        let mut wizard = Wizard::new(&root, &options);
+        let (selection, text) = finish(
+            &mut wizard,
+            "{enter}{enter}{enter}{enter}{enter}{enter}{enter}",
+        );
+        assert_eq!(selection.memory, MemoryMode::Json);
+        assert!(!text.contains("[memory]"), "{text}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1244,7 +1315,7 @@ mod tests {
         // Going back keeps answers.
         send(&mut wizard, "{esc}");
         assert_eq!(wizard.step, Step::Topology);
-        let (selection, text) = finish(&mut wizard, "{enter}{enter}n{enter}{enter}");
+        let (selection, text) = finish(&mut wizard, "{enter}{enter}n{enter}{enter}{enter}");
         assert_eq!(selection.agent, Kind::Codex);
         assert!(!selection.ignore);
         let config = Config::parse(&text, &root).unwrap();
@@ -1283,7 +1354,8 @@ mod tests {
         send(&mut wizard, "{enter}");
         assert_eq!(wizard.step, Step::Ignore);
         let screen = {
-            send(&mut wizard, "{enter}");
+            // Ignore -> Memory -> Review.
+            send(&mut wizard, "{enter}{enter}");
             draw(&mut wizard, 100, 60)
         };
         assert!(screen.contains("Worktree base: origin/next"), "{screen}");
@@ -1323,7 +1395,7 @@ mod tests {
         assert!(screen.contains("-lead"), "{screen}");
         assert!(!screen.contains("-dev-a"), "{screen}");
         assert!(!screen.contains("-reviewer"), "{screen}");
-        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}");
+        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}{enter}");
         assert!(selection.is_tree());
         assert!(selection.tree_isolated);
         assert!(selection.base.is_none());
@@ -1361,7 +1433,7 @@ mod tests {
         // Pick shared (2) -> skips Base straight to Ignore -> Review -> Finish
         send(&mut wizard, "2{enter}");
         assert_eq!(wizard.step, Step::Ignore);
-        let (selection, text) = finish(&mut wizard, "{enter}{enter}");
+        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}");
         assert!(selection.is_tree());
         assert!(!selection.tree_isolated);
         assert!(selection.base.is_none());
@@ -1410,7 +1482,7 @@ mod tests {
         assert_eq!(wizard.step, Step::Worktrees);
         let sidebar = draw(&mut wizard, 110, 28);
         assert!(sidebar.contains("balanced*"), "{sidebar}");
-        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}");
+        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}{enter}");
         assert!(selection.is_customized());
         assert!(text.contains("balanced customized models"), "{text}");
         let config = Config::parse(&text, &root).unwrap();
@@ -1453,7 +1525,7 @@ mod tests {
         // Clear effort to inherit first, then suffixed slug is allowed.
         send(&mut wizard, "{right}{bs}{left}{enter}8{enter}-high{enter}");
         assert!(wizard.message.is_none(), "{:?}", wizard.message);
-        let (selection, text) = finish(&mut wizard, "{esc}{enter}{enter}{enter}");
+        let (selection, text) = finish(&mut wizard, "{esc}{enter}{enter}{enter}{enter}");
         assert!(selection.is_customized());
         let config = Config::parse(&text, &root).unwrap();
         assert_eq!(
@@ -1532,7 +1604,7 @@ mod tests {
             "{models_screen}"
         );
         assert!(!models_screen.contains("-dev-a"), "{models_screen}");
-        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}");
+        let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}{enter}");
         assert!(selection.is_codex_tree());
         assert!(selection.base.is_none());
         let config = Config::parse(&text, &root).unwrap();
@@ -1559,7 +1631,7 @@ mod tests {
         assert_eq!(review_wizard.topology(), Topology::Tabs);
         send(&mut review_wizard, "2{enter}{enter}");
         assert_eq!(review_wizard.step, Step::Ignore);
-        let (selection, text) = finish(&mut review_wizard, "{enter}{enter}");
+        let (selection, text) = finish(&mut review_wizard, "{enter}{enter}{enter}");
         assert!(selection.is_codex_tree());
         assert!(Config::parse(&text, &root).unwrap().codex_tree);
         std::fs::remove_dir_all(&root).unwrap();
@@ -1613,7 +1685,7 @@ mod tests {
                 .contains("--base requires separate worktrees")
         );
         // Pick separate (1) -> Base (origin/main) -> Ignore -> Review -> Finish.
-        let (selection, text) = finish(&mut wizard, "1{enter}{enter}{enter}{enter}");
+        let (selection, text) = finish(&mut wizard, "1{enter}{enter}{enter}{enter}{enter}");
         assert!(!selection.is_tree());
         assert_eq!(selection.agent, Kind::Codex);
         assert_eq!(selection.base.as_deref(), Some("origin/main"));
@@ -1670,7 +1742,7 @@ mod tests {
                 .contains("--topology tree was passed on the command line")
         );
         // Pick tree (2) -> Models -> Ignore -> Review -> Finish.
-        let (selection, text) = finish(&mut wizard, "2{enter}{enter}{enter}{enter}");
+        let (selection, text) = finish(&mut wizard, "2{enter}{enter}{enter}{enter}{enter}");
         assert!(selection.is_codex_tree());
         assert!(Config::parse(&text, &root).unwrap().codex_tree);
 
@@ -1678,7 +1750,7 @@ mod tests {
         let mut agy_wizard = Wizard::new(&root, &tree_opts);
         send(&mut agy_wizard, "{enter}{enter}4{enter}");
         assert_eq!(agy_wizard.step, Step::Models);
-        let (selection, text) = finish(&mut agy_wizard, "{enter}{enter}{enter}{enter}");
+        let (selection, text) = finish(&mut agy_wizard, "{enter}{enter}{enter}{enter}{enter}");
         assert!(selection.is_agy_tree());
         assert!(Config::parse(&text, &root).unwrap().agy_tree);
 
@@ -1713,7 +1785,10 @@ mod tests {
                 .contains("--topology tabs was passed on the command line")
         );
         // Pick tabs (1) -> Models -> Worktrees (shared) -> Ignore -> Review -> Finish.
-        let (selection, text) = finish(&mut tabs_wizard, "1{enter}{enter}{enter}{enter}{enter}");
+        let (selection, text) = finish(
+            &mut tabs_wizard,
+            "1{enter}{enter}{enter}{enter}{enter}{enter}",
+        );
         assert_eq!(selection.topology, Topology::Tabs);
         assert!(!selection.is_tree());
         let config = Config::parse(&text, &root).unwrap();

@@ -10,6 +10,13 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Added
+
+- Setup (`init` and first-time `up`) asks where the crew keeps its operational memory: `json`
+  (the `.herdr/status.json` board, default) or `wiki` (the out-of-repo Markdown memory),
+  writing `[memory] mode = "wiki"` for the latter. `--memory json|wiki` answers it; `--yes`
+  keeps `json`.
+
 ## [0.15.0] - 2026-11-27
 
 ### Added

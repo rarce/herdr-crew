@@ -193,6 +193,7 @@ pub struct Options {
     pub shared_checkout: bool,
     pub yes: bool,
     pub no_ignore: bool,
+    pub memory: Option<config::MemoryMode>,
     /// Use the line-by-line wizard even in a terminal.
     pub no_tui: bool,
 }
@@ -218,6 +219,8 @@ pub struct Selection {
     /// rather than the shared checkout (`Workspace: "inherit"`).
     pub tree_isolated: bool,
     pub ignore: bool,
+    /// `[memory] mode`: the json board in the project or the out-of-repo wiki.
+    pub memory: config::MemoryMode,
 }
 
 impl Selection {
@@ -355,6 +358,8 @@ struct Template {
     workspace: Workspace,
     board: Board,
     #[serde(skip_serializing_if = "Option::is_none")]
+    memory: Option<Memory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     worktrees: Option<Worktrees>,
     roles: Vec<Role>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -379,6 +384,11 @@ struct Workspace {
 struct Board {
     tab: String,
     writer: String,
+}
+
+#[derive(Serialize)]
+struct Memory {
+    mode: &'static str,
 }
 
 #[derive(Serialize)]
@@ -932,6 +942,42 @@ fn choose(
                 "Ignore generated crew files in .gitignore?",
                 true,
             )?);
+    let memory = match options.memory {
+        Some(memory) => memory,
+        None if options.yes => config::MemoryMode::Json,
+        None => {
+            writeln!(
+                output,
+                "\nChoose where the crew keeps its operational memory:"
+            )
+            .map_err(io_fail)?;
+            for (i, mode) in config::MemoryMode::ALL.iter().enumerate() {
+                writeln!(
+                    output,
+                    "  {}. {}: {}",
+                    i + 1,
+                    mode.as_str(),
+                    mode.description()
+                )
+                .map_err(io_fail)?;
+            }
+            loop {
+                let choice = ask(input, output, "Memory", Some("1"))?;
+                if let Some(mode) =
+                    config::MemoryMode::parse(&choice.to_ascii_lowercase()).or_else(|| {
+                        choice
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|i| i.checked_sub(1))
+                            .and_then(|i| config::MemoryMode::ALL.get(i).copied())
+                    })
+                {
+                    break mode;
+                }
+                writeln!(output, "Enter 1-2 or json, wiki.").map_err(io_fail)?;
+            }
+        }
+    };
     Ok(Selection {
         agent,
         name,
@@ -942,6 +988,7 @@ fn choose(
         base,
         tree_isolated,
         ignore,
+        memory,
     })
 }
 
@@ -1196,6 +1243,10 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
             tab: format!("{}-status", selection.name),
             writer: coordinator,
         },
+        // json is the default and stays implicit.
+        memory: (selection.memory == config::MemoryMode::Wiki).then(|| Memory {
+            mode: selection.memory.as_str(),
+        }),
         worktrees: (!is_tree)
             .then(|| {
                 selection.base.as_ref().map(|base| Worktrees {
@@ -1379,6 +1430,14 @@ pub enum Purpose {
 
 /// The summary shown before saving: workflow, project, agent, models and board writer.
 pub(crate) fn summary(selection: &Selection) -> String {
+    let memory = match selection.memory {
+        config::MemoryMode::Json => "json (.herdr/status.json in the project)",
+        config::MemoryMode::Wiki => "wiki (out-of-repo Markdown memory; up initializes it)",
+    };
+    format!("{}\nMemory: {memory}", crew_summary(selection))
+}
+
+fn crew_summary(selection: &Selection) -> String {
     let models_summary = if selection.is_customized() {
         format!(
             "{} (customized; {})",
@@ -1649,6 +1708,7 @@ mod tests {
                 base,
                 tree_isolated: false,
                 ignore: true,
+                memory: config::MemoryMode::Json,
             };
             let text =
                 render(&selection, Path::new("/repo")).unwrap_or_else(|f| panic!("{:?}", f.lines));
@@ -1694,11 +1754,53 @@ mod tests {
         result.unwrap_or_else(|f| panic!("{:?}", f.lines))
     }
 
+    /// Runs the line wizard on scripted answers. The memory question, asked last, takes its
+    /// default unless the script answers it.
     fn choose_with(root: &Path, options: &Options, answers: &str) -> (Selection, String) {
         let mut output = Vec::new();
+        let answers = format!("{answers}\n");
         let selection = choose(root, options, &mut answers.as_bytes(), &mut output)
             .unwrap_or_else(|f| panic!("{:?}", f.lines));
         (selection, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn the_line_wizard_asks_for_memory_last_and_retries_unknown_modes() {
+        let root = git::test_repo("init-memory");
+        // name, workflow=solo, agent=claude, profile, customize=n, ignore=n, memory.
+        let (selection, output) = choose_with(
+            &root,
+            &Options::default(),
+            "demo\n1\n\n\nn\nn\nnotes\nwiki\n",
+        );
+        assert!(output.contains("operational memory"), "{output}");
+        assert!(output.contains("Enter 1-2 or json, wiki."), "{output}");
+        assert_eq!(selection.memory, config::MemoryMode::Wiki);
+        let text = ok(render(&selection, &root));
+        assert!(text.contains("[memory]\nmode = \"wiki\""), "{text}");
+        let config = config::Config::parse(&text, &root).unwrap();
+        assert_eq!(config.memory.mode, config::MemoryMode::Wiki);
+        assert!(summary(&selection).contains("Memory: wiki"));
+
+        // --yes keeps json without asking; --memory answers it.
+        let yes = Options {
+            yes: true,
+            ..Options::default()
+        };
+        let (selection, output) = choose_with(&root, &yes, "");
+        assert_eq!(selection.memory, config::MemoryMode::Json);
+        assert!(!output.contains("operational memory"), "{output}");
+        assert!(!ok(render(&selection, &root)).contains("[memory]"));
+        let wiki = Options {
+            yes: true,
+            memory: Some(config::MemoryMode::Wiki),
+            ..Options::default()
+        };
+        assert_eq!(
+            choose_with(&root, &wiki, "").0.memory,
+            config::MemoryMode::Wiki
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -1961,6 +2063,7 @@ mod tests {
                 base: None,
                 tree_isolated: agent == Kind::Agy,
                 ignore: false,
+                memory: config::MemoryMode::Json,
             };
             assert!(selection.is_customized());
             assert!(summary(&selection).contains("balanced (customized;"));
