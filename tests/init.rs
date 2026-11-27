@@ -418,7 +418,7 @@ fn topology_and_base_combinations_validate_without_writing() {
     // rejects codex+tree, and accepts codex+tabs.
     let interactive_base = repo.interactive(
         &["--base", "upstream/trunk", "--no-tui"],
-        "sample\nreview\nagy\ncodex\ntree\ntabs\n\n\n\ny\n",
+        "sample\nreview\nagy\ncodex\ntree\ntabs\n\n\n\n\ny\n",
     );
     let out = success(interactive_base);
     assert!(
@@ -664,11 +664,25 @@ fn dry_run_previews_configuration_and_ignore_changes_without_writing() {
 }
 
 #[test]
+fn memory_option_selects_the_out_of_repo_wiki() {
+    let repo = Repo::new(true);
+    success(repo.init(&["--name", "notes", "--memory", "wiki", "--yes"]));
+    let config = repo.config();
+    assert_eq!(config["memory"]["mode"].as_str(), Some("wiki"));
+    // Setup creates no memory directory; up does.
+    assert!(!repo.root.join(".herdr/status.json").exists());
+
+    let repo = Repo::new(true);
+    success(repo.init(&["--name", "plain", "--yes"]));
+    assert!(repo.config().get("memory").is_none());
+}
+
+#[test]
 fn interactive_setup_retries_invalid_values_and_can_cancel_the_preview() {
     let repo = Repo::new(true);
     let output = success(repo.interactive(
         &[],
-        "INVALID\nsample\n9\nreview\n\n\n\ny\nunknown/main\nupstream/trunk\n\nn\n",
+        "INVALID\nsample\n9\nreview\n\n\n\ny\nunknown/main\nupstream/trunk\n\n\nn\n",
     ));
     assert!(output.contains("Use 1-21 characters"));
     assert!(output.contains("Enter 1-4"));
@@ -681,7 +695,7 @@ fn interactive_setup_retries_invalid_values_and_can_cancel_the_preview() {
 #[test]
 fn interactive_review_without_a_remote_defaults_to_shared_read_only_review() {
     let repo = Repo::new(false);
-    success(repo.interactive(&[], "sample\nreview\n\n\n\n\n\ny\n"));
+    success(repo.interactive(&[], "sample\nreview\n\n\n\n\n\n\ny\n"));
     let config = repo.config();
     assert!(config.get("worktrees").is_none());
     for role in config["roles"].as_array().unwrap() {

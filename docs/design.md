@@ -220,7 +220,7 @@ The manifest declares only macOS and Linux. Artifact preparation uses a POSIX sh
 
 ### 4.1 Subcommands
 
-- `init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi] [--models inherit|economy|balanced|quality] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes] [--dry-run]`: initial setup without loading an existing configuration (§4.1.1).
+- `init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi] [--models inherit|economy|balanced|quality] [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--memory json|wiki] [--no-tui] [--yes] [--dry-run]`: initial setup without loading an existing configuration (§4.1.1).
 - `config`: full-screen editor for the agent, model and effort of the defaults and each role (§4.1.2). It needs a terminal.
 - `up [--agent claude|codex|pi] [--no-attach] [--dry-run] [init's setup options]`: the setup options apply only when there is no configuration yet (§4.1.1); with one, they are a usage error.
 - `add <role>`
@@ -233,7 +233,7 @@ Global option: `--root DIR`. `--dry-run` prints the plan (§6.2) without running
 
 ### 4.1.1 Initial setup
 
-`init` resolves the main Git checkout like other commands but runs before `load_config`. Its line-based wizard asks for a project prefix, one of four software workflows, the agent kind, an optional remote worktree base and ignore rules. The summary before saving names the agent and the worktree base, also with `--yes`. `--yes` uses explicit arguments and defaults without reading stdin; `--dry-run` previews the generated configuration and missing ignore entries without writing.
+`init` resolves the main Git checkout like other commands but runs before `load_config`. Its line-based wizard asks for a project prefix, one of four software workflows, the agent kind, an optional remote worktree base, ignore rules and the memory mode (last; `json` by default, `wiki` writes `[memory] mode = "wiki"`, §5.5). The summary before saving names the agent, the worktree base and the memory mode, also with `--yes`. `--yes` uses explicit arguments and defaults without reading stdin; `--dry-run` previews the generated configuration and missing ignore entries without writing.
 
 The wizard also asks for a model profile (`docs/models.md`), which `models::Profile` turns into each role's `[roles.<agent>]` model and effort by its duty. When stdin and stdout are terminals and neither `--yes` nor `--no-tui` is given, `tui::wizard` asks the same questions full screen, with flags as prefilled answers, and returns the same `Selection`; validation (name, remote, base) and file creation are shared with the line wizard.
 

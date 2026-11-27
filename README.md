@@ -69,7 +69,7 @@ Launcher removal also works after the plugin has been uninstalled. Use `--bin-di
 
 ## Quick start
 
-The shortest path is to run `herdr-crew up` inside your Git repository. If the project has no `.herdr/crew.toml` yet, `up` runs the [setup wizard](#configure-a-crew) first: choose a workflow and an agent, review the preview, and once it is saved `up` creates the workspace and starts the sessions. `up --yes` takes the defaults (a solo crew) without asking, and accepts `init`'s options (`--preset`, `--name`, `--agent`, `--topology`, `--base`, `--shared-checkout`, `--no-ignore`). Without a terminal to ask in, and as the `herdr-crew.up` action, `up` does not guess: it explains how to set the crew up and changes nothing. Codex, pi and agy crews still need their one-time setup (`codex-install`, `pi-install`, `agy-install`) before their roles can start; `up` says so if it is missing.
+The shortest path is to run `herdr-crew up` inside your Git repository. If the project has no `.herdr/crew.toml` yet, `up` runs the [setup wizard](#configure-a-crew) first: choose a workflow and an agent, review the preview, and once it is saved `up` creates the workspace and starts the sessions. `up --yes` takes the defaults (a solo crew) without asking, and accepts `init`'s options (`--preset`, `--name`, `--agent`, `--topology`, `--base`, `--shared-checkout`, `--no-ignore`, `--memory`). Without a terminal to ask in, and as the `herdr-crew.up` action, `up` does not guess: it explains how to set the crew up and changes nothing. Codex, pi and agy crews still need their one-time setup (`codex-install`, `pi-install`, `agy-install`) before their roles can start; `up` says so if it is missing.
 
 To review the configuration before anything starts:
 
@@ -393,7 +393,7 @@ in [docs/herdr-core.md](docs/herdr-core.md).
 herdr-crew init
 ```
 
-The wizard asks for a project name, a workflow, the agent (`claude`, `codex`, `pi` or `agy`), a topology (`tabs` or `tree` for multi-role Codex crews), a model profile, worktree/isolation settings and generated-file ignore rules. It previews the complete configuration before saving. In a terminal it opens a full-screen wizard (arrow keys or numbers to choose, Enter to continue, Esc to go back) that shows each role's model and effort as you pick a profile; command-line flags prefill its answers. `--no-tui` keeps the line-by-line questions, which also run whenever input is not a terminal. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
+The wizard asks for a project name, a workflow, the agent (`claude`, `codex`, `pi` or `agy`), a topology (`tabs` or `tree` for multi-role Codex crews), a model profile, worktree/isolation settings, generated-file ignore rules and where the crew keeps its operational memory (`json`, the default `.herdr/status.json` board, or `wiki`, the out-of-repo [operational memory](#operational-memory-llmwiki); `--memory json|wiki` answers it). It previews the complete configuration before saving. In a terminal it opens a full-screen wizard (arrow keys or numbers to choose, Enter to continue, Esc to go back) that shows each role's model and effort as you pick a profile; command-line flags prefill its answers. `--no-tui` keeps the line-by-line questions, which also run whenever input is not a terminal. It does not overwrite an existing `crew.toml`, start sessions, create worktrees or fetch remote branches. Cancellation and `--dry-run` leave the project unchanged.
 
 | Preset | Agent sessions | Use it for |
 | --- | --- | --- |
@@ -441,13 +441,14 @@ Generated board files, prompts and optional `.worktrees/` entries are appended t
 herdr-crew [--root DIR] <command>
   init [--preset solo|review|parallel|research] [--name NAME] [--agent claude|codex|pi|agy]
        [--topology tabs|tree] [--models inherit|economy|balanced|quality]
-       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
-       [--dry-run]
+       [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--memory json|wiki]
+       [--no-tui] [--yes] [--dry-run]
                                  configure a crew with the setup wizard
   config                         edit each role's agent, model and effort in a terminal UI
   up [--agent claude|codex|pi|agy] [--no-attach] [--dry-run]
      [--preset ...] [--topology tabs|tree] [--models ...] [--name NAME]
-     [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--no-tui] [--yes]
+     [--base REMOTE/BRANCH] [--shared-checkout] [--no-ignore] [--memory json|wiki]
+     [--no-tui] [--yes]
                                  start sessions; without a crew.toml, set one up first
                                  (setup options as for init); --agent on an existing
                                  crew saves a new default agent
@@ -665,7 +666,7 @@ For crews that need durable multi-session context without cluttering the Git wor
 
 ### Enabling it
 
-Add `[memory]` to `.herdr/crew.toml`:
+Choose `wiki` at the setup wizard's **Memory** step (or pass `--memory wiki` to `init` or a first-time `up`), or add `[memory]` to an existing `.herdr/crew.toml`:
 
 ```toml
 [memory]
