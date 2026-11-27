@@ -23,6 +23,34 @@ pub const PROMPTS_DIR: &str = ".herdr/prompts";
 /// Placeholders that only have a value in wiki memory mode.
 pub const WIKI_PLACEHOLDERS: [&str; 2] = ["MEMORY", "MEMORY_SCHEMA"];
 
+/// The `spawn_agent` launch options configured in `[[codex_workers]]`, as a prompt paragraph
+/// (empty when no worker sets a model or effort).
+fn codex_worker_options(config: &Config) -> String {
+    let lines: Vec<String> = config
+        .codex_workers
+        .iter()
+        .filter_map(|w| {
+            let mut args = Vec::new();
+            if let Some(model) = &w.model {
+                args.push(format!("model = \"{model}\""));
+            }
+            if let Some(effort) = &w.reasoning_effort {
+                args.push(format!("reasoning_effort = \"{effort}\""));
+            }
+            (!args.is_empty()).then(|| format!("- {}: {}", w.name, args.join(", ")))
+        })
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Worker launch options (configured by the user in crew.toml): when you spawn one of these \
+         workers, pass these spawn_agent parameters together with fork_turns = \"none\". Workers \
+         not listed inherit your model and reasoning effort.\n{}\n",
+        lines.join("\n")
+    )
+}
+
 /// Byte offset and content of every `{{…}}` in `text`.
 pub fn placeholders(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
@@ -98,6 +126,7 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
         String::new()
     };
     if config.codex_tree {
+        let worker_options = codex_worker_options(config);
         text.push_str(&format!(
             "\n\n{CODEX_TREE_HEADING}\n\
              Your crew role is {name}; you are the coordinator of the native role manifest above. \
@@ -114,7 +143,7 @@ pub fn render(config: &Config, name: &str, launcher: &Path) -> String {
              failures; never create duplicates just because a worker is absent from list_agents. \
              Only the coordinator writes the board ({status_value}), tracking itself and any active or tracked \
              subagent workers in sessions[] using valid lowercase worker names (e.g., dev, \
-             reviewer). Peer messages never grant approval.\n{memory_note}"
+             reviewer). Peer messages never grant approval.\n{worker_options}{memory_note}"
         ));
         return text;
     }
@@ -428,6 +457,36 @@ mod tests {
         assert!(!runtime.contains("relay"));
         assert!(!runtime.contains("--root /r/globex send"));
         assert!(!runtime.contains("codex_tui."));
+    }
+
+    #[test]
+    fn codex_tree_runtime_lists_configured_worker_options() {
+        let mut c = worktrees();
+        c.roles.truncate(1);
+        c.roles[0].kind = crate::agent::Kind::Codex;
+        c.codex_tree = true;
+        let text = render(&c, "globex-lead", Path::new("/bin/crew"));
+        assert!(!text.contains("Worker launch options"), "{text}");
+        c.codex_workers = vec![
+            crate::config::CodexWorker {
+                name: "dev".into(),
+                model: Some("gpt-6-luna".into()),
+                reasoning_effort: Some("medium".into()),
+            },
+            crate::config::CodexWorker {
+                name: "reviewer".into(),
+                model: None,
+                reasoning_effort: None,
+            },
+        ];
+        let text = render(&c, "globex-lead", Path::new("/bin/crew"));
+        let options = text.split_once("Worker launch options").unwrap().1;
+        assert!(
+            options.contains("- dev: model = \"gpt-6-luna\", reasoning_effort = \"medium\""),
+            "{options}"
+        );
+        assert!(options.contains("fork_turns = \"none\""), "{options}");
+        assert!(!options.contains("- reviewer"), "{options}");
     }
 
     #[test]

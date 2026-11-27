@@ -203,7 +203,7 @@ impl Wizard {
     }
 
     fn configured_roles(&self) -> &'static [(&'static str, Duty)] {
-        init::configured_roles(self.agent(), self.preset(), self.topology())
+        init::configured_roles(self.agent(), self.preset())
     }
 
     fn uses_worktrees(&self) -> bool {
@@ -586,7 +586,15 @@ impl Wizard {
         let rows: Vec<Row> = self
             .configured_roles()
             .iter()
-            .map(|(suffix, duty)| {
+            .enumerate()
+            .map(|(i, (suffix, duty))| {
+                // Codex tree workers are native subagents: unset values follow the coordinator.
+                let worker = self.is_codex_tree() && i > 0;
+                let unset = if worker {
+                    "coordinator's"
+                } else {
+                    "agent default"
+                };
                 let (base_model, base_effort) =
                     init::options_model_effort(&profile.options(agent, *duty));
                 let options =
@@ -597,12 +605,17 @@ impl Wizard {
                     match value {
                         Some(v) if changed => Cell::from(Span::styled(v, accent())),
                         Some(v) => Cell::from(v),
-                        None if changed => Cell::from(Span::styled("agent default", accent())),
-                        None => Cell::from(Span::styled("agent default", dim())),
+                        None if changed => Cell::from(Span::styled(unset, accent())),
+                        None => Cell::from(Span::styled(unset, dim())),
                     }
                 };
+                let name = if worker {
+                    format!("{} (subagent)", suffix.replace('-', "_"))
+                } else {
+                    format!("{}-{suffix}", self.name.value)
+                };
                 Row::new(vec![
-                    Cell::from(format!("{}-{suffix}", self.name.value)),
+                    Cell::from(name),
                     Cell::from(duty.as_str()),
                     cell(model, base_model),
                     cell(effort, base_effort),
@@ -1484,6 +1497,15 @@ mod tests {
         assert_eq!(wizard.step, Step::Models);
         let models_screen = draw(&mut wizard, 110, 28);
         assert!(models_screen.contains("-lead"), "{models_screen}");
+        // Native subagents get their own model and effort rows.
+        assert!(
+            models_screen.contains("dev_a (subagent)"),
+            "{models_screen}"
+        );
+        assert!(
+            models_screen.contains("reviewer (subagent)"),
+            "{models_screen}"
+        );
         assert!(!models_screen.contains("-dev-a"), "{models_screen}");
         let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}");
         assert!(selection.is_codex_tree());
@@ -1492,6 +1514,12 @@ mod tests {
         assert!(config.codex_tree);
         assert!(config.worktrees.is_none());
         assert_eq!(config.roles.len(), 1);
+        let workers: Vec<&str> = config
+            .codex_workers
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect();
+        assert_eq!(workers, ["dev_a", "dev_b", "reviewer"]);
 
         // Codex review + tree skips Worktrees and Base straight to Ignore.
         let review_opts = Options {

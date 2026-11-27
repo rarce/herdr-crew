@@ -5,11 +5,13 @@ use toml_edit::{DocumentMut, Item, Table, TableLike, value};
 
 use crate::agent::Kind;
 
-/// The defaults at the top level, or one entry of `[[roles]]`.
+/// The defaults at the top level, one entry of `[[roles]]`, or one entry of
+/// `[[codex_workers]]` (whose options sit directly in the entry, without an agent table).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     Defaults,
     Role(usize),
+    Worker(usize),
 }
 
 pub fn parse(text: &str) -> Result<DocumentMut, String> {
@@ -24,6 +26,11 @@ fn table(doc: &DocumentMut, target: Target) -> Option<&dyn TableLike> {
             .as_array_of_tables()?
             .get(i)
             .map(|t| t as &dyn TableLike),
+        Target::Worker(i) => doc
+            .get("codex_workers")?
+            .as_array_of_tables()?
+            .get(i)
+            .map(|t| t as &dyn TableLike),
     }
 }
 
@@ -35,6 +42,25 @@ fn table_mut(doc: &mut DocumentMut, target: Target) -> Option<&mut dyn TableLike
             .as_array_of_tables_mut()?
             .get_mut(i)
             .map(|t| t as &mut dyn TableLike),
+        Target::Worker(i) => doc
+            .get_mut("codex_workers")?
+            .as_array_of_tables_mut()?
+            .get_mut(i)
+            .map(|t| t as &mut dyn TableLike),
+    }
+}
+
+/// Assigns through an existing value, keeping its comments.
+fn assign(options: &mut dyn TableLike, key: &str, new: &str) {
+    match options.get_mut(key) {
+        Some(item) if item.is_value() => {
+            let decor = item.as_value().unwrap().decor().clone();
+            *item = value(new);
+            *item.as_value_mut().unwrap().decor_mut() = decor;
+        }
+        _ => {
+            options.insert(key, value(new));
+        }
     }
 }
 
@@ -48,6 +74,9 @@ pub fn kind(doc: &DocumentMut, target: Target) -> Option<String> {
 
 /// Writes or, with `None`, removes the target's `kind`.
 pub fn set_kind(doc: &mut DocumentMut, target: Target, kind: Option<Kind>) {
+    if matches!(target, Target::Worker(_)) {
+        return;
+    }
     let Some(t) = table_mut(doc, target) else {
         return;
     };
@@ -71,6 +100,9 @@ pub fn set_kind(doc: &mut DocumentMut, target: Target, kind: Option<Kind>) {
 
 /// The value of `[<agent>].<key>` or `[roles.<agent>].<key>` written at the target.
 pub fn option(doc: &DocumentMut, target: Target, agent: Kind, key: &str) -> Option<String> {
+    if matches!(target, Target::Worker(_)) {
+        return table(doc, target)?.get(key)?.as_str().map(str::to_string);
+    }
     table(doc, target)?
         .get(agent.as_str())?
         .as_table_like()?
@@ -92,6 +124,16 @@ pub fn set_option(
     let Some(t) = table_mut(doc, target) else {
         return;
     };
+    // A worker entry keeps its keys inline and stays, even empty, so that it remains listed.
+    if matches!(target, Target::Worker(_)) {
+        match new {
+            Some(new) => assign(t, key, new),
+            None => {
+                t.remove(key);
+            }
+        }
+        return;
+    }
     let name = agent.as_str();
     match new {
         Some(new) => {
@@ -107,16 +149,7 @@ pub fn set_option(
                 t.insert(name, Item::Table(options));
             }
             let options = t.get_mut(name).unwrap().as_table_like_mut().unwrap();
-            match options.get_mut(key) {
-                Some(item) if item.is_value() => {
-                    let decor = item.as_value().unwrap().decor().clone();
-                    *item = value(new);
-                    *item.as_value_mut().unwrap().decor_mut() = decor;
-                }
-                _ => {
-                    options.insert(key, value(new));
-                }
-            }
+            assign(options, key, new);
             if let Some(inline) = t.get_mut(name).and_then(Item::as_inline_table_mut) {
                 inline.fmt();
             }

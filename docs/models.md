@@ -84,6 +84,11 @@ reviewers or researchers, and other roles are developers. `herdr-crew config` sh
 - **`p`** applies a profile to every role at once, by duty; **`Del`** returns a cell to its
   inherited value; **`s`** saves.
 
+In a Codex tree crew (`codex_tree = true`) the native subagents from `[[codex_workers]]` are
+rows too: their model and effort are what the coordinator passes to `spawn_agent`, unset values
+inherit the coordinator's, and their agent is always the coordinator's. Tree crews keep their
+single coordinator's agent; to use another agent, set the crew up again with `init`.
+
 Every change is validated before it is applied, and saving keeps the file's comments and
 formatting. Inherited values are shown dimmed with `↳`, and the footer shows the flags the
 selected role launches with.

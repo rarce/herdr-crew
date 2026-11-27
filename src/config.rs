@@ -58,6 +58,18 @@ pub struct Config {
     /// First message of a new conversation, unless the role has its own.
     pub start_message: Option<String>,
     pub roles: Vec<Role>,
+    /// Launch options of the native subagents a `codex_tree` coordinator spawns, in file order.
+    pub codex_workers: Vec<CodexWorker>,
+}
+
+/// One `[[codex_workers]]` entry: the model and reasoning effort the coordinator passes to
+/// `spawn_agent` for the manifest worker `name` (its `task_name`). Unset values inherit the
+/// coordinator's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexWorker {
+    pub name: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +169,16 @@ struct RawConfig {
     start_message: Option<String>,
     #[serde(default)]
     roles: Vec<RawRole>,
+    #[serde(default)]
+    codex_workers: Vec<RawCodexWorker>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCodexWorker {
+    name: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -222,7 +244,9 @@ const ROOT_KEYS: &[&str] = &[
     "common_prompt",
     "start_message",
     "roles",
+    "codex_workers",
 ];
+const CODEX_WORKER_KEYS: &[&str] = &["name", "model", "reasoning_effort"];
 const TABLE_KEYS: &[(&str, &[&str])] = &[
     ("claude", CLAUDE_KEYS),
     ("codex", CODEX_KEYS),
@@ -358,6 +382,31 @@ impl Config {
                     .any(|r| r.kind.unwrap_or(raw.kind) != Kind::Agy || r.worktree || r.extra))
         {
             err("agy_tree requires exactly one agy coordinator without worktree or extra".into());
+        }
+        if !codex_tree && !raw.codex_workers.is_empty() {
+            err("codex_workers applies only with codex_tree = true".into());
+        }
+        for (i, w) in raw.codex_workers.iter().enumerate() {
+            if !is_worker_name(&w.name) {
+                err(format!(
+                    "codex_workers[{i}].name \"{}\": must match [a-z][a-z0-9_]{{0,31}}",
+                    w.name
+                ));
+            }
+            if let Some(j) = raw.codex_workers[..i].iter().position(|o| o.name == w.name) {
+                err(format!(
+                    "codex_workers[{i}].name \"{}\" is repeated (already in codex_workers[{j}])",
+                    w.name
+                ));
+            }
+            let options = CodexOptions {
+                model: w.model.clone(),
+                reasoning_effort: w.reasoning_effort.clone(),
+                ..CodexOptions::default()
+            };
+            for problem in options.problems() {
+                err(format!("codex_workers[{i}].{problem}"));
+            }
         }
         for problem in raw.claude.problems() {
             err(format!("claude.{problem}"));
@@ -567,6 +616,15 @@ impl Config {
                     start_message: r.start_message,
                 })
                 .collect(),
+            codex_workers: raw
+                .codex_workers
+                .into_iter()
+                .map(|w| CodexWorker {
+                    name: w.name,
+                    model: w.model,
+                    reasoning_effort: w.reasoning_effort,
+                })
+                .collect(),
         })
     }
 
@@ -670,6 +728,11 @@ pub fn is_agent_name(name: &str) -> bool {
         && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
 }
 
+/// A native Codex `task_name`: like an agent name but without '-'.
+fn is_worker_name(name: &str) -> bool {
+    is_agent_name(name) && !name.contains('-')
+}
+
 /// The number N if `name` is `<base>-N` with N ≥ 2 written without leading zeros.
 pub fn extra_number(name: &str, base: &str) -> Option<u32> {
     let digits = name.strip_prefix(base)?.strip_prefix('-')?;
@@ -697,6 +760,14 @@ fn unknown_keys(root: &DeTable<'_>) -> Vec<(Range<usize>, String)> {
         if let Some((_, known)) = TABLE_KEYS.iter().find(|(k, _)| *k == key) {
             if let DeValue::Table(t) = value.get_ref() {
                 check(t, known, &format!("[{key}]"));
+            }
+        } else if key == "codex_workers"
+            && let DeValue::Array(items) = value.get_ref()
+        {
+            for (i, item) in items.iter().enumerate() {
+                if let DeValue::Table(t) = item.get_ref() {
+                    check(t, CODEX_WORKER_KEYS, &format!("codex_workers[{i}]"));
+                }
             }
         } else if key == "roles"
             && let DeValue::Array(items) = value.get_ref()
@@ -1383,6 +1454,73 @@ prompt = '''You are {{NAME}}.'''
     }
 
     #[test]
+    fn codex_workers_set_subagent_options_only_in_codex_tree() {
+        let root = Path::new("/r/p");
+        let tree = format!("codex_tree = true\nkind = \"codex\"\n{MIN}");
+        let workers = "[[codex_workers]]\nname = \"dev\"\nmodel = \"gpt-6-luna\"\n\
+                       [[codex_workers]]\nname = \"reviewer\"\nreasoning_effort = \"high\"\n\
+                       [[codex_workers]]\nname = \"researcher_a\"\n";
+        let parsed = Config::parse(&format!("{tree}{workers}"), root).unwrap();
+        assert_eq!(
+            parsed.codex_workers,
+            [
+                CodexWorker {
+                    name: "dev".into(),
+                    model: Some("gpt-6-luna".into()),
+                    reasoning_effort: None,
+                },
+                CodexWorker {
+                    name: "reviewer".into(),
+                    model: None,
+                    reasoning_effort: Some("high".into()),
+                },
+                CodexWorker {
+                    name: "researcher_a".into(),
+                    model: None,
+                    reasoning_effort: None,
+                },
+            ]
+        );
+        // Subagents are not roles or tabs.
+        assert_eq!(parsed.roles.len(), 1);
+        assert!(!parsed.is_known_tab("dev"));
+
+        let e = errors(&format!("kind = \"codex\"\n{MIN}{workers}"));
+        assert!(
+            e.iter()
+                .any(|e| e.ends_with("codex_workers applies only with codex_tree = true")),
+            "{e:?}"
+        );
+        let e = errors(&format!(
+            "{tree}[[codex_workers]]\nname = \"dev-a\"\n[[codex_workers]]\nname = \"dev-a\"\n\
+             reasoning_effort = \"huge\"\n"
+        ));
+        assert!(
+            e.iter()
+                .any(|e| e.contains("codex_workers[0].name \"dev-a\": must match")),
+            "{e:?}"
+        );
+        assert!(
+            e.iter()
+                .any(|e| e.contains("codex_workers[1].name \"dev-a\" is repeated")),
+            "{e:?}"
+        );
+        assert!(
+            e.iter()
+                .any(|e| e.contains("codex_workers[1].reasoning_effort: expected one of")),
+            "{e:?}"
+        );
+        let e = errors(&format!(
+            "{tree}[[codex_workers]]\nname = \"dev\"\nsandbox = \"read-only\"\n"
+        ));
+        assert!(
+            e.iter()
+                .any(|e| e.ends_with("unknown key \"sandbox\" in codex_workers[0]")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
     fn codex_tree_and_legacy_alias_require_one_shared_codex_coordinator() {
         let root = Path::new("/r/p");
         for key in ["codex_tree", "experimental_codex_tree"] {
@@ -1523,7 +1661,7 @@ prompt = '''You are {{NAME}}.'''
             send(&mut editor, "{enter}1{enter}");
             let screen = draw(&mut editor, 120, 30);
             assert!(
-                screen.contains("not applied: agy_tree requires exactly one agy coordinator"),
+                screen.contains("agy_tree crews run one agy coordinator"),
                 "{screen}"
             );
             assert!(!screen.contains("unsaved"), "{screen}");
@@ -1531,7 +1669,7 @@ prompt = '''You are {{NAME}}.'''
             send(&mut editor, "{down}{enter}3{enter}");
             let screen = draw(&mut editor, 120, 30);
             assert!(
-                screen.contains("not applied: agy_tree requires exactly one agy coordinator"),
+                screen.contains("agy_tree crews run one agy coordinator"),
                 "{screen}"
             );
             assert!(!screen.contains("unsaved"), "{screen}");

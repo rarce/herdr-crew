@@ -196,6 +196,18 @@ herdr-crew init --agent codex --preset review --topology tree --yes
 
 In tree mode, Herdr starts one Codex coordinator tab and the status board tab, without `[worktrees]` or a Git remote requirement. The coordinator spawns manifest worker roles as native subagents in the same collaboration tree (`spawn_agent` / `followup_task` / `list_agents`); each worker's final response returns to the coordinator automatically without Herdr socket access, keeping `workspace-write` permissions intact. Inspect worker threads with Codex `/subagents`.
 
+Each worker's model and reasoning effort go in `[[codex_workers]]` (written by setup, one entry per manifest worker, and editable with `herdr-crew config`). The coordinator passes them to `spawn_agent` with `fork_turns = "none"`; a worker without them inherits the coordinator's:
+
+```toml
+[[codex_workers]]
+name = "dev"            # the worker's task_name in the manifest
+model = "gpt-6.2-sol"
+reasoning_effort = "medium"
+
+[[codex_workers]]
+name = "reviewer"       # no options: inherits the coordinator's model and effort
+```
+
 Tree mode requires Codex 0.163.0+ (enforced by `check`, `up` and `codex-resume`); herdr-crew launches the coordinator from `up` and resumes it through `herdr-crew codex-resume` (Herdr's restore command) with `-c features.multi_agent_v2=true`, so those paths need no change to `~/.codex/config.toml`. Keep `features.multi_agent_v2 = true` there if you resume the coordinator any other way, such as a plain `codex resume <id>` or Herdr's fallback when the crew hook never reported its resume command. It runs all workers in the shared main checkout (for `parallel`, assign disjoint files before parallel edits). Only the coordinator writes `.herdr/status.json`, tracking itself and any active or tracked subagent workers in `sessions[]`. `experimental_codex_tree = true` remains accepted as a backward-compatible alias, and `experiments/codex_tree.py` remains available for converting an existing multi-tab crew into a disposable checkout. See the [native Codex tree guide](docs/codex-tree-experiment.md) for preparation, communication details, recovery requirements and limits.
 
 ## Claude Code options
@@ -405,7 +417,7 @@ Each role can run its own model and effort. `init` writes them from a profile, b
 
 Claude Code names are shown; Codex roles get `gpt-6.2-astra`, `gpt-6.2-sol` or `gpt-6-luna`, `agy` roles get `gemini-4-argon`, `gemini-4-neon`, `gemini-4-hydrogen` or `gemini-3.8-flash`, and pi roles keep their provider's model and get only the thinking level. The reasoning behind these choices and when a change takes effect are in [models and effort](docs/models.md).
 
-Change them later with `herdr-crew config`, a terminal editor for the agent, model and effort of the defaults and of each role. `p` applies a profile to every role, `Del` returns a value to its default, `s` saves. Edits are validated before they apply, and saving keeps the file's comments and formatting.
+Change them later with `herdr-crew config`, a terminal editor for the agent, model and effort of the defaults and of each role (and of each native subagent in a Codex tree crew). `p` applies a profile to every role, `Del` returns a value to its default, `s` saves. Edits are validated before they apply, and saving keeps the file's comments and formatting.
 
 Use `--yes` for non-interactive setup. Preview a parallel crew with:
 
