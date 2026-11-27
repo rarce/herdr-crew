@@ -10,6 +10,8 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-11-26
+
 ### Fixed
 
 - Wiki memory: when two processes with different environments pin the memory directory at
@@ -475,7 +477,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/rarce/herdr-crew/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/rarce/herdr-crew/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/rarce/herdr-crew/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/rarce/herdr-crew/compare/v0.12.1...v0.13.0
