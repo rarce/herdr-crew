@@ -353,6 +353,17 @@ fn create_pin(
     }
 }
 
+/// Whether `a` and `b` are the same existing directory (or either cannot be inspected, which
+/// keeps callers on the safe side).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        (Ok(_), Err(e)) if e.kind() == io::ErrorKind::NotFound => false,
+        _ => true,
+    }
+}
+
 fn same_file(file: &fs::File, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (file.metadata(), fs::symlink_metadata(path)) {
@@ -376,6 +387,80 @@ fn read_pin(pin_path: &Path) -> Result<String, String> {
         attempts += 1;
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// The contents of a memory directory right after this process created and initialized it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fresh(Vec<(String, Option<Vec<u8>>)>);
+
+/// Records every entry of `dir` except the lock and temporary files (file contents, and the
+/// subdirectories, which must be empty), taken right after this process created and initialized
+/// it so that `remove_unused` can tell later whether anything else used it. `None` when the
+/// directory holds anything else.
+pub fn fresh(dir: &Path) -> Option<Fresh> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name().into_string().ok()?;
+        let meta = fs::symlink_metadata(entry.path()).ok()?;
+        if meta.is_file() {
+            if name == LOCK_FILE || (name.starts_with('.') && name.ends_with(".tmp")) {
+                continue;
+            }
+            entries.push((name, Some(fs::read(entry.path()).ok()?)));
+        } else if meta.is_dir() && SUBDIRS.contains(&name.as_str()) {
+            fs::read_dir(entry.path())
+                .ok()?
+                .next()
+                .is_none()
+                .then_some(())?;
+            entries.push((name, None));
+        } else {
+            return None;
+        }
+    }
+    entries.sort();
+    Some(Fresh(entries))
+}
+
+/// Removes `dir`, created by this process and then left unused because another process pinned a
+/// different directory first (`pinned`, never the same directory under another name), but only while no one holds its lock and it is still exactly as
+/// `fresh` recorded it. Returns whether it was removed; anything else keeps it, and a partial
+/// removal leaves what remains for the user to delete.
+pub fn remove_unused(dir: &Path, fresh: &Fresh, pinned: &Path) -> bool {
+    if !check_dir_not_symlink(dir).unwrap_or(false) || same_dir(dir, pinned) {
+        return false;
+    }
+    // A short wait: a writer that finishes in time has changed the contents, which keeps it.
+    let Ok(_lock) = lock_memory(dir, Duration::from_secs(1)) else {
+        return false;
+    };
+    if self::fresh(dir).as_ref() != Some(fresh) {
+        return false;
+    }
+    // `project.json` goes last, so a partial removal leaves a directory herdr-crew still owns.
+    let mut entries: Vec<_> = fresh.0.iter().collect();
+    entries.sort_by_key(|(name, _)| name == "project.json");
+    for (name, contents) in entries {
+        let path = dir.join(name);
+        let removed = match contents {
+            Some(_) => fs::remove_file(&path),
+            None => fs::remove_dir(&path),
+        };
+        if removed.is_err() {
+            return false;
+        }
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == LOCK_FILE || (name.starts_with('.') && name.ends_with(".tmp")) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    fs::remove_dir(dir).is_ok()
 }
 
 /// Result of `ensure_initialized`.
@@ -2637,6 +2722,56 @@ mod tests {
         assert!(err.contains("another herdr-crew process"), "{err}");
         drop(held);
         ensure_initialized(&mem, &c, "2026-11-26T09:00:00-03:00", LOCK_WAIT).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unused_fresh_directory_is_removed_only_while_untouched() {
+        let dir = temp_dir("unused");
+        let c = basic();
+        let now = "2026-11-26T09:00:00-03:00";
+
+        let mem = dir.join("lost");
+        ensure_initialized(&mem, &c, now, LOCK_WAIT).unwrap();
+        let fresh = fresh(&mem).expect("only seeded files");
+        // Never the pinned directory, even under another name.
+        let alias = dir.join("alias");
+        std::os::unix::fs::symlink(&mem, &alias).unwrap();
+        assert!(!remove_unused(&mem, &fresh, &alias));
+        assert!(!remove_unused(&mem, &fresh, &mem));
+        assert!(remove_unused(&mem, &fresh, &dir.join("winner")));
+        assert!(!mem.exists());
+        fs::remove_file(&alias).unwrap();
+        assert!(dir.exists(), "the parent stays");
+
+        // Written to since: kept.
+        ensure_initialized(&mem, &c, now, LOCK_WAIT).unwrap();
+        let fresh = super::fresh(&mem).unwrap();
+        fs::write(mem.join("notes/n.md"), "# note\n").unwrap();
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
+        assert!(mem.join("notes/n.md").exists());
+        fs::remove_file(mem.join("notes/n.md")).unwrap();
+        fs::write(mem.join("now.md"), "edited\n").unwrap();
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
+        assert!(mem.join("now.md").exists());
+
+        // In use by another writer: kept.
+        let mem = dir.join("busy");
+        ensure_initialized(&mem, &c, now, LOCK_WAIT).unwrap();
+        let fresh = super::fresh(&mem).unwrap();
+        let held = lock_memory(&mem, LOCK_WAIT).unwrap();
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
+        drop(held);
+        assert!(mem.join("project.json").exists());
+
+        // A new file, or a non-empty or unexpected subdirectory: kept.
+        fs::write(mem.join("other.txt"), "x").unwrap();
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
+        fs::remove_file(mem.join("other.txt")).unwrap();
+        fs::create_dir(mem.join("extra")).unwrap();
+        assert!(super::fresh(&mem).is_none());
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
+        assert!(mem.join("project.json").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
