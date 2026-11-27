@@ -85,9 +85,12 @@ reviewers or researchers, and other roles are developers. `herdr-crew config` sh
   inherited value; **`s`** saves.
 
 In a Codex tree crew (`codex_tree = true`) the native subagents from `[[codex_workers]]` are
-rows too: their model and effort are what the coordinator passes to `spawn_agent`, unset values
-inherit the coordinator's, and their agent is always the coordinator's. Tree crews keep their
-single coordinator's agent; to use another agent, set the crew up again with `init`.
+rows too: their model and effort are what the coordinator passes to `spawn_agent` (a worker
+that sets one gets the coordinator's value for the other; one that sets neither inherits the
+coordinator's), and their agent is always the coordinator's. Profiles, in setup and with `p`,
+set only the roles, since per-subagent options were verified with Codex 0.172.0 only. Tree
+crews keep their single coordinator's agent; to use another agent, set the crew up again
+with `init`.
 
 Every change is validated before it is applied, and saving keeps the file's comments and
 formatting. Inherited values are shown dimmed with `↳`, and the footer shows the flags the

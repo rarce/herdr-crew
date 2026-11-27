@@ -26,11 +26,15 @@ fn table(doc: &DocumentMut, target: Target) -> Option<&dyn TableLike> {
             .as_array_of_tables()?
             .get(i)
             .map(|t| t as &dyn TableLike),
-        Target::Worker(i) => doc
-            .get("codex_workers")?
-            .as_array_of_tables()?
-            .get(i)
-            .map(|t| t as &dyn TableLike),
+        // `[[codex_workers]]` or an inline `codex_workers = [{ … }]`.
+        Target::Worker(i) => match doc.get("codex_workers")? {
+            Item::ArrayOfTables(a) => a.get(i).map(|t| t as &dyn TableLike),
+            item => item
+                .as_array()?
+                .get(i)?
+                .as_inline_table()
+                .map(|t| t as &dyn TableLike),
+        },
     }
 }
 
@@ -42,11 +46,14 @@ fn table_mut(doc: &mut DocumentMut, target: Target) -> Option<&mut dyn TableLike
             .as_array_of_tables_mut()?
             .get_mut(i)
             .map(|t| t as &mut dyn TableLike),
-        Target::Worker(i) => doc
-            .get_mut("codex_workers")?
-            .as_array_of_tables_mut()?
-            .get_mut(i)
-            .map(|t| t as &mut dyn TableLike),
+        Target::Worker(i) => match doc.get_mut("codex_workers")? {
+            Item::ArrayOfTables(a) => a.get_mut(i).map(|t| t as &mut dyn TableLike),
+            item => item
+                .as_array_mut()?
+                .get_mut(i)?
+                .as_inline_table_mut()
+                .map(|t| t as &mut dyn TableLike),
+        },
     }
 }
 

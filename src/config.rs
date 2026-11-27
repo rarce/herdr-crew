@@ -340,8 +340,10 @@ impl Config {
         if raw.roles.is_empty() {
             err("roles[] is empty: at least one role is needed".to_string());
         }
+        let mut tree_contradiction = false;
         let codex_tree = match (raw.codex_tree, raw.experimental_codex_tree) {
             (Some(a), Some(b)) if a != b => {
+                tree_contradiction = true;
                 err(
                     "codex_tree and experimental_codex_tree cannot have contradictory values"
                         .into(),
@@ -383,7 +385,7 @@ impl Config {
         {
             err("agy_tree requires exactly one agy coordinator without worktree or extra".into());
         }
-        if !codex_tree && !raw.codex_workers.is_empty() {
+        if !codex_tree && !tree_contradiction && !raw.codex_workers.is_empty() {
             err("codex_workers applies only with codex_tree = true".into());
         }
         for (i, w) in raw.codex_workers.iter().enumerate() {
@@ -626,6 +628,26 @@ impl Config {
                 })
                 .collect(),
         })
+    }
+
+    /// The `spawn_agent` model and reasoning effort the coordinator passes for a worker. A
+    /// worker that sets either gets both, the missing one from the coordinator, because Codex
+    /// would otherwise pick its own default for it; a worker that sets neither gets none.
+    pub fn codex_worker_params(&self, worker: &CodexWorker) -> (Option<String>, Option<String>) {
+        if worker.model.is_none() && worker.reasoning_effort.is_none() {
+            return (None, None);
+        }
+        let coordinator = self.roles.first().map(|r| &r.codex);
+        (
+            worker
+                .model
+                .clone()
+                .or_else(|| coordinator.and_then(|c| c.model.clone())),
+            worker
+                .reasoning_effort
+                .clone()
+                .or_else(|| coordinator.and_then(|c| c.reasoning_effort.clone())),
+        )
     }
 
     /// Whether this crew runs in single-coordinator native tree mode.
@@ -1490,6 +1512,32 @@ prompt = '''You are {{NAME}}.'''
             e.iter()
                 .any(|e| e.ends_with("codex_workers applies only with codex_tree = true")),
             "{e:?}"
+        );
+        // A contradictory tree flag is reported once, without a misleading codex_workers error.
+        let e = errors(&format!(
+            "codex_tree = true\nexperimental_codex_tree = false\nkind = \"codex\"\n{MIN}{workers}"
+        ));
+        assert!(
+            !e.iter().any(|e| e.contains("codex_workers applies")),
+            "{e:?}"
+        );
+        // A worker that sets one value gets the other from the coordinator.
+        let with_lead = format!(
+            "{tree}[roles.codex]\nmodel = \"gpt-6.2-astra\"\nreasoning_effort = \"xhigh\"\n{workers}"
+        );
+        let parsed = Config::parse(&with_lead, root).unwrap();
+        let params: Vec<_> = parsed
+            .codex_workers
+            .iter()
+            .map(|w| parsed.codex_worker_params(w))
+            .collect();
+        assert_eq!(
+            params,
+            [
+                (Some("gpt-6-luna".into()), Some("xhigh".into())),
+                (Some("gpt-6.2-astra".into()), Some("high".into())),
+                (None, None),
+            ]
         );
         let e = errors(&format!(
             "{tree}[[codex_workers]]\nname = \"dev-a\"\n[[codex_workers]]\nname = \"dev-a\"\n\

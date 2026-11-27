@@ -238,9 +238,28 @@ impl Selection {
         configured_roles(self.agent, self.preset)
             .iter()
             .any(|(suffix, duty)| {
-                role_options(self.agent, self.profile, *duty, self.overrides.get(*suffix))
-                    != self.profile.options(self.agent, *duty)
+                let profile =
+                    role_profile(self.agent, self.preset, self.topology, *duty, self.profile);
+                role_options(self.agent, profile, *duty, self.overrides.get(*suffix))
+                    != profile.options(self.agent, *duty)
             })
+    }
+}
+
+/// The profile that sets a role's model and effort during setup. Codex tree subagents get no
+/// profile values: they inherit the coordinator's unless the user sets them explicitly, so a
+/// default setup never asks `spawn_agent` for parameters older Codex versions may not accept.
+pub(crate) fn role_profile(
+    agent: Kind,
+    preset: Preset,
+    topology: Topology,
+    duty: Duty,
+    profile: Profile,
+) -> Profile {
+    if is_codex_tree(agent, preset, topology) && duty != Duty::Lead {
+        Profile::Inherit
+    } else {
+        profile
     }
 }
 
@@ -767,9 +786,16 @@ fn choose(
         let efforts_hint = models::efforts(agent).join(", ");
         let effort_key = models::effort_key(agent);
         for (suffix, duty) in configured_roles(agent, preset) {
+            let profile = role_profile(agent, preset, topology, *duty, profile);
+            let worker = is_codex_tree(agent, preset, topology) && *duty != Duty::Lead;
+            let inherit = if worker {
+                "the coordinator's"
+            } else {
+                "agent default"
+            };
             let (default_model, default_effort) =
                 options_model_effort(&profile.options(agent, *duty));
-            if is_codex_tree(agent, preset, topology) && *duty != Duty::Lead {
+            if worker {
                 writeln!(
                     output,
                     "\nSubagent {} ({}; unset values follow the coordinator):",
@@ -789,13 +815,14 @@ fn choose(
                 let model_answer = ask(
                     input,
                     output,
-                    "  Model (name or 'inherit' for agent default)",
+                    &format!("  Model (name or 'inherit' for {inherit})"),
                     Some(default_model.as_deref().unwrap_or("inherit")),
                 )?;
                 let model = (!model_answer.eq_ignore_ascii_case("inherit")
                     && !model_answer.is_empty())
                 .then_some(model_answer);
-                let effort_label = format!("  {effort_key} ({efforts_hint}, or 'inherit')");
+                let effort_label =
+                    format!("  {effort_key} ({efforts_hint}, or 'inherit' for {inherit})");
                 let effort_answer = ask(
                     input,
                     output,
@@ -1132,9 +1159,10 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
         selection.preset.roles()[1..]
             .iter()
             .map(|(suffix, duty)| {
+                // Only explicit choices: the profile leaves subagents on the coordinator's.
                 let (model, reasoning_effort) = options_model_effort(&role_options(
                     selection.agent,
-                    selection.profile,
+                    Profile::Inherit,
                     *duty,
                     selection.overrides.get(*suffix),
                 ));
@@ -2220,6 +2248,19 @@ mod tests {
             assert_eq!(config.kind, Kind::Codex);
             assert!(config.worktrees.is_none());
             assert_eq!(config.roles.len(), 1);
+            // Default setup lists every subagent without spawn_agent options.
+            assert_eq!(
+                config.codex_workers.len(),
+                preset.roles().len() - 1,
+                "{text}"
+            );
+            assert!(
+                config
+                    .codex_workers
+                    .iter()
+                    .all(|w| w.model.is_none() && w.reasoning_effort.is_none()),
+                "{text}"
+            );
             assert_eq!(config.roles[0].name, "acme-lead");
             assert!(!config.roles[0].worktree);
             assert!(!config.roles[0].extra);
@@ -2305,7 +2346,8 @@ mod tests {
             workers,
             [
                 ("dev", Some("gpt-6-luna"), Some("medium")),
-                ("reviewer", None, Some("high")),
+                // The profile leaves subagents on the coordinator's values.
+                ("reviewer", None, None),
             ]
         );
 

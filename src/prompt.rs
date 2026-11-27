@@ -30,13 +30,7 @@ fn codex_worker_options(config: &Config) -> String {
         .codex_workers
         .iter()
         .filter_map(|w| {
-            let mut args = Vec::new();
-            if let Some(model) = &w.model {
-                args.push(format!("model = \"{model}\""));
-            }
-            if let Some(effort) = &w.reasoning_effort {
-                args.push(format!("reasoning_effort = \"{effort}\""));
-            }
+            let args = codex_worker_args(config, w);
             (!args.is_empty()).then(|| format!("- {}: {}", w.name, args.join(", ")))
         })
         .collect();
@@ -45,10 +39,24 @@ fn codex_worker_options(config: &Config) -> String {
     }
     format!(
         "Worker launch options (configured by the user in crew.toml): when you spawn one of these \
-         workers, pass these spawn_agent parameters together with fork_turns = \"none\". Workers \
-         not listed inherit your model and reasoning effort.\n{}\n",
+         workers, pass these spawn_agent parameters together with fork_turns = \"none\". Spawn \
+         workers not listed without model or reasoning_effort.\n{}\n",
         lines.join("\n")
     )
+}
+
+/// The `spawn_agent` parameters for one worker, as `key = "value"` with the value quoted and
+/// escaped.
+pub fn codex_worker_args(config: &Config, worker: &crate::config::CodexWorker) -> Vec<String> {
+    let (model, effort) = config.codex_worker_params(worker);
+    let mut args = Vec::new();
+    if let Some(model) = model {
+        args.push(format!("model = {model:?}"));
+    }
+    if let Some(effort) = effort {
+        args.push(format!("reasoning_effort = {effort:?}"));
+    }
+    args
 }
 
 /// Byte offset and content of every `{{…}}` in `text`.
@@ -467,11 +475,17 @@ mod tests {
         c.codex_tree = true;
         let text = render(&c, "globex-lead", Path::new("/bin/crew"));
         assert!(!text.contains("Worker launch options"), "{text}");
+        c.roles[0].codex.reasoning_effort = Some("xhigh".into());
         c.codex_workers = vec![
             crate::config::CodexWorker {
                 name: "dev".into(),
                 model: Some("gpt-6-luna".into()),
                 reasoning_effort: Some("medium".into()),
+            },
+            crate::config::CodexWorker {
+                name: "quoted".into(),
+                model: Some("gpt\"x".into()),
+                reasoning_effort: None,
             },
             crate::config::CodexWorker {
                 name: "reviewer".into(),
@@ -486,6 +500,11 @@ mod tests {
             "{options}"
         );
         assert!(options.contains("fork_turns = \"none\""), "{options}");
+        // Quotes are escaped, and the missing effort comes from the coordinator.
+        assert!(
+            options.contains("- quoted: model = \"gpt\\\"x\", reasoning_effort = \"xhigh\""),
+            "{options}"
+        );
         assert!(!options.contains("- reviewer"), "{options}");
     }
 

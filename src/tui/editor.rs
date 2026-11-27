@@ -30,6 +30,9 @@ enum Column {
 
 const COLUMNS: [Column; 3] = [Column::Agent, Column::Model, Column::Effort];
 
+const WORKER_AGENT: &str =
+    "subagents run on the coordinator's agent (codex); edit their model and effort";
+
 enum Popup {
     Pick {
         title: String,
@@ -243,10 +246,8 @@ impl Editor {
     fn open_picker(&mut self) {
         let target = self.target();
         let agent = self.agent_of(target);
-        if COLUMNS[self.column] == Column::Agent
-            && let Some(why) = self.agent_locked(target)
-        {
-            self.status = Some((why, true));
+        if COLUMNS[self.column] == Column::Agent && matches!(target, Target::Worker(_)) {
+            self.status = Some((WORKER_AGENT.into(), true));
             return;
         }
         let inherit_note = match target {
@@ -297,37 +298,27 @@ impl Editor {
         });
     }
 
-    /// Why the agent of a target cannot change here, if it cannot.
-    fn agent_locked(&self, target: Target) -> Option<String> {
-        if matches!(target, Target::Worker(_)) {
-            return Some(
-                "subagents run on the coordinator's agent (codex); edit their model and effort"
-                    .into(),
-            );
-        }
+    /// Why a tree crew refused an agent change, in place of the raw validation error.
+    fn tree_agent_note(&self) -> Option<&'static str> {
         if self.config.codex_tree {
-            return Some(
-                "codex_tree crews run one Codex coordinator; to use another agent, set up the crew \
-                 again with herdr-crew init (tabs topology or another agent)"
-                    .into(),
-            );
-        }
-        if self.config.agy_tree {
-            return Some(
+            Some(
+                "codex_tree crews run one Codex coordinator; to use another agent, set up the \
+                 crew again with herdr-crew init (tabs topology or another agent)",
+            )
+        } else if self.config.agy_tree {
+            Some(
                 "agy_tree crews run one agy coordinator; to use another agent, set up the crew \
-                 again with herdr-crew init"
-                    .into(),
-            );
+                 again with herdr-crew init",
+            )
+        } else {
+            None
         }
-        None
     }
 
     fn write(&mut self, value: Option<String>) {
         let target = self.target();
-        if COLUMNS[self.column] == Column::Agent
-            && let Some(why) = self.agent_locked(target)
-        {
-            self.status = Some((why, true));
+        if COLUMNS[self.column] == Column::Agent && matches!(target, Target::Worker(_)) {
+            self.status = Some((WORKER_AGENT.into(), true));
             return;
         }
         let agent = self.agent_of(target);
@@ -355,6 +346,10 @@ impl Editor {
         });
         if applied {
             self.status = None;
+        } else if column == Column::Agent
+            && let Some(note) = self.tree_agent_note()
+        {
+            self.status = Some((format!("not applied: {note}"), true));
         }
     }
 
@@ -372,15 +367,6 @@ impl Editor {
                     };
                     (Target::Role(i), kind, model, effort)
                 })
-                .chain((0..self.config.codex_workers.len()).map(|i| {
-                    let target = Target::Worker(i);
-                    let (model, effort) =
-                        match profile.options(Kind::Codex, self.target_duty(target)) {
-                            AgentOptions::Codex(o) => (o.model, o.reasoning_effort),
-                            _ => (None, None),
-                        };
-                    (target, Kind::Codex, model, effort)
-                }))
                 .collect();
         let applied = self.edit(|doc| {
             for (target, kind, model, effort) in plan {
@@ -398,8 +384,17 @@ impl Editor {
             }
         });
         if applied {
+            // Subagents keep their values: they are set one by one, like setup does.
+            let note = if self.config.codex_workers.is_empty() {
+                ""
+            } else {
+                "; subagents keep their own values"
+            };
             self.status = Some((
-                format!("applied the {} profile to every role", profile.as_str()),
+                format!(
+                    "applied the {} profile to every role{note}",
+                    profile.as_str()
+                ),
                 false,
             ));
         }
@@ -567,14 +562,15 @@ impl Screen for Editor {
 
         let target = self.target();
         let agent = self.agent_of(target);
-        let (model, effort, args) = self.effective(target);
+        let (_, _, args) = self.effective(target);
         let launch = if let Target::Worker(i) = target {
+            // What the coordinator is told to pass, not the values shown as inherited.
+            let worker = &self.config.codex_workers[i];
             let mut params = vec![
-                format!("task_name = \"{}\"", self.config.codex_workers[i].name),
+                format!("task_name = {:?}", worker.name),
                 "fork_turns = \"none\"".to_string(),
             ];
-            params.extend(model.map(|m| format!("model = \"{m}\"")));
-            params.extend(effort.map(|e| format!("reasoning_effort = \"{e}\"")));
+            params.extend(crate::prompt::codex_worker_args(&self.config, worker));
             format!("spawn_agent {}", params.join(", "))
         } else if args.is_empty() {
             format!(
@@ -841,6 +837,7 @@ mod tests {
         let text = "version = 1\nkind = \"codex\"\ncodex_tree = true\n[workspace]\nlabel = \"cx\"\n\
                     [board]\ntab = \"cx-status\"\nwriter = \"cx-lead\"\n[[roles]]\nname = \"cx-lead\"\n\
                     prompt = \"Lead.\"\n[roles.codex]\nmodel = \"gpt-6.2-astra\"\n\
+                    reasoning_effort = \"xhigh\"\n\
                     [[codex_workers]]\nname = \"dev\"\n[[codex_workers]]\nname = \"reviewer\"\n\
                     model = \"gpt-6.2-sol\" # keep me\n";
         let mut editor = Editor::new(root, text).unwrap();
@@ -878,22 +875,78 @@ mod tests {
             editor.text()
         );
 
+        // The reviewer sets only its model: the Launch line completes the effort from the
+        // coordinator, as the prompt does.
+        send(&mut editor, "{down}");
+        let screen = draw(&mut editor, 160, 30);
+        assert!(
+            screen.contains("model = \"gpt-6.2-sol\", reasoning_effort = \"xhigh\""),
+            "{screen}"
+        );
+        // A name-only worker shows no inherited parameters on its Launch line.
+        send(&mut editor, "{up}");
+        let screen = draw(&mut editor, 160, 30);
+        assert!(
+            screen.contains("spawn_agent task_name = \"dev\", fork_turns = \"none\""),
+            "{screen}"
+        );
+        assert!(
+            !screen.contains("task_name = \"dev\", fork_turns = \"none\", model"),
+            "{screen}"
+        );
+
         // The reviewer's model can go back to the coordinator's.
         send(&mut editor, "{down}{left}{enter}1{enter}");
         assert_eq!(editor.config.codex_workers[1].model, None);
         assert_eq!(editor.config.codex_workers.len(), 2);
 
-        // A profile sets the workers too, by duty.
+        // A profile sets the roles only; subagents keep their values.
+        send(&mut editor, "{left}{enter}2{enter}");
+        let before = editor.config.codex_workers.clone();
         editor.apply_profile(Profile::Quality);
+        assert_eq!(editor.config.codex_workers, before);
         assert!(
             editor
-                .config
-                .codex_workers
-                .iter()
-                .all(|w| w.model.is_some()),
+                .status
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("subagents keep their own values"),
             "{:?}",
-            editor.config.codex_workers
+            editor.status
         );
         Config::parse(&editor.text(), root).unwrap();
+    }
+
+    #[test]
+    fn inline_codex_workers_are_edited_in_place() {
+        let root = Path::new("/r/cx");
+        let text = "version = 1\nkind = \"codex\"\ncodex_tree = true\n\
+                    codex_workers = [{ name = \"dev\", model = \"gpt-6-luna\" }]\n\
+                    [workspace]\nlabel = \"cx\"\n[board]\ntab = \"cx-status\"\nwriter = \"cx-lead\"\n\
+                    [[roles]]\nname = \"cx-lead\"\nprompt = \"Lead.\"\n";
+        let mut editor = Editor::new(root, text).unwrap();
+        let screen = draw(&mut editor, 120, 30);
+        // Its own value, not an inherited one.
+        assert!(
+            screen.contains("gpt-6-luna") && !screen.contains("↳ gpt-6-luna"),
+            "{screen}"
+        );
+        send(&mut editor, "{down}{down}{right}{right}{enter}2{enter}");
+        assert!(editor.dirty(), "{}", editor.text());
+        assert!(editor.config.codex_workers[0].reasoning_effort.is_some());
+    }
+
+    #[test]
+    fn tree_crews_still_accept_agent_edits_that_stay_valid() {
+        let root = Path::new("/r/cx");
+        let text = "version = 1\ncodex_tree = true\n[workspace]\nlabel = \"cx\"\n[board]\n\
+                    tab = \"cx-status\"\nwriter = \"cx-lead\"\n[[roles]]\nname = \"cx-lead\"\n\
+                    kind = \"codex\"\nprompt = \"Lead.\"\n";
+        let mut editor = Editor::new(root, text).unwrap();
+        // Defaults row: claude (index 0) -> codex (index 1) keeps a valid tree.
+        send(&mut editor, "{enter}2{enter}");
+        assert_eq!(editor.config.kind, Kind::Codex, "{:?}", editor.status);
+        assert!(editor.dirty());
     }
 }

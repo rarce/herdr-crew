@@ -196,7 +196,7 @@ herdr-crew init --agent codex --preset review --topology tree --yes
 
 In tree mode, Herdr starts one Codex coordinator tab and the status board tab, without `[worktrees]` or a Git remote requirement. The coordinator spawns manifest worker roles as native subagents in the same collaboration tree (`spawn_agent` / `followup_task` / `list_agents`); each worker's final response returns to the coordinator automatically without Herdr socket access, keeping `workspace-write` permissions intact. Inspect worker threads with Codex `/subagents`.
 
-Each worker's model and reasoning effort go in `[[codex_workers]]` (written by setup, one entry per manifest worker, and editable with `herdr-crew config`). The coordinator passes them to `spawn_agent` with `fork_turns = "none"`; a worker without them inherits the coordinator's:
+Each worker's model and reasoning effort go in `[[codex_workers]]` (written by setup, one entry per manifest worker, and editable with `herdr-crew config`). The coordinator passes them to `spawn_agent` with `fork_turns = "none"`; a worker that sets only one gets the coordinator's value for the other, and a worker that sets neither is spawned without them, so it inherits the coordinator's (or Codex's `agents.default_subagent_*` settings, if you set them). Model profiles set only the coordinator. Passing these parameters was verified with Codex 0.172.0; leave the entries empty on older versions:
 
 ```toml
 [[codex_workers]]
