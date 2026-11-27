@@ -424,7 +424,7 @@ fn commit_memory(c: &mut Config, wait: Duration) -> Result<memory::InitResult, S
         let pinned = memory::write_pin(&c.root, &write)?;
         if pinned != dir {
             if let Some(fresh) = fresh {
-                memory::remove_unused(&dir, &fresh);
+                memory::remove_unused(&dir, &fresh, &pinned);
             }
             c.memory.dir = Some(pinned.clone());
             init = memory::ensure_initialized(&pinned, c, &now_rfc3339(), wait)?;

@@ -353,6 +353,17 @@ fn create_pin(
     }
 }
 
+/// Whether `a` and `b` are the same existing directory (or either cannot be inspected, which
+/// keeps callers on the safe side).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        (Ok(_), Err(e)) if e.kind() == io::ErrorKind::NotFound => false,
+        _ => true,
+    }
+}
+
 fn same_file(file: &fs::File, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (file.metadata(), fs::symlink_metadata(path)) {
@@ -413,11 +424,11 @@ pub fn fresh(dir: &Path) -> Option<Fresh> {
 }
 
 /// Removes `dir`, created by this process and then left unused because another process pinned a
-/// different directory first, but only while no one holds its lock and it is still exactly as
+/// different directory first (`pinned`, never the same directory under another name), but only while no one holds its lock and it is still exactly as
 /// `fresh` recorded it. Returns whether it was removed; anything else keeps it, and a partial
 /// removal leaves what remains for the user to delete.
-pub fn remove_unused(dir: &Path, fresh: &Fresh) -> bool {
-    if !check_dir_not_symlink(dir).unwrap_or(false) {
+pub fn remove_unused(dir: &Path, fresh: &Fresh, pinned: &Path) -> bool {
+    if !check_dir_not_symlink(dir).unwrap_or(false) || same_dir(dir, pinned) {
         return false;
     }
     // A short wait: a writer that finishes in time has changed the contents, which keeps it.
@@ -427,7 +438,10 @@ pub fn remove_unused(dir: &Path, fresh: &Fresh) -> bool {
     if self::fresh(dir).as_ref() != Some(fresh) {
         return false;
     }
-    for (name, contents) in &fresh.0 {
+    // `project.json` goes last, so a partial removal leaves a directory herdr-crew still owns.
+    let mut entries: Vec<_> = fresh.0.iter().collect();
+    entries.sort_by_key(|(name, _)| name == "project.json");
+    for (name, contents) in entries {
         let path = dir.join(name);
         let removed = match contents {
             Some(_) => fs::remove_file(&path),
@@ -2720,19 +2734,25 @@ mod tests {
         let mem = dir.join("lost");
         ensure_initialized(&mem, &c, now, LOCK_WAIT).unwrap();
         let fresh = fresh(&mem).expect("only seeded files");
-        assert!(remove_unused(&mem, &fresh));
+        // Never the pinned directory, even under another name.
+        let alias = dir.join("alias");
+        std::os::unix::fs::symlink(&mem, &alias).unwrap();
+        assert!(!remove_unused(&mem, &fresh, &alias));
+        assert!(!remove_unused(&mem, &fresh, &mem));
+        assert!(remove_unused(&mem, &fresh, &dir.join("winner")));
         assert!(!mem.exists());
+        fs::remove_file(&alias).unwrap();
         assert!(dir.exists(), "the parent stays");
 
         // Written to since: kept.
         ensure_initialized(&mem, &c, now, LOCK_WAIT).unwrap();
         let fresh = super::fresh(&mem).unwrap();
         fs::write(mem.join("notes/n.md"), "# note\n").unwrap();
-        assert!(!remove_unused(&mem, &fresh));
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
         assert!(mem.join("notes/n.md").exists());
         fs::remove_file(mem.join("notes/n.md")).unwrap();
         fs::write(mem.join("now.md"), "edited\n").unwrap();
-        assert!(!remove_unused(&mem, &fresh));
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
         assert!(mem.join("now.md").exists());
 
         // In use by another writer: kept.
@@ -2740,17 +2760,17 @@ mod tests {
         ensure_initialized(&mem, &c, now, LOCK_WAIT).unwrap();
         let fresh = super::fresh(&mem).unwrap();
         let held = lock_memory(&mem, LOCK_WAIT).unwrap();
-        assert!(!remove_unused(&mem, &fresh));
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
         drop(held);
         assert!(mem.join("project.json").exists());
 
         // A new file, or a non-empty or unexpected subdirectory: kept.
         fs::write(mem.join("other.txt"), "x").unwrap();
-        assert!(!remove_unused(&mem, &fresh));
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
         fs::remove_file(mem.join("other.txt")).unwrap();
         fs::create_dir(mem.join("extra")).unwrap();
         assert!(super::fresh(&mem).is_none());
-        assert!(!remove_unused(&mem, &fresh));
+        assert!(!remove_unused(&mem, &fresh, &dir.join("winner")));
         assert!(mem.join("project.json").exists());
         let _ = fs::remove_dir_all(&dir);
     }
