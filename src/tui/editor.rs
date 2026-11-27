@@ -30,6 +30,9 @@ enum Column {
 
 const COLUMNS: [Column; 3] = [Column::Agent, Column::Model, Column::Effort];
 
+const WORKER_AGENT: &str =
+    "subagents run on the coordinator's agent (codex); edit their model and effort";
+
 enum Popup {
     Pick {
         title: String,
@@ -89,10 +92,21 @@ impl Editor {
         self.text() != self.saved
     }
 
+    /// Rows: the defaults, then each role, then each `[[codex_workers]]` entry.
+    fn rows(&self) -> usize {
+        1 + self.config.roles.len() + self.config.codex_workers.len()
+    }
+
     fn target(&self) -> Target {
-        match self.row {
+        self.target_at(self.row)
+    }
+
+    fn target_at(&self, row: usize) -> Target {
+        let roles = self.config.roles.len();
+        match row {
             0 => Target::Defaults,
-            i => Target::Role(i - 1),
+            i if i <= roles => Target::Role(i - 1),
+            i => Target::Worker(i - 1 - roles),
         }
     }
 
@@ -101,6 +115,17 @@ impl Editor {
         match target {
             Target::Defaults => self.config.kind,
             Target::Role(i) => self.config.roles[i].kind,
+            // Native subagents run on the coordinator's agent.
+            Target::Worker(_) => Kind::Codex,
+        }
+    }
+
+    /// The duty a target's profile values come from.
+    fn target_duty(&self, target: Target) -> Duty {
+        match target {
+            Target::Defaults => Duty::Lead,
+            Target::Role(i) => self.duty(i),
+            Target::Worker(i) => Duty::guess(&self.config.codex_workers[i].name, false, 2),
         }
     }
 
@@ -145,6 +170,19 @@ impl Editor {
                 Kind::Agy => AgentOptions::Agy(self.config.agy.clone()),
             },
             Target::Role(i) => self.config.roles[i].agent(),
+            // Unset values follow the coordinator, whose model the subagent inherits.
+            Target::Worker(i) => {
+                let worker = &self.config.codex_workers[i];
+                let coordinator = &self.config.roles[0].codex;
+                AgentOptions::Codex(crate::agent::CodexOptions {
+                    model: worker.model.clone().or_else(|| coordinator.model.clone()),
+                    reasoning_effort: worker
+                        .reasoning_effort
+                        .clone()
+                        .or_else(|| coordinator.reasoning_effort.clone()),
+                    ..Default::default()
+                })
+            }
         };
         match agent {
             AgentOptions::Claude(o) => (o.model.clone(), o.effort.clone(), o.args()),
@@ -180,19 +218,21 @@ impl Editor {
                 Span::raw(self.config.roles[i].name.clone()),
                 Span::styled(self.duty(i).as_str(), dim()),
             ),
+            Target::Worker(i) => (
+                Span::raw(format!("{} (subagent)", self.config.codex_workers[i].name)),
+                Span::styled(self.target_duty(target).as_str(), dim()),
+            ),
         };
         let kind = match (target, own_kind) {
             (_, Some(kind)) => Cell::from(kind),
             (Target::Defaults, None) => Cell::from(Span::styled("claude", dim())),
-            (Target::Role(_), None) => {
-                Cell::from(Span::styled(format!("↳ {}", agent.as_str()), dim()))
-            }
+            (_, None) => Cell::from(Span::styled(format!("↳ {}", agent.as_str()), dim())),
         };
         let own = |key: &str| config_edit::option(&self.doc, target, agent, key);
-        let default_note = if target == Target::Defaults {
-            "agent default"
-        } else {
-            "default"
+        let default_note = match target {
+            Target::Defaults => "agent default",
+            Target::Role(_) => "default",
+            Target::Worker(_) => "coordinator's",
         };
         vec![
             Cell::from(name),
@@ -206,10 +246,14 @@ impl Editor {
     fn open_picker(&mut self) {
         let target = self.target();
         let agent = self.agent_of(target);
-        let inherit_note = if target == Target::Defaults {
-            "the agent's own default"
-        } else {
-            "the project default"
+        if COLUMNS[self.column] == Column::Agent && matches!(target, Target::Worker(_)) {
+            self.status = Some((WORKER_AGENT.into(), true));
+            return;
+        }
+        let inherit_note = match target {
+            Target::Defaults => "the agent's own default",
+            Target::Role(_) => "the project default",
+            Target::Worker(_) => "the coordinator's value",
         };
         let (title, choices) = match COLUMNS[self.column] {
             Column::Agent => {
@@ -254,8 +298,29 @@ impl Editor {
         });
     }
 
+    /// Why a tree crew refused an agent change, in place of the raw validation error.
+    fn tree_agent_note(&self) -> Option<&'static str> {
+        if self.config.codex_tree {
+            Some(
+                "codex_tree crews run one Codex coordinator; to use another agent, set up the \
+                 crew again with herdr-crew init (tabs topology or another agent)",
+            )
+        } else if self.config.agy_tree {
+            Some(
+                "agy_tree crews run one agy coordinator; to use another agent, set up the crew \
+                 again with herdr-crew init",
+            )
+        } else {
+            None
+        }
+    }
+
     fn write(&mut self, value: Option<String>) {
         let target = self.target();
+        if COLUMNS[self.column] == Column::Agent && matches!(target, Target::Worker(_)) {
+            self.status = Some((WORKER_AGENT.into(), true));
+            return;
+        }
         let agent = self.agent_of(target);
         let column = COLUMNS[self.column];
         let applied = self.edit(|doc| match column {
@@ -281,26 +346,30 @@ impl Editor {
         });
         if applied {
             self.status = None;
+        } else if column == Column::Agent
+            && let Some(note) = self.tree_agent_note()
+        {
+            self.status = Some((format!("not applied: {note}"), true));
         }
     }
 
     /// Sets every role's model and effort for its agent from `profile`; `Inherit` removes them.
     fn apply_profile(&mut self, profile: Profile) {
-        let plan: Vec<(usize, Kind, Option<String>, Option<String>)> = (0..self.config.roles.len())
-            .map(|i| {
-                let kind = self.config.roles[i].kind;
-                let (model, effort) = match profile.options(kind, self.duty(i)) {
-                    AgentOptions::Claude(o) => (o.model, o.effort),
-                    AgentOptions::Codex(o) => (o.model, o.reasoning_effort),
-                    AgentOptions::Pi(o) => (o.model, o.thinking),
-                    AgentOptions::Agy(o) => (o.model, o.effort),
-                };
-                (i, kind, model, effort)
-            })
-            .collect();
+        let plan: Vec<(Target, Kind, Option<String>, Option<String>)> =
+            (0..self.config.roles.len())
+                .map(|i| {
+                    let kind = self.config.roles[i].kind;
+                    let (model, effort) = match profile.options(kind, self.duty(i)) {
+                        AgentOptions::Claude(o) => (o.model, o.effort),
+                        AgentOptions::Codex(o) => (o.model, o.reasoning_effort),
+                        AgentOptions::Pi(o) => (o.model, o.thinking),
+                        AgentOptions::Agy(o) => (o.model, o.effort),
+                    };
+                    (Target::Role(i), kind, model, effort)
+                })
+                .collect();
         let applied = self.edit(|doc| {
-            for (i, kind, model, effort) in plan {
-                let target = Target::Role(i);
+            for (target, kind, model, effort) in plan {
                 // pi keeps its provider's model: a profile never removes one it does not set.
                 if profile == Profile::Inherit || model.is_some() {
                     config_edit::set_option(doc, target, kind, "model", model.as_deref());
@@ -315,8 +384,17 @@ impl Editor {
             }
         });
         if applied {
+            // Subagents keep their values: they are set one by one, like setup does.
+            let note = if self.config.codex_workers.is_empty() {
+                ""
+            } else {
+                "; subagents keep their own values"
+            };
             self.status = Some((
-                format!("applied the {} profile to every role", profile.as_str()),
+                format!(
+                    "applied the {} profile to every role{note}",
+                    profile.as_str()
+                ),
                 false,
             ));
         }
@@ -458,10 +536,9 @@ impl Screen for Editor {
         }
         frame.render_widget(Paragraph::new(Line::from(title)), header);
 
-        let mut rows = vec![Row::new(self.row_cells(Target::Defaults))];
-        for i in 0..self.config.roles.len() {
-            rows.push(Row::new(self.row_cells(Target::Role(i))));
-        }
+        let rows: Vec<Row> = (0..self.rows())
+            .map(|row| Row::new(self.row_cells(self.target_at(row))))
+            .collect();
         let widths = [
             Constraint::Fill(3),
             Constraint::Length(11),
@@ -486,7 +563,16 @@ impl Screen for Editor {
         let target = self.target();
         let agent = self.agent_of(target);
         let (_, _, args) = self.effective(target);
-        let launch = if args.is_empty() {
+        let launch = if let Target::Worker(i) = target {
+            // What the coordinator is told to pass, not the values shown as inherited.
+            let worker = &self.config.codex_workers[i];
+            let mut params = vec![
+                format!("task_name = {:?}", worker.name),
+                "fork_turns = \"none\"".to_string(),
+            ];
+            params.extend(crate::prompt::codex_worker_args(&self.config, worker));
+            format!("spawn_agent {}", params.join(", "))
+        } else if args.is_empty() {
             format!(
                 "{} (no model flags: uses its own configuration)",
                 agent.as_str()
@@ -503,6 +589,11 @@ impl Screen for Editor {
                 "Options of {} go to [roles.{}]; ↳ marks inherited values.",
                 self.config.roles[i].name,
                 agent.as_str()
+            ),
+            Target::Worker(i) => format!(
+                "Native subagent {}: the coordinator passes these to spawn_agent; ↳ marks the \
+                 coordinator's values it inherits.",
+                self.config.codex_workers[i].name
             ),
         };
         frame.render_widget(
@@ -543,7 +634,7 @@ impl Screen for Editor {
             self.popup_key(key);
             return Flow::Stay;
         }
-        let rows = self.config.roles.len() + 1;
+        let rows = self.rows();
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
                 if !self.dirty() || self.quit_armed {
@@ -721,7 +812,7 @@ mod tests {
             send(&mut editor, "{enter}1{enter}");
             let screen = draw(&mut editor, 120, 30);
             assert!(
-                screen.contains("not applied: codex_tree requires exactly one Codex coordinator"),
+                screen.contains("codex_tree crews run one Codex coordinator"),
                 "{key}: {screen}"
             );
             assert!(!screen.contains("unsaved"), "{key}: {screen}");
@@ -729,7 +820,7 @@ mod tests {
             send(&mut editor, "{down}{enter}5{enter}");
             let screen = draw(&mut editor, 120, 30);
             assert!(
-                screen.contains("not applied: codex_tree requires exactly one Codex coordinator"),
+                screen.contains("codex_tree crews run one Codex coordinator"),
                 "{key}: {screen}"
             );
             assert!(!screen.contains("unsaved"), "{key}: {screen}");
@@ -738,5 +829,124 @@ mod tests {
             let screen = draw(&mut editor, 120, 30);
             assert!(screen.contains("unsaved"), "{key}: {screen}");
         }
+    }
+
+    #[test]
+    fn codex_tree_workers_are_rows_with_their_own_model_and_effort() {
+        let root = Path::new("/r/cx");
+        let text = "version = 1\nkind = \"codex\"\ncodex_tree = true\n[workspace]\nlabel = \"cx\"\n\
+                    [board]\ntab = \"cx-status\"\nwriter = \"cx-lead\"\n[[roles]]\nname = \"cx-lead\"\n\
+                    prompt = \"Lead.\"\n[roles.codex]\nmodel = \"gpt-6.2-astra\"\n\
+                    reasoning_effort = \"xhigh\"\n\
+                    [[codex_workers]]\nname = \"dev\"\n[[codex_workers]]\nname = \"reviewer\"\n\
+                    model = \"gpt-6.2-sol\" # keep me\n";
+        let mut editor = Editor::new(root, text).unwrap();
+        let screen = draw(&mut editor, 120, 30);
+        assert!(screen.contains("dev (subagent)"), "{screen}");
+        assert!(screen.contains("reviewer (subagent)"), "{screen}");
+        // dev inherits the coordinator's model.
+        assert!(screen.contains("↳ gpt-6.2-astra"), "{screen}");
+
+        // Its agent is the coordinator's: the Agent column explains instead of editing.
+        send(&mut editor, "{down}{down}{enter}");
+        let screen = draw(&mut editor, 120, 30);
+        assert!(
+            screen.contains("subagents run on the coordinator's agent"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("spawn_agent task_name = \"dev\""),
+            "{screen}"
+        );
+
+        // Effort column of dev: pick the first explicit effort.
+        send(&mut editor, "{right}{right}{enter}2{enter}");
+        assert!(editor.dirty());
+        assert!(editor.config.codex_workers[0].reasoning_effort.is_some());
+        // Deleting it again keeps the entry listed.
+        send(&mut editor, "{bs}");
+        assert_eq!(editor.config.codex_workers.len(), 2);
+        assert_eq!(editor.config.codex_workers[0].reasoning_effort, None);
+        assert!(
+            editor
+                .text()
+                .contains("[[codex_workers]]\nname = \"dev\"\n"),
+            "{}",
+            editor.text()
+        );
+
+        // The reviewer sets only its model: the Launch line completes the effort from the
+        // coordinator, as the prompt does.
+        send(&mut editor, "{down}");
+        let screen = draw(&mut editor, 160, 30);
+        assert!(
+            screen.contains("model = \"gpt-6.2-sol\", reasoning_effort = \"xhigh\""),
+            "{screen}"
+        );
+        // A name-only worker shows no inherited parameters on its Launch line.
+        send(&mut editor, "{up}");
+        let screen = draw(&mut editor, 160, 30);
+        assert!(
+            screen.contains("spawn_agent task_name = \"dev\", fork_turns = \"none\""),
+            "{screen}"
+        );
+        assert!(
+            !screen.contains("task_name = \"dev\", fork_turns = \"none\", model"),
+            "{screen}"
+        );
+
+        // The reviewer's model can go back to the coordinator's.
+        send(&mut editor, "{down}{left}{enter}1{enter}");
+        assert_eq!(editor.config.codex_workers[1].model, None);
+        assert_eq!(editor.config.codex_workers.len(), 2);
+
+        // A profile sets the roles only; subagents keep their values.
+        send(&mut editor, "{left}{enter}2{enter}");
+        let before = editor.config.codex_workers.clone();
+        editor.apply_profile(Profile::Quality);
+        assert_eq!(editor.config.codex_workers, before);
+        assert!(
+            editor
+                .status
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("subagents keep their own values"),
+            "{:?}",
+            editor.status
+        );
+        Config::parse(&editor.text(), root).unwrap();
+    }
+
+    #[test]
+    fn inline_codex_workers_are_edited_in_place() {
+        let root = Path::new("/r/cx");
+        let text = "version = 1\nkind = \"codex\"\ncodex_tree = true\n\
+                    codex_workers = [{ name = \"dev\", model = \"gpt-6-luna\" }]\n\
+                    [workspace]\nlabel = \"cx\"\n[board]\ntab = \"cx-status\"\nwriter = \"cx-lead\"\n\
+                    [[roles]]\nname = \"cx-lead\"\nprompt = \"Lead.\"\n";
+        let mut editor = Editor::new(root, text).unwrap();
+        let screen = draw(&mut editor, 120, 30);
+        // Its own value, not an inherited one.
+        assert!(
+            screen.contains("gpt-6-luna") && !screen.contains("↳ gpt-6-luna"),
+            "{screen}"
+        );
+        send(&mut editor, "{down}{down}{right}{right}{enter}2{enter}");
+        assert!(editor.dirty(), "{}", editor.text());
+        assert!(editor.config.codex_workers[0].reasoning_effort.is_some());
+    }
+
+    #[test]
+    fn tree_crews_still_accept_agent_edits_that_stay_valid() {
+        let root = Path::new("/r/cx");
+        let text = "version = 1\ncodex_tree = true\n[workspace]\nlabel = \"cx\"\n[board]\n\
+                    tab = \"cx-status\"\nwriter = \"cx-lead\"\n[[roles]]\nname = \"cx-lead\"\n\
+                    kind = \"codex\"\nprompt = \"Lead.\"\n";
+        let mut editor = Editor::new(root, text).unwrap();
+        // Defaults row: claude (index 0) -> codex (index 1) keeps a valid tree.
+        send(&mut editor, "{enter}2{enter}");
+        assert_eq!(editor.config.kind, Kind::Codex, "{:?}", editor.status);
+        assert!(editor.dirty());
     }
 }

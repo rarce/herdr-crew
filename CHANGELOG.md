@@ -10,6 +10,21 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Added
+
+- Codex tree crews (`codex_tree = true`) can give each native subagent its own model and
+  reasoning effort in `[[codex_workers]]`; the coordinator passes them to `spawn_agent`
+  (a worker that sets one gets the coordinator's value for the other). `init` and first-time
+  `up` now list the subagents next to the lead (the wizard showed only the lead) and write one
+  entry per manifest worker; `herdr-crew config` shows them as editable rows. Profiles set only
+  the coordinator, so subagents keep inheriting its model unless you set theirs: passing
+  `model`/`reasoning_effort` to `spawn_agent` was verified with Codex 0.172.0 only.
+
+### Fixed
+
+- `herdr-crew config` on a tree crew explains why an agent change is refused (re-run `init`
+  instead) rather than showing only the validation error.
+
 ## [0.14.2] - 2026-11-26
 
 ### Fixed

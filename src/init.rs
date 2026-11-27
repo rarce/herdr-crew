@@ -171,12 +171,11 @@ pub(crate) fn is_codex_tree(agent: Kind, preset: Preset, topology: Topology) -> 
     supports_codex_tree(agent, preset) && topology == Topology::Tree
 }
 
-pub(crate) fn configured_roles(
-    agent: Kind,
-    preset: Preset,
-    topology: Topology,
-) -> &'static [(&'static str, Duty)] {
-    if effective_topology(agent, preset, topology) == Topology::Tree {
+/// The roles whose model and effort setup asks for: every preset role, except that agy tree
+/// workers have no launch options of their own.
+pub(crate) fn configured_roles(agent: Kind, preset: Preset) -> &'static [(&'static str, Duty)] {
+    // Codex tree workers get their own model and effort through `[[codex_workers]]`.
+    if uses_agy_tree(agent, preset) {
         &preset.roles()[..1]
     } else {
         preset.roles()
@@ -236,12 +235,31 @@ impl Selection {
 
     /// Whether any configured role's effective model or effort differs from the selected profile.
     pub fn is_customized(&self) -> bool {
-        configured_roles(self.agent, self.preset, self.topology)
+        configured_roles(self.agent, self.preset)
             .iter()
             .any(|(suffix, duty)| {
-                role_options(self.agent, self.profile, *duty, self.overrides.get(*suffix))
-                    != self.profile.options(self.agent, *duty)
+                let profile =
+                    role_profile(self.agent, self.preset, self.topology, *duty, self.profile);
+                role_options(self.agent, profile, *duty, self.overrides.get(*suffix))
+                    != profile.options(self.agent, *duty)
             })
+    }
+}
+
+/// The profile that sets a role's model and effort during setup. Codex tree subagents get no
+/// profile values: they inherit the coordinator's unless the user sets them explicitly, so a
+/// default setup never asks `spawn_agent` for parameters older Codex versions may not accept.
+pub(crate) fn role_profile(
+    agent: Kind,
+    preset: Preset,
+    topology: Topology,
+    duty: Duty,
+    profile: Profile,
+) -> Profile {
+    if is_codex_tree(agent, preset, topology) && duty != Duty::Lead {
+        Profile::Inherit
+    } else {
+        profile
     }
 }
 
@@ -339,6 +357,17 @@ struct Template {
     #[serde(skip_serializing_if = "Option::is_none")]
     worktrees: Option<Worktrees>,
     roles: Vec<Role>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    codex_workers: Vec<CodexWorker>,
+}
+
+#[derive(Serialize)]
+struct CodexWorker {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -756,10 +785,27 @@ fn choose(
     {
         let efforts_hint = models::efforts(agent).join(", ");
         let effort_key = models::effort_key(agent);
-        for (suffix, duty) in configured_roles(agent, preset, topology) {
+        for (suffix, duty) in configured_roles(agent, preset) {
+            let profile = role_profile(agent, preset, topology, *duty, profile);
+            let worker = is_codex_tree(agent, preset, topology) && *duty != Duty::Lead;
+            let inherit = if worker {
+                "the coordinator's"
+            } else {
+                "agent default"
+            };
             let (default_model, default_effort) =
                 options_model_effort(&profile.options(agent, *duty));
-            writeln!(output, "\nRole {name}-{suffix} ({}):", duty.as_str()).map_err(io_fail)?;
+            if worker {
+                writeln!(
+                    output,
+                    "\nSubagent {} ({}; unset values follow the coordinator):",
+                    suffix.replace('-', "_"),
+                    duty.as_str()
+                )
+                .map_err(io_fail)?;
+            } else {
+                writeln!(output, "\nRole {name}-{suffix} ({}):", duty.as_str()).map_err(io_fail)?;
+            }
             let catalog = models::catalog(agent);
             if !catalog.is_empty() {
                 let names: Vec<&str> = catalog.iter().map(|(m, _)| *m).collect();
@@ -769,13 +815,14 @@ fn choose(
                 let model_answer = ask(
                     input,
                     output,
-                    "  Model (name or 'inherit' for agent default)",
+                    &format!("  Model (name or 'inherit' for {inherit})"),
                     Some(default_model.as_deref().unwrap_or("inherit")),
                 )?;
                 let model = (!model_answer.eq_ignore_ascii_case("inherit")
                     && !model_answer.is_empty())
                 .then_some(model_answer);
-                let effort_label = format!("  {effort_key} ({efforts_hint}, or 'inherit')");
+                let effort_label =
+                    format!("  {effort_key} ({efforts_hint}, or 'inherit' for {inherit})");
                 let effort_answer = ask(
                     input,
                     output,
@@ -1107,6 +1154,28 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
     } else {
         "No extra instances are enabled in this configuration. Reconsider the workflow and role ownership before expanding the crew."
     };
+    // Every manifest worker gets an entry, also without options, so that `config` lists it.
+    let codex_workers = if is_codex_tree {
+        selection.preset.roles()[1..]
+            .iter()
+            .map(|(suffix, duty)| {
+                // Only explicit choices: the profile leaves subagents on the coordinator's.
+                let (model, reasoning_effort) = options_model_effort(&role_options(
+                    selection.agent,
+                    Profile::Inherit,
+                    *duty,
+                    selection.overrides.get(*suffix),
+                ));
+                CodexWorker {
+                    name: suffix.replace('-', "_"),
+                    model,
+                    reasoning_effort,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let template = Template {
         kind: (selection.agent != crate::agent::Kind::Claude).then_some(selection.agent),
         codex_tree: is_codex_tree.then_some(true),
@@ -1136,6 +1205,7 @@ pub(crate) fn render(selection: &Selection, root: &Path) -> Result<String, Fail>
             })
             .flatten(),
         roles,
+        codex_workers,
     };
     let models_note = if selection.is_customized() {
         format!("{} customized", selection.profile.as_str())
@@ -2178,6 +2248,19 @@ mod tests {
             assert_eq!(config.kind, Kind::Codex);
             assert!(config.worktrees.is_none());
             assert_eq!(config.roles.len(), 1);
+            // Default setup lists every subagent without spawn_agent options.
+            assert_eq!(
+                config.codex_workers.len(),
+                preset.roles().len() - 1,
+                "{text}"
+            );
+            assert!(
+                config
+                    .codex_workers
+                    .iter()
+                    .all(|w| w.model.is_none() && w.reasoning_effort.is_none()),
+                "{text}"
+            );
             assert_eq!(config.roles[0].name, "acme-lead");
             assert!(!config.roles[0].worktree);
             assert!(!config.roles[0].extra);
@@ -2217,18 +2300,24 @@ mod tests {
         );
         assert!(tabs_out.contains("Use separate worktrees"), "{tabs_out}");
 
-        // Choosing tree (2) skips Worktrees and Base, and only customizes coordinator.
+        // Choosing tree (2) skips Worktrees and Base; customizing covers the coordinator and
+        // its native subagents.
         // name=demo, workflow=review(2), agent=codex, topology=tree(2), profile=balanced(3),
-        // customize=y -> only lead (gpt-6.2-astra, xhigh), ignore=n
+        // customize=y -> lead (gpt-6.2-astra, xhigh), dev (gpt-6-luna, medium),
+        // reviewer (inherit, keep default), ignore=n
         let (tree_sel, tree_out) = choose_with(
             &root,
             &Options::default(),
-            "demo\n2\ncodex\n2\n3\ny\ngpt-6.2-astra\nxhigh\nn\n",
+            "demo\n2\ncodex\n2\n3\ny\ngpt-6.2-astra\nxhigh\ngpt-6-luna\nmedium\ninherit\n\nn\n",
         );
         assert!(tree_sel.is_codex_tree());
         assert!(tree_sel.base.is_none());
         assert!(tree_out.contains("Role demo-lead (lead):"), "{tree_out}");
-        assert!(!tree_out.contains("Role demo-dev"), "{tree_out}");
+        assert!(tree_out.contains("Subagent dev (developer"), "{tree_out}");
+        assert!(
+            tree_out.contains("Subagent reviewer (reviewer"),
+            "{tree_out}"
+        );
         assert!(!tree_out.contains("Use separate worktrees"), "{tree_out}");
         let text = ok(render(&tree_sel, &root));
         let config = config::Config::parse(&text, &root).unwrap();
@@ -2241,6 +2330,25 @@ mod tests {
         assert_eq!(
             config.roles[0].codex.reasoning_effort.as_deref(),
             Some("xhigh")
+        );
+        let workers: Vec<_> = config
+            .codex_workers
+            .iter()
+            .map(|w| {
+                (
+                    w.name.as_str(),
+                    w.model.as_deref(),
+                    w.reasoning_effort.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            workers,
+            [
+                ("dev", Some("gpt-6-luna"), Some("medium")),
+                // The profile leaves subagents on the coordinator's values.
+                ("reviewer", None, None),
+            ]
         );
 
         // With --base on Codex review, selecting tree at Topology reprompts and accepts tabs.

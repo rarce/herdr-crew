@@ -203,7 +203,7 @@ impl Wizard {
     }
 
     fn configured_roles(&self) -> &'static [(&'static str, Duty)] {
-        init::configured_roles(self.agent(), self.preset(), self.topology())
+        init::configured_roles(self.agent(), self.preset())
     }
 
     fn uses_worktrees(&self) -> bool {
@@ -265,10 +265,26 @@ impl Wizard {
         self.popup = None;
     }
 
+    /// The profile behind a row: Codex tree subagents follow the coordinator instead.
+    fn role_profile(&self, duty: Duty) -> Profile {
+        init::role_profile(
+            self.agent(),
+            self.preset(),
+            self.topology(),
+            duty,
+            self.profile(),
+        )
+    }
+
+    /// Whether a row is a Codex tree subagent rather than a crew role.
+    fn is_worker(&self, duty: Duty) -> bool {
+        self.is_codex_tree() && duty != Duty::Lead
+    }
+
     fn is_customized(&self) -> bool {
         let agent = self.agent();
-        let profile = self.profile();
         self.configured_roles().iter().any(|(suffix, duty)| {
+            let profile = self.role_profile(*duty);
             init::role_options(agent, profile, *duty, self.overrides.get(*suffix))
                 != profile.options(agent, *duty)
         })
@@ -278,7 +294,7 @@ impl Wizard {
         let (suffix, duty) = self.configured_roles()[row];
         let options = init::role_options(
             self.agent(),
-            self.profile(),
+            self.role_profile(duty),
             duty,
             self.overrides.get(suffix),
         );
@@ -288,7 +304,11 @@ impl Wizard {
     fn open_role_picker(&mut self) {
         let agent = self.agent();
         let (current_model, current_effort) = self.role_effective(self.role_row);
-        let inherit_note = "the agent's own default";
+        let inherit_note = if self.is_worker(self.configured_roles()[self.role_row].1) {
+            "the coordinator's value"
+        } else {
+            "the agent's own default"
+        };
         let (title, choices, current) = match ROLE_COLUMNS[self.role_col] {
             RoleColumn::Model => (
                 format!("{} model", agent.as_str()),
@@ -315,8 +335,8 @@ impl Wizard {
 
     fn apply_role_value(&mut self, value: Option<String>) {
         let agent = self.agent();
-        let profile = self.profile();
         let (suffix, duty) = self.configured_roles()[self.role_row];
+        let profile = self.role_profile(duty);
         let (base_model, base_effort) = init::options_model_effort(&profile.options(agent, duty));
         let mut candidate = self.overrides.get(suffix).cloned().unwrap_or_default();
         match ROLE_COLUMNS[self.role_col] {
@@ -582,11 +602,18 @@ impl Wizard {
     /// The configured roles with the model and effort the profile (plus overrides) gives them.
     fn roles_table(&self) -> Table<'static> {
         let agent = self.agent();
-        let profile = self.profile();
         let rows: Vec<Row> = self
             .configured_roles()
             .iter()
             .map(|(suffix, duty)| {
+                // Codex tree workers are native subagents: unset values follow the coordinator.
+                let worker = self.is_worker(*duty);
+                let profile = self.role_profile(*duty);
+                let unset = if worker {
+                    "coordinator's"
+                } else {
+                    "agent default"
+                };
                 let (base_model, base_effort) =
                     init::options_model_effort(&profile.options(agent, *duty));
                 let options =
@@ -597,12 +624,17 @@ impl Wizard {
                     match value {
                         Some(v) if changed => Cell::from(Span::styled(v, accent())),
                         Some(v) => Cell::from(v),
-                        None if changed => Cell::from(Span::styled("agent default", accent())),
-                        None => Cell::from(Span::styled("agent default", dim())),
+                        None if changed => Cell::from(Span::styled(unset, accent())),
+                        None => Cell::from(Span::styled(unset, dim())),
                     }
                 };
+                let name = if worker {
+                    format!("{} (subagent)", suffix.replace('-', "_"))
+                } else {
+                    format!("{}-{suffix}", self.name.value)
+                };
                 Row::new(vec![
-                    Cell::from(format!("{}-{suffix}", self.name.value)),
+                    Cell::from(name),
                     Cell::from(duty.as_str()),
                     cell(model, base_model),
                     cell(effort, base_effort),
@@ -764,7 +796,9 @@ impl Wizard {
                     .iter()
                     .map(|p| (p.as_str().to_string(), p.description().to_string()))
                     .collect();
-                let prompt_text = if self.is_tree() {
+                let prompt_text = if self.is_codex_tree() {
+                    "Model and effort for the coordinator and its subagents"
+                } else if self.is_tree() {
                     "Model and effort for the coordinator role"
                 } else {
                     "Models and effort for each role"
@@ -787,8 +821,12 @@ impl Wizard {
                 } else {
                     frame.render_widget(self.roles_table(), table);
                 }
-                let foot_text = if self.models_focus == ModelsFocus::Roles {
+                let foot_text = if self.models_focus == ModelsFocus::Roles && self.is_codex_tree() {
+                    "Editing roles: Enter changes a cell, Del uses the default (subagents: the coordinator's), r resets to profile, Esc/Tab finishes."
+                } else if self.models_focus == ModelsFocus::Roles {
                     "Editing roles: Enter changes a cell, Del uses agent default, r resets to profile, Esc/Tab finishes."
+                } else if self.is_codex_tree() {
+                    "The profile sets the coordinator; subagents use its model unless you set theirs. Press e or Tab to customize, or Enter to continue."
                 } else if self.agent() == Kind::Pi && self.profile() != Profile::Inherit {
                     "pi keeps your provider's model; press e or Tab to customize roles."
                 } else if self.is_tree() {
@@ -1484,6 +1522,15 @@ mod tests {
         assert_eq!(wizard.step, Step::Models);
         let models_screen = draw(&mut wizard, 110, 28);
         assert!(models_screen.contains("-lead"), "{models_screen}");
+        // Native subagents get their own model and effort rows.
+        assert!(
+            models_screen.contains("dev_a (subagent)"),
+            "{models_screen}"
+        );
+        assert!(
+            models_screen.contains("reviewer (subagent)"),
+            "{models_screen}"
+        );
         assert!(!models_screen.contains("-dev-a"), "{models_screen}");
         let (selection, text) = finish(&mut wizard, "{enter}{enter}{enter}");
         assert!(selection.is_codex_tree());
@@ -1492,6 +1539,12 @@ mod tests {
         assert!(config.codex_tree);
         assert!(config.worktrees.is_none());
         assert_eq!(config.roles.len(), 1);
+        let workers: Vec<&str> = config
+            .codex_workers
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect();
+        assert_eq!(workers, ["dev_a", "dev_b", "reviewer"]);
 
         // Codex review + tree skips Worktrees and Base straight to Ignore.
         let review_opts = Options {
