@@ -416,10 +416,16 @@ fn prepare_memory(c: &Config) -> Result<Config, Fail> {
 /// another process created the pin first, its directory is initialized and used instead.
 fn commit_memory(c: &mut Config, wait: Duration) -> Result<memory::InitResult, String> {
     let dir = c.memory_ready()?.expect("wiki mode").to_path_buf();
+    let existed = dir.exists();
     let mut init = memory::ensure_initialized(&dir, c, &now_rfc3339(), wait)?;
     if let Some(write) = c.memory.pin.take() {
+        // Taken before the pin is written: once it names another directory, this one is unused.
+        let fresh = (!existed).then(|| memory::fresh(&dir)).flatten();
         let pinned = memory::write_pin(&c.root, &write)?;
         if pinned != dir {
+            if let Some(fresh) = fresh {
+                memory::remove_unused(&dir, &fresh);
+            }
             c.memory.dir = Some(pinned.clone());
             init = memory::ensure_initialized(&pinned, c, &now_rfc3339(), wait)?;
         }

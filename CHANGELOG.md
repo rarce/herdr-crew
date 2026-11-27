@@ -10,6 +10,11 @@ change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- Wiki memory: when two processes with different environments pin the memory directory at
+  the same time, the loser removes the directory it had just created, as long as nothing used it.
+
 ## [0.14.1] - 2026-11-26
 
 ### Fixed
