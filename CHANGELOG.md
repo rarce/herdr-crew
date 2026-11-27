@@ -10,6 +10,8 @@ change between minor versions.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-27
+
 ### Added
 
 - Codex tree crews (`codex_tree = true`) can give each native subagent its own model and
@@ -492,7 +494,8 @@ herdr workspace from a versioned `.herdr/crew.toml`, with optional Git worktrees
 extra instances, a startup hook that brings a project up from plain `herdr` and repairs
 it on restore, and a terminal status board fed by `.herdr/status.json`.
 
-[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/rarce/herdr-crew/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/rarce/herdr-crew/compare/v0.14.2...v0.15.0
 [0.14.2]: https://github.com/rarce/herdr-crew/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/rarce/herdr-crew/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/rarce/herdr-crew/compare/v0.13.0...v0.14.0
